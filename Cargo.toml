@@ -5,7 +5,7 @@ edition = "2021"
 license = "GPL-3.0-only"
 description = "A library to read and write Android disassembly smali files."
 readme = "README.MD"
-repository = "https://github.com/azw412/smali"
+repository = "https://github.com/azw413/smali"
 keywords = ["android", "dex", "dalvik", "java", "smali"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
