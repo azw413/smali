@@ -1,7 +1,7 @@
 
 use nom::bytes::complete::{escaped, is_not, tag, take_while};
 use nom::branch::{ alt };
-use nom::character::complete::{alphanumeric1, char, multispace0, multispace1, newline, none_of, not_line_ending, one_of};
+use nom::character::complete::{alphanumeric1, char, multispace0, multispace1, space0, newline, none_of, not_line_ending, one_of};
 use nom::combinator::value;
 use nom::Err::Failure;
 use nom::error::{Error, ErrorKind};
@@ -398,7 +398,7 @@ fn parse_method(smali: &str) -> IResult<&str, SmaliMethod>
     let (o, name) = take_while(|c| c != '(')(input)?;
     let (o, ms) = parse_methodsignature(o)?;
 
-    let (o, type_sig) = take_until_eol(o)?;
+    let (o, _) = pair(space0, newline)(o)?;
 
     // locals
     let l = ws(tag(".locals"))(o);
