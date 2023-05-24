@@ -58,6 +58,7 @@ fn parse_modifiers(smali: &str) -> IResult<&str, Vec<Modifier>>
                                               ws(tag("static ")),
                                               ws(tag("final ")),
                                               ws(tag("abstract ")),
+                                              ws(tag("interface ")),
                                               ws(tag("synthetic ")),
                                               ws(tag("transient ")),
                                               ws(tag("volatile ")),
@@ -580,7 +581,7 @@ pub(crate) fn parse_class(smali: &str) -> IResult<&str, SmaliClass>
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use crate::smali_parse::{quoted, parse_annotation_element, parse_class, parse_class_line, parse_enum, parse_field, parse_implements_line, parse_java_array, parse_super_line, take_until_eol, parse_typesignature, parse_methodsignature};
+    use super::*;
     use crate::types::{AnnotationValue};
 
     #[test]
@@ -623,8 +624,9 @@ mod tests {
 
     #[test]
     fn test_parse_class_line() {
-        let (_, l) = parse_class_line(".class public final Lokhttp3/OkHttpClient;\n").unwrap();
-        println!("{:?}", l);
+        let (_, (modifiers, type_name)) = parse_class_line(".class public final interface Lokhttp3/OkHttpClient;\n").unwrap();
+        assert_eq!(modifiers, [Modifier::Public, Modifier::Final, Modifier::Interface]);
+        assert_eq!(type_name, "Lokhttp3/OkHttpClient;");
     }
 
     #[test]

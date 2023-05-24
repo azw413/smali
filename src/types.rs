@@ -160,7 +160,7 @@ impl TypeSignature {
 /// Simple enum to represent Java method, field and class modifiers
 ///
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Modifier {
     Public,
     Protected,
@@ -168,6 +168,7 @@ pub enum Modifier {
     Static,
     Final,
     Abstract,
+    Interface,
     Synthetic,
     Transient,
     Volatile,
@@ -177,40 +178,42 @@ pub enum Modifier {
 }
 
 impl Modifier {
-    pub fn from_str(s: &str) -> Modifier
+    pub fn from_str(s: &str) -> Self
     {
         match s {
-            "public" => Modifier::Public,
-            "protected" => Modifier::Protected,
-            "private" => Modifier::Private,
-            "static" => Modifier::Static,
-            "final" => Modifier::Final,
-            "abstract" => Modifier::Abstract,
-            "synthetic" => Modifier::Synthetic,
-            "transient" => Modifier::Transient,
-            "volatile" => Modifier::Volatile,
-            "synchronized" => Modifier::Synchronized,
-            "native" => Modifier::Native,
-            "varargs" => Modifier::Varargs,
-            _ => Modifier::Public
+            "public" => Self::Public,
+            "protected" => Self::Protected,
+            "private" => Self::Private,
+            "static" => Self::Static,
+            "final" => Self::Final,
+            "abstract" => Self::Abstract,
+            "interface" => Self::Interface,
+            "synthetic" => Self::Synthetic,
+            "transient" => Self::Transient,
+            "volatile" => Self::Volatile,
+            "synchronized" => Self::Synchronized,
+            "native" => Self::Native,
+            "varargs" => Self::Varargs,
+            _ => Self::Public
         }
     }
 
     pub fn to_str(&self) -> &str
     {
         match self {
-            Modifier::Public => "public",
-            Modifier::Protected => "protected",
-            Modifier::Private => "private",
-            Modifier::Static => "static",
-            Modifier::Final => "final",
-            Modifier::Abstract => "abstract",
-            Modifier::Synthetic => "synthetic",
-            Modifier::Transient => "transient",
-            Modifier::Volatile => "volatile",
-            Modifier::Synchronized => "synchronized",
-            Modifier::Native => "native",
-            Modifier::Varargs => "varargs",
+            Self::Public => "public",
+            Self::Protected => "protected",
+            Self::Private => "private",
+            Self::Static => "static",
+            Self::Final => "final",
+            Self::Abstract => "abstract",
+            Self::Interface => "interface",
+            Self::Synthetic => "synthetic",
+            Self::Transient => "transient",
+            Self::Volatile => "volatile",
+            Self::Synchronized => "synchronized",
+            Self::Native => "native",
+            Self::Varargs => "varargs",
         }
     }
 }
