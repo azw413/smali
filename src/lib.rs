@@ -2,7 +2,6 @@
 //!
 //! A library for reading and writing Android smali files
 //!
-use std::collections::HashSet;
 use std::path::PathBuf;
 use crate::types::{SmaliClass, SmaliError};
 

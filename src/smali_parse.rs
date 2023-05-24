@@ -4,7 +4,7 @@ use nom::branch::{ alt };
 use nom::character::complete::{alphanumeric1, char, multispace0, multispace1, newline, none_of, not_line_ending, one_of};
 use nom::combinator::value;
 use nom::Err::Failure;
-use nom::error::{Error, ErrorKind, ParseError};
+use nom::error::{Error, ErrorKind};
 use nom::{Err, IResult};
 use nom::multi::{many0};
 use nom::sequence::{delimited, pair};
@@ -100,7 +100,7 @@ fn parse_typesignature(smali: &str) -> IResult<&str, TypeSignature>
     }
     // Array
     let b:IResult<&str, &str> = tag("[")(smali);
-    if let IResult::Ok((o, t)) = b
+    if let IResult::Ok((o, _)) = b
     {
         let (o, t) = parse_typesignature(o)?;
         return IResult::Ok((o, TypeSignature::Array(Box::new(t))))
