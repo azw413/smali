@@ -2,7 +2,6 @@
 //!
 //! A library for reading and writing Android smali files
 //!
-use std::collections::HashSet;
 use std::path::PathBuf;
 use crate::types::{SmaliClass, SmaliError};
 
@@ -55,7 +54,6 @@ pub fn find_smali_files(dir: &PathBuf) -> Result<Vec<SmaliClass>, SmaliError>
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::path::Path;
     use crate::types::{MethodSignature, ObjectIdentifier, SmaliClass, TypeSignature};
 

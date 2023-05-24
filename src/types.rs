@@ -510,7 +510,7 @@ impl SmaliClass {
 
         // Create package dir structure
         let class_name = self.name.as_java_type();
-        let mut package_dirs: Vec<&str> = class_name.split('.').collect();
+        let package_dirs: Vec<&str> = class_name.split('.').collect();
         let mut dir = PathBuf::from(path);
         for p in package_dirs[0..package_dirs.len()-1].to_vec()
         {
