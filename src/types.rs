@@ -253,20 +253,22 @@ impl MethodSignature {
     }
 }
 
-/// Simple enum to represent annotation visibility: system or runtime.
+/// Simple enum to represent annotation visibility: build, runtime, system.
 ///
 #[derive(Debug)]
 pub enum AnnotationVisibility {
-    System,
-    Runtime
+    Build,
+    Runtime,
+    System
 }
 
 impl AnnotationVisibility {
     pub fn to_str(&self) -> &str
     {
         match self {
-            AnnotationVisibility::System => "system",
-            AnnotationVisibility::Runtime => "runtime"
+            Self::Build => "build",
+            Self::Runtime => "runtime",
+            Self::System => "system"
         }
     }
 }
@@ -282,11 +284,12 @@ pub enum AnnotationValue {
 }
 
 impl AnnotationVisibility {
-    pub fn from_str(s: &str) -> AnnotationVisibility
+    pub fn from_str(s: &str) -> Self
     {
         match s {
-            "system" => AnnotationVisibility::System,
-            _ => AnnotationVisibility::Runtime
+            "build" => Self::Build,
+            "system" => Self::System,
+            _ => Self::Runtime
         }
     }
 }

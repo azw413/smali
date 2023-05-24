@@ -73,8 +73,9 @@ fn parse_modifiers(smali: &str) -> IResult<&str, Vec<Modifier>>
 fn parse_visibility(smali: &str) -> IResult<&str, AnnotationVisibility>
 {
     let (input, visibility) =
-        alt(( ws(tag("system")),
-              ws(tag("runtime"))
+        alt(( ws(tag("build")),
+              ws(tag("runtime")),
+              ws(tag("system"))
         ))(smali)?;
     IResult::Ok((input, AnnotationVisibility::from_str(visibility)))
 }
@@ -580,7 +581,7 @@ pub(crate) fn parse_class(smali: &str) -> IResult<&str, SmaliClass>
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use crate::smali_parse::{quoted, parse_annotation_element, parse_class, parse_class_line, parse_enum, parse_field, parse_implements_line, parse_java_array, parse_super_line, take_until_eol, parse_typesignature, parse_methodsignature};
+    use super::*;
     use crate::types::{AnnotationValue};
 
     #[test]
@@ -648,6 +649,16 @@ mod tests {
             AnnotationValue::Single(s) => { assert_eq!( s, "0x1".to_string()); }
             _ => { println!("{:?}", a); }
         }
+    }
+
+    #[test]
+    fn test_parse_annotation_build() {
+        let (_, a) = parse_annotation(".annotation build Landroid/annotation/TargetApi;\nvalue = 0x13\n.end annotation", false ).unwrap();
+        assert!(matches!(a.visibility, AnnotationVisibility::Build));
+        assert!(matches!(a.annotation_type, TypeSignature::Object(t) if t == ObjectIdentifier::from_java_type("android.annotation.TargetApi")));
+        assert_eq!(a.elements.len(), 1);
+        assert_eq!(a.elements[0].name, "value");
+        assert!(matches!(&a.elements[0].value, AnnotationValue::Single(v) if v == "0x13"));
     }
 
     #[test]
