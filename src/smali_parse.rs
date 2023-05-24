@@ -58,6 +58,7 @@ fn parse_modifiers(smali: &str) -> IResult<&str, Vec<Modifier>>
                                               ws(tag("static ")),
                                               ws(tag("final ")),
                                               ws(tag("abstract ")),
+                                              ws(tag("interface ")),
                                               ws(tag("synthetic ")),
                                               ws(tag("transient ")),
                                               ws(tag("volatile ")),
@@ -624,8 +625,9 @@ mod tests {
 
     #[test]
     fn test_parse_class_line() {
-        let (_, l) = parse_class_line(".class public final Lokhttp3/OkHttpClient;\n").unwrap();
-        println!("{:?}", l);
+        let (_, (modifiers, type_name)) = parse_class_line(".class public final interface Lokhttp3/OkHttpClient;\n").unwrap();
+        assert_eq!(modifiers, [Modifier::Public, Modifier::Final, Modifier::Interface]);
+        assert_eq!(type_name, "Lokhttp3/OkHttpClient;");
     }
 
     #[test]
