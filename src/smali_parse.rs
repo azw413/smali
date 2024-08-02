@@ -64,7 +64,12 @@ fn parse_modifiers(smali: &str) -> IResult<&str, Vec<Modifier>>
                                               ws(tag("volatile ")),
                                               ws(tag("synchronized ")),
                                               ws(tag("native ")),
-                                              ws(tag("varargs "))
+                                              ws(tag("varargs ")),
+                                              ws(tag("annotation ")),
+                                              ws(tag("enum ")),
+                                              ws(tag("strict ")),
+                                              ws(tag("bridge ")),
+                                              ws(tag("constructor "))
                                         )))(smali)?;
     let mut v = vec![];
     for m in mods { v.push(Modifier::from_str(m.trim())); }

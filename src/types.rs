@@ -493,18 +493,24 @@ pub(crate) fn parse_methodsignature(smali: &str) -> IResult<&str, MethodSignatur
 #[derive(Debug, PartialEq)]
 pub enum Modifier {
     Public,
-    Protected,
     Private,
+    Protected,
     Static,
     Final,
-    Abstract,
-    Interface,
-    Synthetic,
-    Transient,
-    Volatile,
     Synchronized,
+    Volatile,
+    Bridge,
+    Transient,
+    Varargs,
     Native,
-    Varargs
+    Interface,
+    Abstract,
+    Strict,
+    Synthetic,
+    Annotation,
+    Enum,
+    Constructor,
+    DeclaredSynchronized
 }
 
 impl Modifier {
@@ -524,7 +530,12 @@ impl Modifier {
             "synchronized" => Self::Synchronized,
             "native" => Self::Native,
             "varargs" => Self::Varargs,
-            _ => Self::Public
+            "annotation" => Self::Annotation,
+            "enum" => Self::Enum,
+            "strict" => Self::Static,
+            "bridge" => Self::Bridge,
+            "constructor" => Self::Constructor,
+            _ => Self::Public // Fix this
         }
     }
 
@@ -544,6 +555,13 @@ impl Modifier {
             Self::Synchronized => "synchronized",
             Self::Native => "native",
             Self::Varargs => "varargs",
+            Self::Annotation => "annotation",
+            Self::Enum => "enum",
+            Self::Strict => "strict",
+            Self::Bridge => "bridge",
+            Self::Constructor => "constructor",
+            Self::DeclaredSynchronized => "synchronized"
+
         }
     }
 }

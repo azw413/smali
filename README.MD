@@ -32,7 +32,7 @@ fn process_apk(apk_file: &str) -> Result<(), Box<dyn Error>>
            // Patch all the methods returning a boolean
            for m in c.methods.iter_mut()
            {
-               if m.signature.return_type == TypeSignature::Bool && m.signature.args.len() == 0
+               if m.signature.result == TypeSignature::Bool && m.signature.args.len() == 0
                {
                    let mut new_instructions = vec![];
                    new_instructions.push(Instruction("const/4 v0, 0x0".to_string())); // Set v0 to false
