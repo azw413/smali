@@ -13,11 +13,13 @@ mod smali_write;
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 ///  use smali::find_smali_files;
+///  use std::path::PathBuf;
+///  use std::str::FromStr;
 ///
-/// let mut p = PathBuf::from_str("smali")?;
-///  let mut classes = find_smali_files(&p)?;
+///  let mut p = PathBuf::from_str("smali").unwrap();
+///  let mut classes = find_smali_files(&p).unwrap();
 ///  println!("{:} smali classes loaded.", classes.len());
 /// ```
 pub fn find_smali_files(dir: &PathBuf) -> Result<Vec<SmaliClass>, SmaliError>
@@ -76,7 +78,7 @@ mod tests {
         let t = TypeSignature::Bool;
         assert_eq!(t.to_jni(), "Z");
         let m = MethodSignature::from_jni("([I)V");
-        assert_eq!(m.return_type, TypeSignature::Void);
+        assert_eq!(m.result, TypeSignature::Void);
     }
 
     #[test]

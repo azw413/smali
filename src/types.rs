@@ -6,10 +6,16 @@ use std::error::Error;
 use std::{fmt, fs};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use nom::branch::alt;
+use nom::bytes::complete::{tag, take_while};
+use nom::character::complete::{alphanumeric0, char};
 use nom::Err::Failure;
+use nom::error::ErrorKind;
 use nom::IResult;
+use nom::multi::many0;
+use nom::sequence::terminated;
+use serde::{Deserialize, Serialize};
 use crate::smali_parse::parse_class;
-use crate::smali_parse::parse_methodsignature;
 use crate::smali_write::write_class;
 
 /* Custom error for our command helper */
@@ -42,49 +48,112 @@ impl Error for SmaliError {
 /// # Examples
 ///
 /// ```
-///  let o = ObjectIdentifier::from_java_type("com.basic.Test");
+///
+///
+/// use smali::types::ObjectIdentifier;
+///
+/// let o = ObjectIdentifier::from_java_type("com.basic.Test");
 ///  assert_eq!(o.as_java_type(), "com.basic.Test");
 ///  assert_eq!(o.as_jni_type(), "Lcom/basic/Test;");
 /// ```
-#[derive(Debug, Eq)]
-pub struct ObjectIdentifier {
-    jni_type: String
+#[derive(Debug, Eq, Serialize, Deserialize)]
+pub struct ObjectIdentifier
+{
+    pub(crate) class_name: String,
+    pub(crate) type_arguments: Option<Vec<TypeSignature>>,
+    pub(crate) suffix: Option<String>,
 }
 
-impl PartialEq<Self> for ObjectIdentifier {
-    fn eq(&self, other: &Self) -> bool {
-        self.jni_type == other.jni_type
+impl PartialEq<Self> for ObjectIdentifier
+{
+    fn eq(&self, other: &Self) -> bool
+    {
+        self.class_name == other.class_name
     }
 }
 
-impl Hash for ObjectIdentifier {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.jni_type.hash(state);
+impl Hash for ObjectIdentifier
+{
+    fn hash<H: Hasher>(&self, state: &mut H)
+    {
+        self.class_name.hash(state);
+    }
+}
+
+impl fmt::Display for ObjectIdentifier
+{
+    // This trait requires `fmt` with this exact signature.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result
+    {
+        // Write strictly the first element into the supplied output
+        // stream: `f`. Returns `fmt::Result` which indicates whether the
+        // operation succeeded or failed. Note that `write!` uses syntax which
+        // is very similar to `println!`.
+        write!(f, "{}", self.as_jni_type())
     }
 }
 
 impl ObjectIdentifier
 {
+    #[allow(dead_code)]
     pub fn from_jni_type(t: &str) -> ObjectIdentifier
     {
-        ObjectIdentifier { jni_type: t.to_string()}
+        let ts = parse_typesignature(t).unwrap();
+        if let (_, TypeSignature::Object(o)) = ts
+        {
+            o
+        }
+        else
+        {
+            ObjectIdentifier {
+                class_name: t
+                    .strip_prefix('L')
+                    .unwrap()
+                    .strip_suffix(';')
+                    .unwrap()
+                    .to_string(),
+                type_arguments: None,
+                suffix: None,
+            }
+        }
     }
 
+    #[allow(dead_code)]
     pub fn from_java_type(t: &str) -> ObjectIdentifier
     {
-        let jni_type = format!("L{};", t.replace(".", "/"));
-        ObjectIdentifier { jni_type }
+        let class_name = t.replace('.', "/");
+        ObjectIdentifier {
+            class_name,
+            type_arguments: None,
+            suffix: None,
+        }
     }
 
     pub fn as_jni_type(&self) -> String
     {
-        self.jni_type.to_string()
+        let mut s = "L".to_string();
+        s.push_str(&self.class_name);
+        if let Some(v) = &self.type_arguments
+        {
+            s.push('<');
+            for t in v
+            {
+                s.push_str(&t.to_jni());
+            }
+            s.push('>');
+        }
+        if let Some(suffix) = &self.suffix
+        {
+            s.push('.');
+            s.push_str(suffix);
+        }
+        s.push(';');
+        s
     }
 
     pub fn as_java_type(&self) -> String
     {
-        let java_type = self.jni_type[1..self.jni_type.len() - 1].replace("/", ".");
-        java_type
+        self.class_name.replace('/', ".")
     }
 }
 
@@ -98,8 +167,9 @@ impl ObjectIdentifier
 ///  let t = TypeSignature::Bool;
 ///  assert_eq!(t.to_jni(), "Z");
 /// ```
-#[derive(Debug, Eq)]
-pub enum TypeSignature {
+#[derive(Debug, Eq, Serialize, Deserialize)]
+pub enum TypeSignature
+{
     Array(Box<TypeSignature>),
     Object(ObjectIdentifier),
     Int,
@@ -111,32 +181,42 @@ pub enum TypeSignature {
     Float,
     Double,
     Void,
+    TypeParameters(Vec<TypeSignature>, Box<TypeSignature>),
+    TypeParameter(String, Box<TypeSignature>),
+    TypeVariableSignature(String),
+    WildcardPlus,
+    WildcardMinus,
+    WildcardStar,
 }
 
-impl PartialEq<Self> for TypeSignature {
-    fn eq(&self, other: &Self) -> bool {
+impl PartialEq<Self> for TypeSignature
+{
+    fn eq(&self, other: &Self) -> bool
+    {
         self.to_jni() == other.to_jni()
     }
 }
 
-impl TypeSignature {
-   pub fn from_jni(s: &str) -> TypeSignature
-   {
-       match s.chars().nth(0).unwrap()
-       {
-           '[' => TypeSignature::Array(Box::new(TypeSignature::from_jni(&s[1..].to_string()))),
-           'Z' => TypeSignature::Bool,
-           'B' => TypeSignature::Byte,
-           'C' => TypeSignature::Char,
-           'S' => TypeSignature::Short,
-           'I' => TypeSignature::Int,
-           'J' => TypeSignature::Long,
-           'F' => TypeSignature::Float,
-           'D' => TypeSignature::Double,
-           'L' => TypeSignature::Object(ObjectIdentifier::from_jni_type(s)),
-            _  => TypeSignature::Void
-       }
-   }
+impl fmt::Display for TypeSignature
+{
+    // This trait requires `fmt` with this exact signature.
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result
+    {
+        // Write strictly the first element into the supplied output
+        // stream: `f`. Returns `fmt::Result` which indicates whether the
+        // operation succeeded or failed. Note that `write!` uses syntax which
+        // is very similar to `println!`.
+        write!(f, "{}", self.to_jni())
+    }
+}
+
+impl TypeSignature
+{
+    pub fn from_jni(s: &str) -> TypeSignature
+    {
+        let (_, ts) = parse_typesignature(s).unwrap_or_else(|_| panic!("Could not parse TypeSignature: {}", s));
+        ts
+    }
 
     pub fn to_jni(&self) -> String
     {
@@ -152,9 +232,259 @@ impl TypeSignature {
             TypeSignature::Float => "F".to_string(),
             TypeSignature::Double => "D".to_string(),
             TypeSignature::Object(o) => o.as_jni_type(),
-            TypeSignature::Void => "V".to_string()
+            TypeSignature::Void => "V".to_string(),
+            TypeSignature::TypeVariableSignature(i) => format!("T{};", i),
+            TypeSignature::TypeParameters(params, rest) =>
+                {
+                    let mut s = "<".to_string();
+                    for p in params
+                    {
+                        s.push_str(&p.to_jni())
+                    }
+                    s.push('>');
+                    s.push_str(&rest.to_jni());
+                    s
+                }
+            TypeSignature::TypeParameter(identifier, signature) => format!("{}:{}", identifier, signature.to_jni()),
+            TypeSignature::WildcardPlus => "+".to_string(),
+            TypeSignature::WildcardMinus => "-".to_string(),
+            TypeSignature::WildcardStar => "*".to_string(),
         }
     }
+
+    pub fn to_java(&self) -> String
+    {
+        match self
+        {
+            TypeSignature::Array(a) => format!("{}[]", a.to_java()),
+            TypeSignature::Bool => "boolean".to_string(),
+            TypeSignature::Byte => "byte".to_string(),
+            TypeSignature::Char => "char".to_string(),
+            TypeSignature::Short => "short".to_string(),
+            TypeSignature::Int => "int".to_string(),
+            TypeSignature::Long => "long".to_string(),
+            TypeSignature::Float => "float".to_string(),
+            TypeSignature::Double => "double".to_string(),
+            TypeSignature::Object(o) => o.as_java_type(),
+            TypeSignature::Void => "void".to_string(),
+            _ => "".to_string(),
+        }
+    }
+}
+
+/// Represents a Java method signature consisting of arguments and a return type
+///
+/// # Examples
+///
+/// ```
+///  use smali::types::{MethodSignature, TypeSignature};
+///
+///  let m = MethodSignature::from_jni("([I)V");
+///  assert_eq!(m.result, TypeSignature::Void);
+/// ```
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MethodSignature
+{
+    pub(crate) type_parameters: Option<Vec<TypeSignature>>,
+    pub args: Vec<TypeSignature>,
+    pub result: TypeSignature,
+    pub throws: Option<TypeSignature>,
+}
+
+impl MethodSignature
+{
+    pub fn from_jni(s: &str) -> MethodSignature
+    {
+        let (_, m) = parse_methodsignature(s).expect("Can't parse MethodSignature");
+        m
+    }
+
+    pub fn to_jni(&self) -> String
+    {
+        let mut s = String::new();
+        if let Some(v) = &self.type_parameters
+        {
+            s.push('<');
+            for t in v
+            {
+                s.push_str(&t.to_jni());
+            }
+            s.push('>');
+        }
+        s.push('(');
+        for t in &self.args
+        {
+            let ts = t.to_jni();
+            s.push_str(&ts);
+        }
+        s.push(')');
+        s.push_str(&self.result.to_jni());
+        if let Some(t) = &self.throws
+        {
+            s.push('^');
+            s.push_str(&t.to_jni());
+        }
+        s
+    }
+}
+
+pub(crate) fn parse_typesignature(smali: &str) -> IResult<&str, TypeSignature>
+{
+    // Any type parameters
+    let gt: IResult<&str, _> = char('<')(smali);
+    if let Ok((o, _)) = gt
+    {
+        // Type Arguments
+        let (o, ta) = many0(parse_typesignature)(o)?;
+        let (o, _) = char('>')(o)?;
+        let (nxt, ts_rest) = parse_typesignature(o)?;
+        return Ok((nxt, TypeSignature::TypeParameters(ta, Box::new(ts_rest))));
+    }
+
+    // Any type identifiers ?
+    let identifier_tag: IResult<&str, &str> = terminated(alphanumeric0, char(':'))(smali);
+    if let Ok((o, i)) = identifier_tag
+    {
+        let (nxt, nxt_ts) = parse_typesignature(o)?;
+        return Ok((
+            nxt,
+            TypeSignature::TypeParameter(i.to_string(), Box::new(nxt_ts)),
+        ));
+    }
+
+    // Object
+    let mut type_arguments = None;
+    let mut suffix = None;
+    let l: IResult<&str, &str> = tag("L")(smali);
+    if let Ok((o, _)) = l
+    {
+        let mut nxt;
+        let (o, t) = take_while(|x| (x != ';') && (x != '<'))(o)?;
+        nxt = o;
+        let gt: IResult<&str, std::primitive::char> = char('<')(o);
+        if let Ok((o, _)) = gt
+        {
+            // Type Arguments
+            let (o, ta) = many0(parse_typesignature)(o)?;
+            let (o, _) = char('>')(o)?;
+            type_arguments = Some(ta);
+            nxt = o;
+        }
+
+        // Is there a suffix?
+        let l: IResult<&str, &str> = tag(".")(nxt);
+        if let Ok((o, _)) = l
+        {
+            let (o, t) = take_while(|x| x != ';')(o)?;
+            suffix = Some(t.to_string());
+            nxt = o;
+        }
+
+        let (o, _) = char(';')(nxt)?;
+        let object = ObjectIdentifier {
+            class_name: t.to_string(),
+            type_arguments,
+            suffix,
+        };
+        return Ok((o, TypeSignature::Object(object)));
+    }
+
+    // Type Variable
+    let l: IResult<&str, &str> = tag("T")(smali);
+    if let Ok((o, _)) = l
+    {
+        let (o, t) = take_while(|x| x != ';')(o)?;
+        let nxt = o;
+        let (o, _) = char(';')(nxt)?;
+        let type_var = TypeSignature::TypeVariableSignature(t.to_string());
+        return Ok((o, type_var));
+    }
+
+    // Array
+    let b: IResult<&str, &str> = tag("[")(smali);
+    if let Ok((o, _)) = b
+    {
+        let (o, t) = parse_typesignature(o)?;
+        return Ok((o, TypeSignature::Array(Box::new(t))));
+    }
+
+    //Primitive Type
+    let p: IResult<&str, &str> = alt((
+        tag("Z"),
+        tag("B"),
+        tag("C"),
+        tag("S"),
+        tag("I"),
+        tag("J"),
+        tag("F"),
+        tag("D"),
+        tag("V"),
+        tag("*"),
+        tag("+"),
+        tag("-"),
+    ))(smali);
+    if let Ok((o, t)) = p
+    {
+        let ts = match t
+        {
+            "Z" => TypeSignature::Bool,
+            "B" => TypeSignature::Byte,
+            "C" => TypeSignature::Char,
+            "S" => TypeSignature::Short,
+            "I" => TypeSignature::Int,
+            "J" => TypeSignature::Long,
+            "F" => TypeSignature::Float,
+            "D" => TypeSignature::Double,
+            "+" => TypeSignature::WildcardPlus,
+            "-" => TypeSignature::WildcardMinus,
+            "*" => TypeSignature::WildcardStar,
+            _ => TypeSignature::Void,
+        };
+        return Ok((o, ts));
+    }
+
+    Err(nom::Err::Error(nom::error::Error {
+        input: smali,
+        code: ErrorKind::Complete,
+    }))
+}
+
+pub(crate) fn parse_methodsignature(smali: &str) -> IResult<&str, MethodSignature>
+{
+    let mut type_parameters = None;
+    let mut throws = None;
+    let mut nxt = smali;
+    let gt: IResult<&str, _> = char('<')(nxt);
+    if let Ok((o, _)) = gt
+    {
+        // Type Arguments
+        let (o, ta) = many0(parse_typesignature)(o)?;
+        let (o, _) = char('>')(o)?;
+        type_parameters = Some(ta);
+        nxt = o;
+    }
+    let (o, _) = tag("(")(nxt)?;
+    let (o, a) = many0(parse_typesignature)(o)?;
+    let (o, _) = tag(")")(o)?;
+    let (o, r) = parse_typesignature(o)?;
+    nxt = o;
+    let up: IResult<&str, std::primitive::char> = char('^')(nxt);
+    if let Ok((o, _)) = up
+    {
+        // Throws
+        let (o, ta) = parse_typesignature(o)?;
+        throws = Some(ta);
+        nxt = o;
+    }
+    Ok((
+        nxt,
+        MethodSignature {
+            type_parameters,
+            args: a,
+            result: r,
+            throws,
+        },
+    ))
 }
 
 /// Simple enum to represent Java method, field and class modifiers
@@ -215,44 +545,6 @@ impl Modifier {
             Self::Native => "native",
             Self::Varargs => "varargs",
         }
-    }
-}
-
-/// Represents a Java method signature consisting of arguments and a return type
-///
-/// # Examples
-///
-/// ```
-///  use smali::types::{MethodSignature, TypeSignature};
-///
-///  let m = MethodSignature::from_jni("([I)V");
-///  assert_eq!(m.return_type, TypeSignature::Void);
-/// ```
-#[derive(Debug)]
-pub struct MethodSignature {
-    pub args: Vec<TypeSignature>,
-    pub return_type: TypeSignature,
-}
-
-impl MethodSignature {
-
-    pub fn from_jni(s: &str) -> MethodSignature
-    {
-        let (_, m) = parse_methodsignature(s).expect("Can't parse MethodSignature");
-        m
-    }
-
-    pub fn to_jni(&self) -> String
-    {
-        let mut s = "(".to_string();
-        for t in &self.args
-        {
-            let ts = t.to_jni();
-            s.push_str(&*ts);
-        }
-        s.push(')');
-        s.push_str(&*self.return_type.to_jni());
-        s
     }
 }
 
@@ -364,12 +656,12 @@ pub struct SmaliMethod {
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 ///  use std::path::Path;
 ///  use smali::types::SmaliClass;
 ///
 ///  let c = SmaliClass::read_from_file(Path::new("smali/com/cool/Class.smali")).expect("Uh oh, does the file exist?");
-///  println!("Java class: {}" c.name.as_java_type());
+///  println!("Java class: {}", c.name.as_java_type());
 /// ```
 #[derive(Debug)]
 pub struct SmaliClass {
@@ -415,9 +707,10 @@ impl SmaliClass {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     ///  use smali::types::SmaliClass;
     ///
+    ///  let smali = ".class public Lokhttp3/OkHttpClient;";
     ///  let c = SmaliClass::from_smali(smali).expect("Parse error");
     ///
     /// ```
@@ -425,8 +718,8 @@ impl SmaliClass {
     {
         let d = parse_class(s);
         match d {
-            IResult::Ok((_, cl)) => Ok(cl),
-            IResult::Err(Failure(e)) => Err(SmaliError { details: format!("Class parse error at: {:?}", e.to_string()) }),
+            Ok((_, cl)) => Ok(cl),
+            Err(Failure(e)) => Err(SmaliError { details: format!("Class parse error at: {:?}", e.to_string()) }),
             _ => Err(SmaliError { details: "Unknown class parse error".to_string() })
         }
     }
@@ -435,7 +728,7 @@ impl SmaliClass {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     ///  use std::path::Path;
     ///  use smali::types::SmaliClass;
     ///
@@ -447,9 +740,9 @@ impl SmaliClass {
         match fs::read_to_string(path)
         {
             Ok(s) => {
-               let mut c = SmaliClass::from_smali(&s)?;
+                let mut c = SmaliClass::from_smali(&s)?;
                 c.file_path = Some(PathBuf::from(path));
-               Ok(c)
+                Ok(c)
             }
             Err(e) => { Err(SmaliError { details: format!("Error loading file {}: {}", path.to_str().unwrap(), e.to_string()) }) }
         }
@@ -459,7 +752,7 @@ impl SmaliClass {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     ///  use std::path::Path;
     ///  use smali::types::SmaliClass;
     ///
@@ -476,12 +769,12 @@ impl SmaliClass {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     ///  use std::path::Path;
     ///  use smali::types::SmaliClass;
     ///
     ///  let c = SmaliClass::read_from_file(Path::new("smali/com/cool/Class.smali")).expect("Uh oh, does the file exist?");
-    ///  c.write_to_file(Path::new("smali_classes2/com/cool/Class.smali"))?;
+    ///  c.write_to_file(Path::new("smali_classes2/com/cool/Class.smali")).unwrap();
     ///
     /// ```
     pub fn write_to_file(&self, path: &Path) -> Result<(), SmaliError>
@@ -498,12 +791,12 @@ impl SmaliClass {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     ///  use std::path::Path;
     ///  use smali::types::SmaliClass;
     ///
     ///  let c = SmaliClass::read_from_file(Path::new("smali/com/cool/Class.smali")).expect("Uh oh, does the file exist?");
-    ///  c.write_to_directory(Path::new("smali_classes2"))?;
+    ///  c.write_to_directory(Path::new("smali_classes2")).unwrap();
     ///
     /// ```
     pub fn write_to_directory(&self, path: &Path) -> Result<(), SmaliError>
@@ -531,12 +824,13 @@ impl SmaliClass {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
+    ///  use std::path::Path;
     ///  use smali::types::SmaliClass;
     ///
     ///  let mut c = SmaliClass::read_from_file(Path::new("smali/com/cool/Class.smali")).expect("Uh oh, does the file exist?");
     ///  c.source = None;
-    ///  c.save()?;
+    ///  c.save().unwrap();
     ///
     /// ```
     pub fn save(&self) -> Result<(), SmaliError>
@@ -548,3 +842,84 @@ impl SmaliClass {
         else { Err(SmaliError { details: format!("Unable to save, no file_path set for class: {}", self.name.as_java_type()) }) }
     }
 }
+
+#[cfg(test)]
+mod tests
+{
+    // Note this useful idiom: importing names from outer (for mod tests) scope.
+
+    use crate::types::{MethodSignature, TypeSignature};
+
+    #[test]
+    fn test_signature()
+    {
+        let ts = "Ljava/util/HashMap<Ljava/lang/Class<+Lorg/antlr/v4/runtime/atn/Transition;>;Ljava/lang/Integer;>;";
+        let o = TypeSignature::from_jni(ts);
+        assert_eq!(o.to_jni(), ts);
+    }
+
+    #[test]
+    fn test_signature2()
+    {
+        let ts = "Lorg/jf/dexlib2/writer/DexWriter<Lorg/jf/dexlib2/writer/builder/BuilderStringReference;Lorg/jf/dexlib2/writer/builder/BuilderStringReference;Lorg/jf/dexlib2/writer/builder/BuilderTypeReference;Lorg/jf/dexlib2/writer/builder/BuilderTypeReference;Lorg/jf/dexlib2/writer/builder/BuilderMethodProtoReference;Lorg/jf/dexlib2/writer/builder/BuilderFieldReference;Lorg/jf/dexlib2/writer/builder/BuilderMethodReference;Lorg/jf/dexlib2/writer/builder/BuilderClassDef;Lorg/jf/dexlib2/writer/builder/BuilderCallSiteReference;Lorg/jf/dexlib2/writer/builder/BuilderMethodHandleReference;Lorg/jf/dexlib2/writer/builder/BuilderAnnotation;Lorg/jf/dexlib2/writer/builder/BuilderAnnotationSet;Lorg/jf/dexlib2/writer/builder/BuilderTypeList;Lorg/jf/dexlib2/writer/builder/BuilderField;Lorg/jf/dexlib2/writer/builder/BuilderMethod;Lorg/jf/dexlib2/writer/builder/BuilderEncodedValues$BuilderArrayEncodedValue;Lorg/jf/dexlib2/writer/builder/BuilderEncodedValues$BuilderEncodedValue;Lorg/jf/dexlib2/writer/builder/BuilderAnnotationElement;Lorg/jf/dexlib2/writer/builder/BuilderStringPool;Lorg/jf/dexlib2/writer/builder/BuilderTypePool;Lorg/jf/dexlib2/writer/builder/BuilderProtoPool;Lorg/jf/dexlib2/writer/builder/BuilderFieldPool;Lorg/jf/dexlib2/writer/builder/BuilderMethodPool;Lorg/jf/dexlib2/writer/builder/BuilderClassPool;Lorg/jf/dexlib2/writer/builder/BuilderCallSitePool;Lorg/jf/dexlib2/writer/builder/BuilderMethodHandlePool;Lorg/jf/dexlib2/writer/builder/BuilderTypeListPool;Lorg/jf/dexlib2/writer/builder/BuilderAnnotationPool;Lorg/jf/dexlib2/writer/builder/BuilderAnnotationSetPool;Lorg/jf/dexlib2/writer/builder/BuilderEncodedArrayPool;>.SectionProvider;";
+        let o = TypeSignature::from_jni(ts);
+        println!("{:?}", o);
+        assert_eq!(o.to_jni(), ts);
+    }
+
+    #[test]
+    fn test_signature3()
+    {
+        let ts = "<TSource:Ljava/lang/Object;TAccumulate:Ljava/lang/Object;TResult:Ljava/lang/Object;>Ljava/lang/Object;";
+        let o = TypeSignature::from_jni(ts);
+        println!("{:?}", o);
+        assert_eq!(o.to_jni(), ts);
+    }
+
+    #[test]
+    fn test_method_signature1()
+    {
+        let ts = "(TTSource;TTAccumulate;Lcom/strobel/core/Accumulator<TTSource;TTAccumulate;>;Lcom/strobel/core/Selector<TTAccumulate;TTResult;>;)TTResult;";
+        let m = MethodSignature::from_jni(ts);
+        println!("{:?}", m);
+        assert_eq!(m.to_jni(), ts);
+    }
+
+    #[test]
+    fn test_method_signature2()
+    {
+        let ts =
+            "<R2:Ljava/lang/Object;>(Lcom/strobel/core/Selector<-TR;+TR2;>;)Ljava/lang/Iterable<TR2;>;^Ljava/lang/Exception;";
+        let m = MethodSignature::from_jni(ts);
+        println!("{:?}", m);
+        assert_eq!(m.to_jni(), ts);
+    }
+
+    #[test]
+    fn test_method_signature3()
+    {
+        let ts = "<U:TT;>(TU;)I";
+        let m = MethodSignature::from_jni(ts);
+        println!("{:?}", m);
+        assert_eq!(m.to_jni(), ts);
+    }
+
+    #[test]
+    fn test_method_signature4()
+    {
+        let ts = "<R2:Ljava/lang/Object;>(Lcom/strobel/core/Selector<-TR;+TR2;>;)Ljava/lang/Iterable<TR2;>;";
+        let m = MethodSignature::from_jni(ts);
+        println!("{:?}", m);
+        assert_eq!(m.to_jni(), ts);
+    }
+
+    #[test]
+    fn test_method_signature5()
+    {
+        let ts = "<T:Landroidx/lifecycle/ViewModel;>(Ljava/lang/Class<TT;>;)TT;";
+        let m = MethodSignature::from_jni(ts);
+        println!("{:?}", m);
+        assert_eq!(m.to_jni(), ts);
+    }
+}
+

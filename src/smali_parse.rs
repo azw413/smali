@@ -5,7 +5,7 @@ use nom::character::complete::{alphanumeric1, char, multispace0, multispace1, sp
 use nom::combinator::value;
 use nom::Err::Failure;
 use nom::error::{Error, ErrorKind};
-use nom::{Err, IResult};
+use nom::{IResult};
 use nom::multi::{many0};
 use nom::sequence::{delimited, pair};
 use crate::types::*;
@@ -88,43 +88,6 @@ fn take_until_eol(s: &str) -> IResult<&str, &str> {
     IResult::Ok((input, r))
 }
 
-fn parse_typesignature(smali: &str) -> IResult<&str, TypeSignature>
-{
-
-    // Object
-    let l:IResult<&str, &str> = tag("L")(smali);
-    if let IResult::Ok((o, _)) = l
-    {
-        let (o, t) = take_while(|x| { x != ';' })(o)?;
-        let (o, _) = char(';')(o)?;
-        let obj = format!("L{};", t);
-        return IResult::Ok((o, TypeSignature::from_jni(&obj)))
-    }
-    // Array
-    let b:IResult<&str, &str> = tag("[")(smali);
-    if let IResult::Ok((o, _)) = b
-    {
-        let (o, t) = parse_typesignature(o)?;
-        return IResult::Ok((o, TypeSignature::Array(Box::new(t))))
-    }
-    //Primitive Type
-    let p:IResult<&str, &str> = alt((tag("Z"), tag("B"), tag("C"), tag("S"), tag("I"), tag("J"), tag("F"), tag("D"), tag("L"), tag("V")))(smali);
-    if let IResult::Ok((o, t)) = p
-    {
-        return IResult::Ok((o, TypeSignature::from_jni(&t.to_string())))
-    }
-
-    IResult::Err(Err::Error(Error { input: smali, code: ErrorKind::Complete }))
-}
-
-pub(crate) fn parse_methodsignature(smali: &str) -> IResult<&str, MethodSignature>
-{
-    let (o, _) = tag("(")(smali)?;
-    let (o, a) = many0(parse_typesignature)(o)?;
-    let (o, _) = tag(")")(o)?;
-    let (o, r) = parse_typesignature(o)?;
-    IResult::Ok((o, MethodSignature { args: a, return_type: r }))
-}
 
 fn parse_class_line(smali: &str) -> IResult<&str, (Vec<Modifier>, String)>
 {
@@ -583,7 +546,7 @@ pub(crate) fn parse_class(smali: &str) -> IResult<&str, SmaliClass>
 mod tests {
     use std::fs;
     use super::*;
-    use crate::types::{AnnotationValue};
+    use crate::types::{AnnotationValue, parse_typesignature};
 
     #[test]
     fn test_take_until_eol() {

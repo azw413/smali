@@ -28,8 +28,8 @@ fn is_rootbeer_class(c: &SmaliClass) -> bool
     if c.fields.len() == 2 && c.methods.len() == 25
     {
         // Probably unreliable if the ordering changes
-        if c.fields[0].signature == TypeSignature::Bool && c.methods[1].signature.return_type == TypeSignature::Bool
-            && c.methods[4].signature.args.len() == 0 && c.methods[4].signature.return_type == TypeSignature::Bool
+        if c.fields[0].signature == TypeSignature::Bool && c.methods[1].signature.result == TypeSignature::Bool
+            && c.methods[4].signature.args.len() == 0 && c.methods[4].signature.result == TypeSignature::Bool
         {
             println!("Detected RootBeer class: {}", c.name.as_java_type());
             return true;
@@ -58,7 +58,7 @@ fn process_apk(apk_file: &str) -> Result<(), Box<dyn Error>>
            // Patch all the methods returning a boolean
            for m in c.methods.iter_mut()
            {
-               if m.signature.return_type == TypeSignature::Bool && m.signature.args.len() == 0
+               if m.signature.result == TypeSignature::Bool && m.signature.args.len() == 0
                {
                    let mut new_instructions = vec![];
                    new_instructions.push(Instruction("const/4 v0, 0x0".to_string())); // Set v0 to false
