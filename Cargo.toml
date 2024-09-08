@@ -14,3 +14,5 @@ exclude = [ ".gitignore", ".idea/*" ]
 [dependencies]
 nom = "7"
 serde = { version = "1.0.204", features = ["derive"] }
+cesu8 = "1.1.0"
+log = "0.4.22"
