@@ -6,6 +6,7 @@ use crate::dex::error::DexError;
 use crate::dex::{read_u1, read_u2, read_u4, read_uleb128, read_uleb128p1, read_x, write_u1, write_u2, write_u4, write_uleb128, write_uleb128p1, write_x};
 use cesu8::to_java_cesu8;
 use log::error;
+use crate::dex::encoded_values::{read_encoded_array, EncodedValue};
 use crate::types::{Modifiers, ObjectIdentifier, SmaliClass, SmaliField, TypeSignature};
 
 
@@ -387,7 +388,7 @@ pub struct ClassDefItem {
     pub source_file_idx: StringId,
     //pub annotations: Vec<AnnotationItem>,
     pub class_data: Option<ClassDataItem>,
-    //pub static_values:
+    pub static_values: Option<Vec<EncodedValue>>
 }
 
 impl ClassDefItem
@@ -407,15 +408,15 @@ impl ClassDefItem
         let class_data = if class_data_offset > 0 { Some(ClassDataItem::read(bytes, &mut class_data_offset)?) }
             else { None };
         let mut static_values_offset = read_u4(bytes, ix)? as usize;
-        //let static_values = if static_values_offset > 0 { Some() }
-        //    else { None };
+        let static_values = if static_values_offset > 0 { Some(read_encoded_array(bytes, &mut static_values_offset)?) }
+            else { None };
 
 
         Ok(ClassDefItem {
             class_idx, access_flags,
             superclass_idx, interfaces,
             source_file_idx, class_data,
-            //static_values
+            static_values
         })
 
     }
@@ -584,17 +585,30 @@ impl DexFile {
 
             // Class annotations go here
 
+
+
             if let Some(class_data) = &c.class_data
             {
                 // Fields
-                for f in &class_data.static_fields
+                for (i, f) in class_data.static_fields.iter().enumerate()
                 {
                     let dex_field = &self.fields[f.field_idx];
+
                     smali.fields.push(SmaliField {
                         name: self.get_string(dex_field.name_idx)?,
                         modifiers: Modifiers::from_u32(f.access_flags),
                         signature: TypeSignature::from_jni(&self.get_string(self.types[dex_field.type_idx])?),
-                        initial_value: ,
+                        initial_value: if let Some(s) = &c.static_values {
+                            if i < s.len() {
+                                match s[i]
+                                {
+                                    EncodedValue::Null => None,
+                                    _ => Some(s[i].to_string())
+                                }
+                            }
+                            else { None }
+                        }
+                        else { None },
                         annotations: vec![],
                     });
                 }

@@ -5,6 +5,8 @@ pub(crate) mod dex_file;
 pub(crate) mod leb;
 pub(crate) mod annotations;
 pub(crate) mod instructions;
+pub(crate) mod encoded_values;
+
 
 use crate::dex::error::DexError;
 use crate::dex::leb::{decode_uleb128, decode_uleb128p1, encode_uleb128, encode_uleb128p1};
