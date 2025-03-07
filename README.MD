@@ -15,41 +15,41 @@ Here's the simple example :-
 /* Expand the APK and patch RootBeer */
 fn process_apk(apk_file: &str) -> Result<(), Box<dyn Error>>
 {
-   // Call apktool to unpack the APK
-   execute_command("apktool", &["decode", "-f", apk_file, "-o", "out"])?;
+    // Call apktool to unpack the APK
+    execute_command("apktool", &["decode", "-f", apk_file, "-o", "out"])?;
 
-   // Load all the smali classes
-   let mut p = PathBuf::from_str("out")?;
-   p.push("smali");
-   let mut classes = find_smali_files(&p)?;
-   println!("{:} smali classes loaded.", classes.len());
+    // Load all the smali classes
+    let mut p = PathBuf::from_str("out")?;
+    p.push("smali");
+    let mut classes = find_smali_files(&p)?;
+    println!("{:} smali classes loaded.", classes.len());
 
-   // Search for the RootBeer class
-   for c in classes.iter_mut()
-   {
-       if is_rootbeer_class(&c)
-       {
-           // Patch all the methods returning a boolean
-           for m in c.methods.iter_mut()
-           {
-               if m.signature.result == TypeSignature::Bool && m.signature.args.len() == 0
-               {
-                   let mut new_instructions = vec![];
-                   new_instructions.push(Instruction("const/4 v0, 0x0".to_string())); // Set v0 to false
-                   new_instructions.push(Instruction("return v0".to_string()));       // return v0
-                   m.instructions = new_instructions;
-                   m.locals = 1;
-                   println!("{} method {} successfully patched.", c.name.as_java_type(), &m.name);
-               }
-           }
-       }
-       // Save all classes, even unmodified so we can thoroughly test parser and writer
-       c.save()?;
-   }
+    // Search for the RootBeer class
+    for c in classes.iter_mut()
+    {
+        if is_rootbeer_class(&c)
+        {
+            // Patch all the methods returning a boolean
+            for m in c.methods.iter_mut()
+            {
+                if m.signature.result == TypeSignature::Bool && m.signature.args.len() == 0
+                {
+                    let mut new_instructions = vec![];
+                    new_instructions.push(Instruction(DexInstruction::Const4 { dest: v(0), value: 0 }));  // "const/4 v0, 0x0" - Set v0 to false
+                    new_instructions.push(Instruction(DexInstruction::Return { src: v(0) }));  //  "return v0" - return v0
+                    m.instructions = new_instructions;
+                    m.locals = 1;
+                    println!("{} method {} successfully patched.", c.name.as_java_type(), &m.name);
+                }
+            }
+        }
+        // Save all classes, even unmodified so we can thoroughly test parser and writer
+        c.save()?;
+    }
 
-   // Repack the APK
-   execute_command("apktool", &["build", "out", "-o", "out.apk"])?;
+    // Repack the APK
+    execute_command("apktool", &["build", "out", "-o", "out.apk"])?;
 
-   Ok(())
+    Ok(())
 }
 ```
