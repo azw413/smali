@@ -6,6 +6,8 @@ pub(crate) mod leb;
 pub(crate) mod annotations;
 pub(crate) mod instructions;
 pub(crate) mod encoded_values;
+mod opcode_format;
+mod opcodes;
 
 
 use crate::dex::error::DexError;

@@ -86,8 +86,12 @@ fn write_method(method: &SmaliMethod) -> String
         match i
         {
             SmaliInstruction::Line(l) => { out.push_str(&format!("    .line {:}\n", l)); }
-            SmaliInstruction::Label(l) => { out.push_str(&format!("    :{}\n", l)); }
+            SmaliInstruction::Label(l) => { out.push_str(&format!("    {}\n", l)); }
             SmaliInstruction::Instruction(s) => { out.push_str(&format!("    {}\n", s)); }
+            SmaliInstruction::Catch(c) => { out.push_str(&format!("    {}\n", c)); }
+            SmaliInstruction::ArrayData(ad) => { out.push_str(&format!("    {}\n", ad)); }
+            SmaliInstruction::PackedSwitch(ps) => { out.push_str(&format!("    {}\n", ps)); }
+            SmaliInstruction::SparseSwitch(ss) => { out.push_str(&format!("    {}\n", ss)); }
         }
     }
 

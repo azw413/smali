@@ -6,6 +6,7 @@ use std::str::FromStr;
 use smali::{ find_smali_files };
 use smali::types::*;
 use smali::types::SmaliInstruction::Instruction;
+use smali::smali_instructions::{ DexInstruction, v, p };
 
 // This demo unpacks an APK file with apktool (you need this on your path), searches for rootBeer and disables it.
 // Try it on the RootBeer Sample app https://play.google.com/store/apps/details?id=com.scottyab.rootbeer.sample
@@ -61,8 +62,8 @@ fn process_apk(apk_file: &str) -> Result<(), Box<dyn Error>>
                if m.signature.result == TypeSignature::Bool && m.signature.args.len() == 0
                {
                    let mut new_instructions = vec![];
-                   new_instructions.push(Instruction("const/4 v0, 0x0".to_string())); // Set v0 to false
-                   new_instructions.push(Instruction("return v0".to_string()));       // return v0
+                   new_instructions.push(Instruction(DexInstruction::Const4 { dest: v(0), value: 0 }));  // "const/4 v0, 0x0" - Set v0 to false
+                   new_instructions.push(Instruction(DexInstruction::Return { src: v(0) }));  //  "return v0" - return v0
                    m.instructions = new_instructions;
                    m.locals = 1;
                    println!("{} method {} successfully patched.", c.name.as_java_type(), &m.name);

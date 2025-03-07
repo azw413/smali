@@ -1,13 +1,15 @@
 
-use nom::bytes::complete::{escaped, is_not, tag, take_while};
+use nom::bytes::complete::{escaped, is_not, tag, take_while, take_while1};
 use nom::branch::{ alt };
-use nom::character::complete::{alphanumeric1, char, multispace0, multispace1, space0, newline, none_of, not_line_ending, one_of};
-use nom::combinator::value;
+use nom::character::complete::{alphanumeric1, char, multispace0, multispace1, space0, newline, none_of, not_line_ending, one_of, space1, digit1, line_ending};
+use nom::combinator::{opt, value};
 use nom::Err::Failure;
 use nom::error::{Error, ErrorKind};
 use nom::{IResult};
-use nom::multi::{many0};
-use nom::sequence::{delimited, pair};
+use nom::multi::{many0, many1};
+use nom::sequence::{delimited, pair, preceded, terminated};
+use crate::smali_instructions::{DexInstruction, Label, parse_label, parse_literal_int };
+use crate::smali_instructions::parse_instruction as parse_dex_instruction;
 use crate::types::*;
 
 
@@ -321,6 +323,174 @@ fn parse_field(smali: &str) -> IResult<&str, SmaliField>
     IResult::Ok((input, field))
 }
 
+
+/// Parse a try range in the format "{ <label> .. <label> }"
+pub fn parse_try_range(input: &str) -> IResult<&str, TryRange> {
+    let (input, _) = tag("{")(input)?;
+    let (input, _) = space0(input)?;
+    let (input, start) = parse_label(input)?;
+    let (input, _) = space1(input)?;
+    let (input, _) = tag("..")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, end) = parse_label(input)?;
+    let (input, _) = space0(input)?;
+    let (input, _) = tag("}")(input)?;
+    Ok((input, TryRange { start, end }))
+}
+
+/// Parse a .catch directive.
+/// Example:
+///   .catch Ljava/lang/Exception; {:try_start_outer .. :try_end_outer} :handler_outer
+pub fn parse_catch_directive(input: &str) -> IResult<&str, CatchDirective> {
+    let (input, _) = tag(".catch")(input)?;
+    let (input, _) = space1(input)?;
+    // Parse exception type: assume it is non-whitespace until the next space.
+    let (input, exception) = take_while1(|c: char| !c.is_whitespace())(input)?;
+    let (input, _) = space1(input)?;
+    let (input, try_range) = parse_try_range(input)?;
+    let (input, _) = space1(input)?;
+    let (input, handler) = parse_label(input)?;
+    Ok((
+        input,
+        CatchDirective::Catch {
+            exception: exception.to_string(),
+            try_range,
+            handler,
+        },
+    ))
+}
+
+/// Parse a .catchall directive.
+/// Example:
+///   .catchall {:try_start .. :try_end} :handler
+pub fn parse_catchall_directive(input: &str) -> IResult<&str, CatchDirective> {
+    let (input, _) = tag(".catchall")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, try_range) = parse_try_range(input)?;
+    let (input, _) = space1(input)?;
+    let (input, handler) = parse_label(input)?;
+    Ok((input, CatchDirective::CatchAll { try_range, handler }))
+}
+
+/// Helper: returns true for valid hexadecimal digit characters.
+fn is_hex_digit(c: char) -> bool {
+    c.is_digit(16)
+}
+
+
+/// Parse a single array element and skip any trailing comment.
+/// Example element: "0x3f800000    # 1.0f"
+fn parse_element(input: &str) -> IResult<&str, i64> {
+    let (input, value) = parse_literal_int(input)?;
+    // Optionally consume trailing whitespace and a comment starting with '#'
+    let (input, _) = opt(preceded(
+        multispace0,
+        preceded(tag("#"), take_while1(|c| c != '\n'))
+    ))(input)?;
+    Ok((input, value))
+}
+
+/// Parses a single array-data element given the element width from the header.
+/// The literal is parsed, then an optional suffix is parsed. If no suffix is found,
+/// we default based on the width:
+///   1 → Byte, 2 → Short, 4 → Int, 8 → Long.
+fn parse_array_element_with_width(input: &str, width: i32) -> IResult<&str, ArrayDataElement> {
+    // Parse the literal value.
+    let (input, _) = space0(input)?;
+    let (input, value): (&str, i64) = parse_literal_int(input)?;
+    // Optionally parse a suffix letter.
+    let (input, opt_suffix) = opt(alt((char('t'), char('s'), char('l'), char('f'), char('d'))))(input)?;
+    // Consume an optional trailing comment (starting with '#').
+    let (input, _) = opt(preceded(space0, preceded(char('#'), take_while1(|c: char| c != '\n'))))(input)?;
+
+    let element = if let Some(suffix) = opt_suffix {
+        match suffix {
+            't' => ArrayDataElement::Byte(value as i8),
+            's' => ArrayDataElement::Short(value as i16),
+            'l' => ArrayDataElement::Long(value as i64),
+            'f' => ArrayDataElement::Float(f32::from_bits(value as u32)),
+            'd' => ArrayDataElement::Double(f64::from_bits(value as u64)),
+            _ => unreachable!(),
+        }
+    } else {
+        // No suffix provided: default according to the width.
+        match width {
+            1 => ArrayDataElement::Byte(value as i8),
+            2 => ArrayDataElement::Short(value as i16),
+            4 => ArrayDataElement::Int(value as i32),
+            8 => ArrayDataElement::Long(value as i64),
+            _ => ArrayDataElement::Int(value as i32),
+        }
+    };
+    Ok((input, element))
+}
+
+/// Parses the entire .array-data block.
+pub fn parse_array_data(input: &str) -> IResult<&str, ArrayDataDirective> {
+    let (input, _) = tag(".array-data")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, width_val): (&str, i32)  = parse_literal_int(input)?;
+    let element_width = width_val as i32;
+    let (input, _) = opt(newline)(input)?;
+    let (input, elements) = many0(terminated(|i| parse_array_element_with_width(i, element_width), opt(newline)))(input)?;
+    let (input, _) = space0(input)?;
+    let (input, _) = tag(".end array-data")(input)?;
+    Ok((input, ArrayDataDirective { element_width, elements }))
+}
+
+/// Parse the packed-switch directive data. Example input:
+///
+///     .packed-switch 0x7f060395
+///         :pswitch_4
+///         :pswitch_5
+///         :pswitch_1
+///     .end packed-switch
+fn parse_packed_switch(input: &str) -> IResult<&str, PackedSwitchDirective> {
+    // Parse the header.
+    let (input, _) = tag(".packed-switch")(input)?;
+    let (input, _) = space1(input)?;
+    let (input, first_key): (&str, i32) = parse_literal_int(input)?;
+    let (input, _) = opt(newline)(input)?; // optional newline
+
+    // Parse one or more target labels.
+    let (input, targets) = many1(preceded(
+        space0,
+        terminated(parse_label, opt(newline))
+    ))(input)?;
+
+    // Parse the footer.
+    let (input, _) = preceded(space0, tag(".end packed-switch"))(input)?;
+    Ok((input, PackedSwitchDirective { first_key, targets }))
+}
+
+/// Parses a single entry in a sparse-switch block.
+/// Example line: "    0x2 -> :case_2"
+fn parse_sparse_switch_entry(input: &str) -> IResult<&str, SparseSwitchEntry> {
+    let (input, _) = space0(input)?;
+    let (input, key) = parse_literal_int(input)?;
+    let (input, _) = space0(input)?;
+    let (input, _) = tag("->")(input)?;
+    let (input, _) = space0(input)?;
+    let (input, target) = parse_label(input)?;
+    let (input, _) = opt(newline)(input)?;
+    Ok((input, SparseSwitchEntry { key, target }))
+}
+
+/// Parses an entire sparse-switch block.
+/// Example:
+///     .sparse-switch
+///         0x2 -> :case_2
+///         0x4 -> :case_4
+///     .end sparse-switch
+fn parse_sparse_switch(input: &str) -> IResult<&str, SparseSwitchDirective> {
+    let (input, _) = tag(".sparse-switch")(input)?;
+    let (input, _) = opt(space1)(input)?;
+    let (input, _) = opt(newline)(input)?;
+    let (input, entries) = many0(parse_sparse_switch_entry)(input)?;
+    let (input, _) = preceded(space0, tag(".end sparse-switch"))(input)?;
+    Ok((input, SparseSwitchDirective { entries }))
+}
+
 fn parse_instruction(smali: &str) -> IResult<&str, SmaliInstruction>
 {
     // Line
@@ -334,13 +504,44 @@ fn parse_instruction(smali: &str) -> IResult<&str, SmaliInstruction>
     else if let IResult::Ok((o, _)) = ws(tag(":"))(smali)
     {
         let (o, n) = take_until_eol(o)?;
-        IResult::Ok((o, SmaliInstruction::Label(n.to_string())))
+        IResult::Ok((o, SmaliInstruction::Label(Label(n.to_string()))))
+    }
+
+    // CatchDirective
+    else if let IResult::Ok((o, c)) = parse_catch_directive(smali)
+    {
+        IResult::Ok((o, SmaliInstruction::Catch(c)))
+    }
+
+    // CatchAllDirective
+    else if let IResult::Ok((o, c)) = parse_catchall_directive(smali)
+    {
+        IResult::Ok((o, SmaliInstruction::Catch(c)))
+    }
+
+    // ArrayDataDirective
+    else if let IResult::Ok((o, ad)) = parse_array_data(smali)
+    {
+        IResult::Ok((o, SmaliInstruction::ArrayData(ad)))
+    }
+
+    // PackedSwitchDirective
+    else if let IResult::Ok((o, ps)) = parse_packed_switch(smali)
+    {
+        IResult::Ok((o, SmaliInstruction::PackedSwitch(ps)))
+    }
+
+    // SparseSwitchDirective
+    else if let IResult::Ok((o, ss)) = parse_sparse_switch(smali)
+    {
+        IResult::Ok((o, SmaliInstruction::SparseSwitch(ss)))
     }
 
     // Actual instruction
     else if let IResult::Ok((o, n)) = take_until_eol(smali)
     {
-        IResult::Ok((o, SmaliInstruction::Instruction(n.to_string())))
+        let (_, dex_instruction) = parse_dex_instruction(n)?;
+        IResult::Ok((o, SmaliInstruction::Instruction(dex_instruction)))
     }
 
     // Anything else - failure
@@ -444,7 +645,9 @@ fn parse_method(smali: &str) -> IResult<&str, SmaliMethod>
         // Can't parse this - error
         if !found
         {
-            return IResult::Err(Failure(Error { input: input, code: ErrorKind::Fail }));
+            let mut lines = input.lines().take(3);
+            panic!("parse_method: unable to parse `{}\n{}\n{}\n`", lines.next().unwrap(), lines.next().unwrap(), lines.next().unwrap());
+            //return IResult::Err(Failure(Error { input: input, code: ErrorKind::Fail }));
         }
     }
 }
@@ -691,5 +894,16 @@ mod tests {
         let smali = fs::read_to_string("tests/OkHttpClient.smali").unwrap();
         let (_, d) = parse_class(&smali).unwrap();
         assert_eq!(d.name.as_java_type(), "okhttp3.OkHttpClient");
+    }
+
+    #[test]
+    fn test_array_data()
+    {
+        let input = r#".array-data 4
+                                0x0
+                                0x3f800000    # 1.0f
+                             .end array-data"#;
+        let ad = parse_array_data(&input).unwrap();
+        println!("{:?}", ad);
     }
 }

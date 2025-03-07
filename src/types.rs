@@ -16,6 +16,7 @@ use nom::multi::many0;
 use nom::sequence::terminated;
 use serde::{Deserialize, Serialize};
 use crate::dex::dex_file::{ACC_ABSTRACT, ACC_ANNOTATION, ACC_BRIDGE, ACC_CONSTRUCTOR, ACC_DECLARED_SYNCHRONIZED, ACC_ENUM, ACC_FINAL, ACC_INTERFACE, ACC_NATIVE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_STRICT, ACC_SYNCHRONIZED, ACC_SYNTHETIC, ACC_TRANSIENT, ACC_VARARGS, ACC_VOLATILE};
+use crate::smali_instructions::{DexInstruction, Label};
 use crate::smali_parse::parse_class;
 use crate::smali_write::write_class;
 
@@ -671,13 +672,164 @@ pub struct SmaliField {
     pub annotations: Vec<SmaliAnnotation>,
 }
 
+
+/// Represents a protected range in a try/catch directive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TryRange {
+    pub start: Label,
+    pub end: Label,
+}
+
+impl fmt::Display for TryRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Format similar to smali: "{:try_start .. :try_end}"
+        write!(f, "{{ {} .. {} }}", self.start, self.end)
+    }
+}
+
+/// Represents a catch block directive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatchDirective {
+    /// A catch directive with an exception type.
+    Catch {
+        exception: String, // e.g. "Ljava/lang/Exception;"
+        try_range: TryRange,
+        handler: Label,
+    },
+    /// A catch-all directive.
+    CatchAll {
+        try_range: TryRange,
+        handler: Label,
+    },
+}
+
+impl fmt::Display for CatchDirective {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CatchDirective::Catch { exception, try_range, handler } => {
+                // Print as: .catch <exception> <try_range> <handler>
+                write!(f, ".catch {} {} {}", exception, try_range, handler)
+            }
+            CatchDirective::CatchAll { try_range, handler } => {
+                // Print as: .catchall <try_range> <handler>
+                write!(f, ".catchall {} {}", try_range, handler)
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ArrayDataElement {
+    Byte(i8),
+    Short(i16),
+    Int(i32),
+    Long(i64),
+    Float(f32),
+    Double(f64),
+}
+
+impl fmt::Display for ArrayDataElement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ArrayDataElement::Byte(b)   => write!(f, "{:#x}t", b),
+            ArrayDataElement::Short(s)  => write!(f, "{:#x}s", s),
+            ArrayDataElement::Int(i)    => write!(f, "{:#x}", i),
+            ArrayDataElement::Long(l)   => write!(f, "{:#x}l", l),
+            ArrayDataElement::Float(fl) => write!(f, "{:#x}f", fl.to_bits()),
+            ArrayDataElement::Double(d) => write!(f, "{:#x}d", d.to_bits()),
+        }
+    }
+}
+
+/// Represents a .array-data directive.
+#[derive(Debug)]
+pub struct ArrayDataDirective {
+    /// The element width as specified in the header.
+    pub element_width: i32,
+    /// The parsed array elements.
+    pub elements: Vec<ArrayDataElement>,
+}
+
+impl fmt::Display for ArrayDataDirective {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Print the header. We'll print the width in hex.
+        writeln!(f, ".array-data {:#x}", self.element_width)?;
+        // Print elements in groups (here, 4 per line).
+        for chunk in self.elements.chunks(4) {
+            write!(f, "    ")?;
+            for elem in chunk {
+                write!(f, "{} ", elem)?;
+            }
+            writeln!(f)?;
+        }
+        write!(f, ".end array-data")
+    }
+}
+
+#[derive(Debug)]
+pub struct PackedSwitchDirective {
+    pub first_key: i32,
+    pub targets: Vec<Label>,
+}
+
+impl fmt::Display for PackedSwitchDirective {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Print the header with the first key in hex.
+        writeln!(f, ".packed-switch {:#x}", self.first_key)?;
+        // Print each target label, indented.
+        for target in &self.targets {
+            writeln!(f, "    {}", target)?;
+        }
+        // Print the footer without a trailing newline.
+        write!(f, ".end packed-switch")
+    }
+}
+
+/// An entry in a sparse-switch directive: a key and its corresponding target label.
+#[derive(Debug)]
+pub struct SparseSwitchEntry {
+    pub key: i32,
+    pub target: Label,
+}
+
+impl fmt::Display for SparseSwitchEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Format the key in hexadecimal followed by "->" and the label.
+        write!(f, "{:#x} -> {}", self.key, self.target)
+    }
+}
+
+/// The sparse-switch directive.
+#[derive(Debug)]
+pub struct SparseSwitchDirective {
+    pub entries: Vec<SparseSwitchEntry>,
+}
+
+impl fmt::Display for SparseSwitchDirective {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Print the header.
+        writeln!(f, ".sparse-switch")?;
+        // Print each entry indented.
+        for entry in &self.entries {
+            writeln!(f, "    {}", entry)?;
+        }
+        // Print the footer.
+        write!(f, ".end sparse-switch")
+    }
+}
+
+
 /// An enum representing instructions within a method, these can be a label, a line number or a dex instruction as a String.
 ///
 #[derive(Debug)]
 pub enum SmaliInstruction {
-    Label(String),
+    Label(Label),
     Line(u32),
-    Instruction(String)
+    Instruction(DexInstruction),
+    Catch(CatchDirective),
+    ArrayData(ArrayDataDirective),
+    PackedSwitch(PackedSwitchDirective),
+    SparseSwitch(SparseSwitchDirective),
 }
 
 /// Struct representing a Java method

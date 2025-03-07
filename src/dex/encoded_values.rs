@@ -1,6 +1,7 @@
 use std::cmp::max;
 use crate::dex::error::DexError;
 use crate::dex::{read_u1, read_uleb128, write_u1, write_uleb128, write_x};
+use crate::dex::dex_file::DexString;
 
 #[derive(Debug, PartialEq)]
 pub struct EncodedAnnotation {
@@ -88,11 +89,40 @@ pub enum EncodedValue {
     Boolean(bool),
 }
 
-impl EncodedValue {
+impl EncodedValue
+{
 
-    pub fn to_string(&self) -> String
+    pub fn to_string(&self, strings: &Vec<DexString>) -> String
     {
-        format!("{:?}", self)
+        match self
+        {
+            EncodedValue::Byte(x) => { format!("{:}", *x) }
+            EncodedValue::Short(x) => { format!("{:}", *x) }
+            EncodedValue::Char(x) => { format!("{:}", *x) }
+            EncodedValue::Int(x) => { format!("{:}", *x) }
+            EncodedValue::Long(x) => { format!("{:}", *x) }
+            EncodedValue::Float(x) => { format!("{:}", *x) }
+            EncodedValue::Double(x) => { format!("{:}", *x) }
+            EncodedValue::MethodType(x) => { format!("{:?}", *x) }
+            EncodedValue::MethodHandle(x) => { format!("{:?}", *x) }
+            EncodedValue::String(x) => { format!("\"{}\"", match &strings[*x as usize] {
+                DexString::Decoded(s) => s.to_string(),
+                DexString::Raw(_, _) => format!("{:?}", *x)
+            } ) }
+            EncodedValue::Type(x) => { format!("{:?}", *x) }
+            EncodedValue::Field(x) => { format!("{:?}", *x) }
+            EncodedValue::Method(x) => { format!("{:?}", *x) }
+            EncodedValue::Enum(x) => { format!("{:?}", *x) }
+            EncodedValue::Array(v) => {
+                let mut s = "{ ".to_string();
+                for i in v { s.push_str(&format!("{},", i.to_string(strings))); }
+                s.push_str(" }");
+                s
+            }
+            EncodedValue::Annotation(ea) => { format!("{:?}", *ea) }
+            EncodedValue::Null => { "null".to_string() }
+            EncodedValue::Boolean(b) => { if *b { "true".to_string() } else { "false".to_string() } }
+        }
     }
 
     // Read the EncodedValue from bytes
@@ -258,8 +288,8 @@ impl EncodedValue {
                 c += write_u1(bytes, 0x1e);
             },
             EncodedValue::Boolean(val) => {
-                c += write_u1(bytes, 0x1f);
-                c += write_u1(bytes, if *val { 0x01 } else { 0x00 });
+                let v = match *val { true => 1, false => 0 };
+                c += write_u1(bytes, 0x1f | (v << 5));
             }
         }
         c
@@ -284,9 +314,7 @@ fn read_var_u32(bytes: &[u8], ix: &mut usize, size: usize) -> Result<u32, DexErr
         let byte = read_u1(bytes, ix)?;
         result |= (byte as u32) << (8 * i);
     }
-    if size < 4 && (result & (1 << (8 * size - 1))) != 0 {
-        result |= !((1 << (8 * size)) - 1);
-    }
+
     Ok(result)
 }
 
@@ -448,7 +476,7 @@ mod tests {
 
     #[test]
     fn test_encoded_value_int() {
-        let mut bytes = vec![0x40, 0x78, 0x56, 0x34, 0x12];  // 0x40 is the header, 0x12345678 in little-endian
+        let mut bytes = vec![0x64, 0x78, 0x56, 0x34, 0x12];  // 0x40 is the header, 0x12345678 in little-endian
         let mut ix = 0;
         let encoded_value = EncodedValue::read(&bytes, &mut ix).expect("Failed to read EncodedValue");
         match encoded_value {

@@ -589,7 +589,7 @@ impl DexFile {
 
             if let Some(class_data) = &c.class_data
             {
-                // Fields
+                // Static fields
                 for (i, f) in class_data.static_fields.iter().enumerate()
                 {
                     let dex_field = &self.fields[f.field_idx];
@@ -603,13 +603,27 @@ impl DexFile {
                                 match s[i]
                                 {
                                     EncodedValue::Null => None,
-                                    _ => Some(s[i].to_string())
+                                    _ => Some(s[i].to_string(&self.strings))
                                 }
                             }
                             else { None }
                         }
                         else { None },
                         annotations: vec![],
+                    });
+                }
+
+                // Instance fields
+                for (i, f) in class_data.instance_fields.iter().enumerate()
+                {
+                    let dex_field = &self.fields[f.field_idx];
+
+                    smali.fields.push(SmaliField {
+                        name: self.get_string(dex_field.name_idx)?,
+                        modifiers: Modifiers::from_u32(f.access_flags),
+                        signature: TypeSignature::from_jni(&self.get_string(self.types[dex_field.type_idx])?),
+                        initial_value: None,
+                        annotations: vec![]
                     });
                 }
             }
@@ -831,7 +845,7 @@ mod tests {
         println!("Classes: {:} [header: {:}]", dex.class_defs.len(), dex.header.class_defs_size);
 
         let smali = dex.to_smali().expect("Failed to generate smali");
-        println!("\n{}", &smali[3100].to_smali());
+        println!("\n{}", &smali[3104].to_smali());
 
     }
 }
