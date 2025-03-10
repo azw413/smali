@@ -21,7 +21,6 @@ macro_rules! err {
     };
 }
 
-pub(crate) use err;
 
 #[macro_export]
 macro_rules! fail {
@@ -42,7 +41,6 @@ macro_rules! fail {
     };
 }
 
-pub(crate) use fail;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct DexError

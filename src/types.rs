@@ -944,7 +944,7 @@ impl SmaliClass {
                 c.file_path = Some(PathBuf::from(path));
                 Ok(c)
             }
-            Err(e) => { Err(SmaliError { details: format!("Error loading file {}: {}", path.to_str().unwrap(), e.to_string()) }) }
+            Err(e) => { Err(SmaliError { details: format!("Error loading file {}: {}", path.to_str().unwrap(), e) }) }
         }
     }
 
@@ -1002,7 +1002,7 @@ impl SmaliClass {
     pub fn write_to_directory(&self, path: &Path) -> Result<(), SmaliError>
     {
 
-        if !path.exists() { let _ = fs::create_dir(&path); }
+        if !path.exists() { let _ = fs::create_dir(path); }
 
         // Create package dir structure
         let class_name = self.name.as_java_type();

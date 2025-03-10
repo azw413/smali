@@ -1,4 +1,3 @@
-use once_cell;
 use once_cell::sync::Lazy;
 use crate::dex::opcode_format::{Format, Opcode, OpcodeFlags, ReferenceType};
 

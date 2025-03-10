@@ -1,14 +1,14 @@
 
 use nom::bytes::complete::{escaped, is_not, tag, take_while, take_while1};
 use nom::branch::{ alt };
-use nom::character::complete::{alphanumeric1, char, multispace0, multispace1, space0, newline, none_of, not_line_ending, one_of, space1, digit1, line_ending};
+use nom::character::complete::{alphanumeric1, char, multispace0, multispace1, space0, newline, none_of, not_line_ending, one_of, space1};
 use nom::combinator::{opt, value};
 use nom::Err::Failure;
 use nom::error::{Error, ErrorKind};
 use nom::{IResult};
 use nom::multi::{many0, many1};
 use nom::sequence::{delimited, pair, preceded, terminated};
-use crate::smali_instructions::{DexInstruction, Label, parse_label, parse_literal_int };
+use crate::smali_instructions::{Label, parse_label, parse_literal_int };
 use crate::smali_instructions::parse_instruction as parse_dex_instruction;
 use crate::types::*;
 
@@ -256,7 +256,7 @@ fn parse_annotation(smali: &str, subannotation: bool) -> IResult<&str, SmaliAnno
         // Can't parse this - error
         if !found
         {
-            return IResult::Err(Failure(Error { input: input, code: ErrorKind::Fail }));
+            return IResult::Err(Failure(Error { input, code: ErrorKind::Fail }));
         }
     }
 }
@@ -316,7 +316,7 @@ fn parse_field(smali: &str) -> IResult<&str, SmaliField>
             // Can't parse this - error
             if !found
             {
-                return IResult::Err(Failure(Error { input: input, code: ErrorKind::Fail }));
+                return IResult::Err(Failure(Error { input, code: ErrorKind::Fail }));
             }
         }
     }
@@ -374,7 +374,7 @@ pub fn parse_catchall_directive(input: &str) -> IResult<&str, CatchDirective> {
 
 /// Helper: returns true for valid hexadecimal digit characters.
 fn is_hex_digit(c: char) -> bool {
-    c.is_digit(16)
+    c.is_ascii_hexdigit()
 }
 
 
@@ -407,7 +407,7 @@ fn parse_array_element_with_width(input: &str, width: i32) -> IResult<&str, Arra
         match suffix {
             't' => ArrayDataElement::Byte(value as i8),
             's' => ArrayDataElement::Short(value as i16),
-            'l' => ArrayDataElement::Long(value as i64),
+            'l' => ArrayDataElement::Long(value),
             'f' => ArrayDataElement::Float(f32::from_bits(value as u32)),
             'd' => ArrayDataElement::Double(f64::from_bits(value as u64)),
             _ => unreachable!(),
@@ -418,7 +418,7 @@ fn parse_array_element_with_width(input: &str, width: i32) -> IResult<&str, Arra
             1 => ArrayDataElement::Byte(value as i8),
             2 => ArrayDataElement::Short(value as i16),
             4 => ArrayDataElement::Int(value as i32),
-            8 => ArrayDataElement::Long(value as i64),
+            8 => ArrayDataElement::Long(value),
             _ => ArrayDataElement::Int(value as i32),
         }
     };
@@ -430,7 +430,7 @@ pub fn parse_array_data(input: &str) -> IResult<&str, ArrayDataDirective> {
     let (input, _) = tag(".array-data")(input)?;
     let (input, _) = space1(input)?;
     let (input, width_val): (&str, i32)  = parse_literal_int(input)?;
-    let element_width = width_val as i32;
+    let element_width = width_val;
     let (input, _) = opt(newline)(input)?;
     let (input, elements) = many0(terminated(|i| parse_array_element_with_width(i, element_width), opt(newline)))(input)?;
     let (input, _) = space0(input)?;
@@ -740,12 +740,12 @@ pub(crate) fn parse_class(smali: &str) -> IResult<&str, SmaliClass>
             input = o; found = true;
         }
 
-        if input.len() == 0 { return IResult::Ok((input, dex)) }
+        if input.is_empty() { return IResult::Ok((input, dex)) }
 
         // Can't parse this - error
         if !found
         {
-            return IResult::Err(Failure(Error { input: input, code: ErrorKind::Fail }));
+            return IResult::Err(Failure(Error { input, code: ErrorKind::Fail }));
         }
     }
 }

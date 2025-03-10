@@ -94,7 +94,7 @@ pub(crate) fn write_u2(buffer: &mut Vec<u8>, val: u16) -> usize
 
 pub(crate) fn write_u4(buffer: &mut Vec<u8>, val: u32) -> usize
 {
-    for i in (0..4)
+    for i in 0..4
     {
         buffer.push((val >> (i * 8)) as u8);
     }

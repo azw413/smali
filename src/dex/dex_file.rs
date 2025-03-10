@@ -1,11 +1,8 @@
 /* Dex file format structures */
 
-use std::any::Any;
-use std::error::Error;
 use crate::dex::error::DexError;
 use crate::dex::{read_u1, read_u2, read_u4, read_uleb128, read_uleb128p1, read_x, write_u1, write_u2, write_u4, write_uleb128, write_uleb128p1, write_x};
 use cesu8::to_java_cesu8;
-use log::error;
 use crate::dex::encoded_values::{read_encoded_array, EncodedValue};
 use crate::types::{Modifiers, ObjectIdentifier, SmaliClass, SmaliField, TypeSignature};
 
@@ -86,7 +83,7 @@ impl PrototypeItem
         let mut s = dex_file.strings[self.shorty_idx].to_string()?;
         s.push_str(" (");
         for t in &self.parameters.0 { s.push_str(&dex_file.strings[dex_file.types[*t]].to_string()?) ; }
-        s.push_str(")");
+        s.push(')');
         s.push_str(&dex_file.strings[dex_file.types[self.return_type_idx]].to_string()?) ;
         Ok(s)
     }
@@ -305,7 +302,7 @@ impl ClassDataItem
         let mut static_fields = vec![];
         let mut instance_fields = vec![];
         let mut direct_methods = vec![];
-        let mut virtual_methods = vec![];
+        let virtual_methods = vec![];
 
         let mut offset = 0;
         for _ in 0..static_field_size {
@@ -402,7 +399,7 @@ impl ClassDefItem
         let interfaces = if interface_offset > 0  { Some(TypeList::read(bytes, &mut interface_offset)?) }
             else { None };
         let source_file_idx = read_u4(bytes, ix)? as StringId;
-        let mut annotations_offset = read_u4(bytes, ix)? as usize;
+        let annotations_offset = read_u4(bytes, ix)? as usize;
         // Todo: load annotations
         let mut class_data_offset = read_u4(bytes, ix)? as usize;
         let class_data = if class_data_offset > 0 { Some(ClassDataItem::read(bytes, &mut class_data_offset)?) }
@@ -423,10 +420,10 @@ impl ClassDefItem
 
     pub fn write(&self, bytes: &mut Vec<u8>) -> usize
     {
-        let mut c = 0;
+        
         //c += write_x(bytes, &self.magic);
 
-        c
+        0
     }
 }
 
@@ -489,7 +486,7 @@ impl DexFile {
         *ix = dex.header.type_ids_off as usize;
         for _ in 0..dex.header.type_ids_size
         {
-            let mut type_id: TypeId = read_u4(bytes, ix)? as usize;
+            let type_id: TypeId = read_u4(bytes, ix)? as usize;
             if let DexString::Decoded(s) = &dex.strings[type_id]
             {
                 dex.types.push(type_id);

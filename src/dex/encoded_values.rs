@@ -212,67 +212,67 @@ impl EncodedValue
                 c += write_u1(bytes, *val as u8)
             },
             EncodedValue::Short(value) => {
-                c += write_u1(bytes, (((byte_size_i16(*value) - 1) << 5) | 0x02) as u8);
+                c += write_u1(bytes, ((byte_size_i16(*value) - 1) << 5) | 0x02);
                 let x = &value.to_le_bytes()[..byte_size_i16(*value) as usize];
                 c += write_x(bytes, x);
             },
             EncodedValue::Char(value) => {
-                c += write_u1(bytes, (((byte_size_u16(*value) - 1) << 5) | 0x03) as u8);
+                c += write_u1(bytes, ((byte_size_u16(*value) - 1) << 5) | 0x03);
                 let x = &value.to_le_bytes()[..byte_size_u16(*value) as usize];
                 c += write_x(bytes, x);
             },
             EncodedValue::Int(value) => {
-                c += write_u1(bytes, (((byte_size_i32(*value) - 1) << 5) | 0x04) as u8);
+                c += write_u1(bytes, ((byte_size_i32(*value) - 1) << 5) | 0x04);
                 let x = &value.to_le_bytes()[..byte_size_i32(*value) as usize];
                 c += write_x(bytes, x);
             },
             EncodedValue::Long(value) => {
-                c += write_u1(bytes, (((byte_size_i64(*value) - 1) << 5) | 0x06) as u8);
+                c += write_u1(bytes, ((byte_size_i64(*value) - 1) << 5) | 0x06);
                 let x = &value.to_le_bytes()[..byte_size_i64(*value) as usize];
                 c += write_x(bytes, x);
             },
             EncodedValue::Float(value) => {
-                c += write_u1(bytes, (((byte_size_f32(*value) - 1) << 5) | 0x10) as u8);
+                c += write_u1(bytes, ((byte_size_f32(*value) - 1) << 5) | 0x10);
                 let x = &value.to_le_bytes()[..byte_size_f32(*value) as usize];
                 c += write_x(bytes, x);
             },
             EncodedValue::Double(value) => {
-                c += write_u1(bytes, (((byte_size_f64(*value) - 1) << 5) | 0x11) as u8);
+                c += write_u1(bytes, ((byte_size_f64(*value) - 1) << 5) | 0x11);
                 let x = &value.to_le_bytes()[..byte_size_f64(*value) as usize];
                 c += write_x(bytes, x);
             },
             EncodedValue::MethodType(value) => {
-                c += write_u1(bytes, (((byte_size_u32(*value) - 1) << 5) | 0x15) as u8);
+                c += write_u1(bytes, ((byte_size_u32(*value) - 1) << 5) | 0x15);
                 let x = &value.to_le_bytes()[..byte_size_u32(*value) as usize];
                 c += write_x(bytes, x);
             },
             EncodedValue::MethodHandle(value) => {
-                c += write_u1(bytes, (((byte_size_u32(*value) - 1) << 5) | 0x16) as u8);
+                c += write_u1(bytes, ((byte_size_u32(*value) - 1) << 5) | 0x16);
                 let x = &value.to_le_bytes()[..byte_size_u32(*value) as usize];
                 c += write_x(bytes, x);
             },
             EncodedValue::String(value) => {
-                c += write_u1(bytes, (((byte_size_u32(*value) - 1) << 5) | 0x17) as u8);
+                c += write_u1(bytes, ((byte_size_u32(*value) - 1) << 5) | 0x17);
                 let x = &value.to_le_bytes()[..byte_size_u32(*value) as usize];
                 c += write_x(bytes, x);
             },
             EncodedValue::Type(value) => {
-                c += write_u1(bytes, (((byte_size_u32(*value) - 1) << 5) | 0x18) as u8);
+                c += write_u1(bytes, ((byte_size_u32(*value) - 1) << 5) | 0x18);
                 let x = &value.to_le_bytes()[..byte_size_u32(*value) as usize];
                 c += write_x(bytes, x);
             },
             EncodedValue::Field(value) => {
-                c += write_u1(bytes, (((byte_size_u32(*value) - 1) << 5) | 0x19) as u8);
+                c += write_u1(bytes, ((byte_size_u32(*value) - 1) << 5) | 0x19);
                 let x = &value.to_le_bytes()[..byte_size_u32(*value) as usize];
                 c += write_x(bytes, x);
             },
             EncodedValue::Method(value) => {
-                c += write_u1(bytes, (((byte_size_u32(*value) - 1) << 5) | 0x1a) as u8);
+                c += write_u1(bytes, ((byte_size_u32(*value) - 1) << 5) | 0x1a);
                 let x = &value.to_le_bytes()[..byte_size_u32(*value) as usize];
                 c += write_x(bytes, x);
             },
             EncodedValue::Enum(value) => {
-                c += write_u1(bytes, (((byte_size_u32(*value) - 1) << 5) | 0x1b) as u8);
+                c += write_u1(bytes, ((byte_size_u32(*value) - 1) << 5) | 0x1b);
                 let x = &value.to_le_bytes()[..byte_size_u32(*value) as usize];
                 c += write_x(bytes, x);
             },

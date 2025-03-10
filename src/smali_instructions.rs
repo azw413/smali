@@ -1,18 +1,15 @@
 use nom::{
     branch::alt,
-    bytes::complete::{is_not, tag, take_until, take_while1},
+    bytes::complete::{tag, take_until, take_while1},
     character::complete::{alphanumeric1, char, digit1, multispace0, space0, space1},
-    combinator::map,
-    multi::separated_list1,
-    sequence::{delimited, preceded, separated_pair, tuple},
+    sequence::{delimited, preceded},
     IResult,
 };
 use std::fmt;
 use std::fmt::Debug;
-use nom::bytes::complete::{escaped, take_while};
+use nom::bytes::complete::escaped;
 use nom::character::complete::{none_of, one_of};
-use nom::combinator::{fail, opt};
-use nom::error::{convert_error, Error, ErrorKind, make_error, ParseError, VerboseError};
+use nom::combinator::opt;
 use nom::multi::separated_list0;
 use nom::sequence::pair;
 use crate::types::{parse_methodsignature, parse_typesignature};
@@ -904,7 +901,7 @@ pub(crate) fn parse_literal_int<T>(input: &str) -> IResult<&str, T>
 
     if input.starts_with("0x") || input.starts_with("0X") {
         let (input, _) = alt((tag("0x"), tag("0X")))(input)?;
-        let (input, hex_digits) = take_while1(|c: char| c.is_digit(16))(input)?;
+        let (input, hex_digits) = take_while1(|c: char| c.is_ascii_hexdigit())(input)?;
         let (input, _) = opt(char('L'))(input)?;
         if sign.is_some() {
             // Parse the digits as a u64, then handle the negative value.
