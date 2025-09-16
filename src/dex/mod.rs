@@ -9,7 +9,6 @@ pub(crate) mod encoded_values;
 mod opcode_format;
 mod opcodes;
 
-
 use crate::dex::error::DexError;
 use crate::dex::leb::{decode_uleb128, decode_uleb128p1, encode_uleb128, encode_uleb128p1};
 

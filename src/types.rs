@@ -1,40 +1,43 @@
-
 /* Struct to represent a java object type identifer e.g. java.lang.Object */
 /* They are stored in the smali native (also JNI) format e.g. Ljava/lang/Object; */
 
-use std::error::Error;
-use std::{fmt, fs};
-use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use crate::smali_ops::{DexOp, Label};
+use crate::smali_parse::parse_class;
+use crate::smali_write::write_class;
+use nom::Err::Failure;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_while};
 use nom::character::complete::{alphanumeric0, char};
-use nom::Err::Failure;
 use nom::error::ErrorKind;
-use nom::IResult;
 use nom::multi::many0;
 use nom::sequence::terminated;
+use nom::{IResult, Parser};
 use serde::{Deserialize, Serialize};
+use std::error::Error;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::{fmt, fs};
 use crate::dex::dex_file::{ACC_ABSTRACT, ACC_ANNOTATION, ACC_BRIDGE, ACC_CONSTRUCTOR, ACC_DECLARED_SYNCHRONIZED, ACC_ENUM, ACC_FINAL, ACC_INTERFACE, ACC_NATIVE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_STRICT, ACC_SYNCHRONIZED, ACC_SYNTHETIC, ACC_TRANSIENT, ACC_VARARGS, ACC_VOLATILE};
-use crate::smali_instructions::{DexInstruction, Label};
-use crate::smali_parse::parse_class;
-use crate::smali_write::write_class;
+
 
 /* Custom error for our command helper */
 #[derive(Debug)]
 pub struct SmaliError {
-    pub details: String
+    pub details: String,
 }
 
 impl SmaliError {
     pub fn new(msg: &str) -> SmaliError {
-        SmaliError{details: msg.to_string()}
+        SmaliError {
+            details: msg.to_string(),
+        }
     }
 }
 
 impl fmt::Display for SmaliError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,"{}",self.details)
+        write!(f, "{}", self.details)
     }
 }
 
@@ -43,7 +46,6 @@ impl Error for SmaliError {
         &self.details
     }
 }
-
 
 /// Represents a Java object identifier
 ///
@@ -59,34 +61,27 @@ impl Error for SmaliError {
 ///  assert_eq!(o.as_jni_type(), "Lcom/basic/Test;");
 /// ```
 #[derive(Debug, Eq, Serialize, Deserialize)]
-pub struct ObjectIdentifier
-{
+pub struct ObjectIdentifier {
     pub(crate) class_name: String,
     pub(crate) type_arguments: Option<Vec<TypeSignature>>,
     pub(crate) suffix: Option<String>,
 }
 
-impl PartialEq<Self> for ObjectIdentifier
-{
-    fn eq(&self, other: &Self) -> bool
-    {
+impl PartialEq<Self> for ObjectIdentifier {
+    fn eq(&self, other: &Self) -> bool {
         self.class_name == other.class_name
     }
 }
 
-impl Hash for ObjectIdentifier
-{
-    fn hash<H: Hasher>(&self, state: &mut H)
-    {
+impl Hash for ObjectIdentifier {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.class_name.hash(state);
     }
 }
 
-impl fmt::Display for ObjectIdentifier
-{
+impl fmt::Display for ObjectIdentifier {
     // This trait requires `fmt` with this exact signature.
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result
-    {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Write strictly the first element into the supplied output
         // stream: `f`. Returns `fmt::Result` which indicates whether the
         // operation succeeded or failed. Note that `write!` uses syntax which
@@ -95,18 +90,13 @@ impl fmt::Display for ObjectIdentifier
     }
 }
 
-impl ObjectIdentifier
-{
+impl ObjectIdentifier {
     #[allow(dead_code)]
-    pub fn from_jni_type(t: &str) -> ObjectIdentifier
-    {
+    pub fn from_jni_type(t: &str) -> ObjectIdentifier {
         let ts = parse_typesignature(t).unwrap();
-        if let (_, TypeSignature::Object(o)) = ts
-        {
+        if let (_, TypeSignature::Object(o)) = ts {
             o
-        }
-        else
-        {
+        } else {
             ObjectIdentifier {
                 class_name: t
                     .strip_prefix('L')
@@ -121,8 +111,7 @@ impl ObjectIdentifier
     }
 
     #[allow(dead_code)]
-    pub fn from_java_type(t: &str) -> ObjectIdentifier
-    {
+    pub fn from_java_type(t: &str) -> ObjectIdentifier {
         let class_name = t.replace('.', "/");
         ObjectIdentifier {
             class_name,
@@ -131,21 +120,17 @@ impl ObjectIdentifier
         }
     }
 
-    pub fn as_jni_type(&self) -> String
-    {
+    pub fn as_jni_type(&self) -> String {
         let mut s = "L".to_string();
         s.push_str(&self.class_name);
-        if let Some(v) = &self.type_arguments
-        {
+        if let Some(v) = &self.type_arguments {
             s.push('<');
-            for t in v
-            {
+            for t in v {
                 s.push_str(&t.to_jni());
             }
             s.push('>');
         }
-        if let Some(suffix) = &self.suffix
-        {
+        if let Some(suffix) = &self.suffix {
             s.push('.');
             s.push_str(suffix);
         }
@@ -153,8 +138,7 @@ impl ObjectIdentifier
         s
     }
 
-    pub fn as_java_type(&self) -> String
-    {
+    pub fn as_java_type(&self) -> String {
         self.class_name.replace('/', ".")
     }
 }
@@ -170,8 +154,7 @@ impl ObjectIdentifier
 ///  assert_eq!(t.to_jni(), "Z");
 /// ```
 #[derive(Debug, Eq, Serialize, Deserialize)]
-pub enum TypeSignature
-{
+pub enum TypeSignature {
     Array(Box<TypeSignature>),
     Object(ObjectIdentifier),
     Int,
@@ -191,19 +174,15 @@ pub enum TypeSignature
     WildcardStar,
 }
 
-impl PartialEq<Self> for TypeSignature
-{
-    fn eq(&self, other: &Self) -> bool
-    {
+impl PartialEq<Self> for TypeSignature {
+    fn eq(&self, other: &Self) -> bool {
         self.to_jni() == other.to_jni()
     }
 }
 
-impl fmt::Display for TypeSignature
-{
+impl fmt::Display for TypeSignature {
     // This trait requires `fmt` with this exact signature.
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result
-    {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // Write strictly the first element into the supplied output
         // stream: `f`. Returns `fmt::Result` which indicates whether the
         // operation succeeded or failed. Note that `write!` uses syntax which
@@ -212,18 +191,15 @@ impl fmt::Display for TypeSignature
     }
 }
 
-impl TypeSignature
-{
-    pub fn from_jni(s: &str) -> TypeSignature
-    {
-        let (_, ts) = parse_typesignature(s).unwrap_or_else(|_| panic!("Could not parse TypeSignature: {}", s));
+impl TypeSignature {
+    pub fn from_jni(s: &str) -> TypeSignature {
+        let (_, ts) =
+            parse_typesignature(s).unwrap_or_else(|_| panic!("Could not parse TypeSignature: {s}"));
         ts
     }
 
-    pub fn to_jni(&self) -> String
-    {
-        match self
-        {
+    pub fn to_jni(&self) -> String {
+        match self {
             TypeSignature::Array(a) => "[".to_string() + &a.to_jni(),
             TypeSignature::Bool => "Z".to_string(),
             TypeSignature::Byte => "B".to_string(),
@@ -235,29 +211,27 @@ impl TypeSignature
             TypeSignature::Double => "D".to_string(),
             TypeSignature::Object(o) => o.as_jni_type(),
             TypeSignature::Void => "V".to_string(),
-            TypeSignature::TypeVariableSignature(i) => format!("T{};", i),
-            TypeSignature::TypeParameters(params, rest) =>
-                {
-                    let mut s = "<".to_string();
-                    for p in params
-                    {
-                        s.push_str(&p.to_jni())
-                    }
-                    s.push('>');
-                    s.push_str(&rest.to_jni());
-                    s
+            TypeSignature::TypeVariableSignature(i) => format!("T{i};"),
+            TypeSignature::TypeParameters(params, rest) => {
+                let mut s = "<".to_string();
+                for p in params {
+                    s.push_str(&p.to_jni())
                 }
-            TypeSignature::TypeParameter(identifier, signature) => format!("{}:{}", identifier, signature.to_jni()),
+                s.push('>');
+                s.push_str(&rest.to_jni());
+                s
+            }
+            TypeSignature::TypeParameter(identifier, signature) => {
+                format!("{}:{}", identifier, signature.to_jni())
+            }
             TypeSignature::WildcardPlus => "+".to_string(),
             TypeSignature::WildcardMinus => "-".to_string(),
             TypeSignature::WildcardStar => "*".to_string(),
         }
     }
 
-    pub fn to_java(&self) -> String
-    {
-        match self
-        {
+    pub fn to_java(&self) -> String {
+        match self {
             TypeSignature::Array(a) => format!("{}[]", a.to_java()),
             TypeSignature::Bool => "boolean".to_string(),
             TypeSignature::Byte => "byte".to_string(),
@@ -285,44 +259,36 @@ impl TypeSignature
 ///  assert_eq!(m.result, TypeSignature::Void);
 /// ```
 #[derive(Debug, Serialize, Deserialize)]
-pub struct MethodSignature
-{
+pub struct MethodSignature {
     pub(crate) type_parameters: Option<Vec<TypeSignature>>,
     pub args: Vec<TypeSignature>,
     pub result: TypeSignature,
     pub throws: Option<TypeSignature>,
 }
 
-impl MethodSignature
-{
-    pub fn from_jni(s: &str) -> MethodSignature
-    {
+impl MethodSignature {
+    pub fn from_jni(s: &str) -> MethodSignature {
         let (_, m) = parse_methodsignature(s).expect("Can't parse MethodSignature");
         m
     }
 
-    pub fn to_jni(&self) -> String
-    {
+    pub fn to_jni(&self) -> String {
         let mut s = String::new();
-        if let Some(v) = &self.type_parameters
-        {
+        if let Some(v) = &self.type_parameters {
             s.push('<');
-            for t in v
-            {
+            for t in v {
                 s.push_str(&t.to_jni());
             }
             s.push('>');
         }
         s.push('(');
-        for t in &self.args
-        {
+        for t in &self.args {
             let ts = t.to_jni();
             s.push_str(&ts);
         }
         s.push(')');
         s.push_str(&self.result.to_jni());
-        if let Some(t) = &self.throws
-        {
+        if let Some(t) = &self.throws {
             s.push('^');
             s.push_str(&t.to_jni());
         }
@@ -330,23 +296,20 @@ impl MethodSignature
     }
 }
 
-pub(crate) fn parse_typesignature(smali: &str) -> IResult<&str, TypeSignature>
-{
+pub(crate) fn parse_typesignature(smali: &str) -> IResult<&str, TypeSignature> {
     // Any type parameters
-    let gt: IResult<&str, _> = char('<')(smali);
-    if let Ok((o, _)) = gt
-    {
+    let gt: IResult<&str, _> = char('<').parse(smali);
+    if let Ok((o, _)) = gt {
         // Type Arguments
-        let (o, ta) = many0(parse_typesignature)(o)?;
+        let (o, ta) = many0(parse_typesignature).parse(o)?;
         let (o, _) = char('>')(o)?;
         let (nxt, ts_rest) = parse_typesignature(o)?;
         return Ok((nxt, TypeSignature::TypeParameters(ta, Box::new(ts_rest))));
     }
 
     // Any type identifiers ?
-    let identifier_tag: IResult<&str, &str> = terminated(alphanumeric0, char(':'))(smali);
-    if let Ok((o, i)) = identifier_tag
-    {
+    let identifier_tag: IResult<&str, &str> = terminated(alphanumeric0, char(':')).parse(smali);
+    if let Ok((o, i)) = identifier_tag {
         let (nxt, nxt_ts) = parse_typesignature(o)?;
         return Ok((
             nxt,
@@ -357,17 +320,15 @@ pub(crate) fn parse_typesignature(smali: &str) -> IResult<&str, TypeSignature>
     // Object
     let mut type_arguments = None;
     let mut suffix = None;
-    let l: IResult<&str, &str> = tag("L")(smali);
-    if let Ok((o, _)) = l
-    {
+    let l: IResult<&str, &str> = tag("L").parse(smali);
+    if let Ok((o, _)) = l {
         let mut nxt;
         let (o, t) = take_while(|x| (x != ';') && (x != '<'))(o)?;
         nxt = o;
         let gt: IResult<&str, std::primitive::char> = char('<')(o);
-        if let Ok((o, _)) = gt
-        {
+        if let Ok((o, _)) = gt {
             // Type Arguments
-            let (o, ta) = many0(parse_typesignature)(o)?;
+            let (o, ta) = many0(parse_typesignature).parse(o)?;
             let (o, _) = char('>')(o)?;
             type_arguments = Some(ta);
             nxt = o;
@@ -375,8 +336,7 @@ pub(crate) fn parse_typesignature(smali: &str) -> IResult<&str, TypeSignature>
 
         // Is there a suffix?
         let l: IResult<&str, &str> = tag(".")(nxt);
-        if let Ok((o, _)) = l
-        {
+        if let Ok((o, _)) = l {
             let (o, t) = take_while(|x| x != ';')(o)?;
             suffix = Some(t.to_string());
             nxt = o;
@@ -392,9 +352,8 @@ pub(crate) fn parse_typesignature(smali: &str) -> IResult<&str, TypeSignature>
     }
 
     // Type Variable
-    let l: IResult<&str, &str> = tag("T")(smali);
-    if let Ok((o, _)) = l
-    {
+    let l: IResult<&str, &str> = tag("T").parse(smali);
+    if let Ok((o, _)) = l {
         let (o, t) = take_while(|x| x != ';')(o)?;
         let nxt = o;
         let (o, _) = char(';')(nxt)?;
@@ -403,9 +362,8 @@ pub(crate) fn parse_typesignature(smali: &str) -> IResult<&str, TypeSignature>
     }
 
     // Array
-    let b: IResult<&str, &str> = tag("[")(smali);
-    if let Ok((o, _)) = b
-    {
+    let b: IResult<&str, &str> = tag("[").parse(smali);
+    if let Ok((o, _)) = b {
         let (o, t) = parse_typesignature(o)?;
         return Ok((o, TypeSignature::Array(Box::new(t))));
     }
@@ -424,11 +382,10 @@ pub(crate) fn parse_typesignature(smali: &str) -> IResult<&str, TypeSignature>
         tag("*"),
         tag("+"),
         tag("-"),
-    ))(smali);
-    if let Ok((o, t)) = p
-    {
-        let ts = match t
-        {
+    ))
+        .parse(smali);
+    if let Ok((o, t)) = p {
+        let ts = match t {
             "Z" => TypeSignature::Bool,
             "B" => TypeSignature::Byte,
             "C" => TypeSignature::Char,
@@ -451,28 +408,25 @@ pub(crate) fn parse_typesignature(smali: &str) -> IResult<&str, TypeSignature>
     }))
 }
 
-pub(crate) fn parse_methodsignature(smali: &str) -> IResult<&str, MethodSignature>
-{
+pub(crate) fn parse_methodsignature(smali: &str) -> IResult<&str, MethodSignature> {
     let mut type_parameters = None;
     let mut throws = None;
     let mut nxt = smali;
     let gt: IResult<&str, _> = char('<')(nxt);
-    if let Ok((o, _)) = gt
-    {
+    if let Ok((o, _)) = gt {
         // Type Arguments
-        let (o, ta) = many0(parse_typesignature)(o)?;
+        let (o, ta) = many0(parse_typesignature).parse(o)?;
         let (o, _) = char('>')(o)?;
         type_parameters = Some(ta);
         nxt = o;
     }
     let (o, _) = tag("(")(nxt)?;
-    let (o, a) = many0(parse_typesignature)(o)?;
+    let (o, a) = many0(parse_typesignature).parse(o)?;
     let (o, _) = tag(")")(o)?;
     let (o, r) = parse_typesignature(o)?;
     nxt = o;
     let up: IResult<&str, std::primitive::char> = char('^')(nxt);
-    if let Ok((o, _)) = up
-    {
+    if let Ok((o, _)) = up {
         // Throws
         let (o, ta) = parse_typesignature(o)?;
         throws = Some(ta);
@@ -512,13 +466,13 @@ pub enum Modifier {
     Annotation,
     Enum,
     Constructor,
-    DeclaredSynchronized
+    DeclaredSynchronized,
 }
 
-impl Modifier {
-    pub fn from_str(s: &str) -> Self
-    {
-        match s {
+impl FromStr for Modifier {
+    type Err = SmaliError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
             "public" => Self::Public,
             "protected" => Self::Protected,
             "private" => Self::Private,
@@ -537,12 +491,17 @@ impl Modifier {
             "strict" => Self::Static,
             "bridge" => Self::Bridge,
             "constructor" => Self::Constructor,
-            _ => Self::Public // todo: Fix this
-        }
+            _ => {
+                return Err(SmaliError {
+                    details: "Unknown modifier".to_string(),
+                });
+            }
+        })
     }
+}
 
-    pub fn to_str(&self) -> &str
-    {
+impl Modifier {
+    pub fn to_str(&self) -> &str {
         match self {
             Self::Public => "public",
             Self::Protected => "protected",
@@ -562,7 +521,7 @@ impl Modifier {
             Self::Strict => "strict",
             Self::Bridge => "bridge",
             Self::Constructor => "constructor",
-            Self::DeclaredSynchronized => "synchronized"
+            Self::DeclaredSynchronized => "synchronized",
         }
     }
 }
@@ -597,22 +556,22 @@ impl Modifiers
     }
 }
 
+
 /// Simple enum to represent annotation visibility: build, runtime, system.
 ///
 #[derive(Debug)]
 pub enum AnnotationVisibility {
     Build,
     Runtime,
-    System
+    System,
 }
 
 impl AnnotationVisibility {
-    pub fn to_str(&self) -> &str
-    {
+    pub fn to_str(&self) -> &str {
         match self {
             Self::Build => "build",
             Self::Runtime => "runtime",
-            Self::System => "system"
+            Self::System => "system",
         }
     }
 }
@@ -624,20 +583,25 @@ pub enum AnnotationValue {
     Single(String),
     Array(Vec<String>),
     SubAnnotation(SmaliAnnotation),
-    Enum(ObjectIdentifier, String)
+    Enum(ObjectIdentifier, String),
 }
 
-impl AnnotationVisibility {
-    pub fn from_str(s: &str) -> Self
-    {
-        match s {
+impl FromStr for AnnotationVisibility {
+    type Err = SmaliError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
             "build" => Self::Build,
+            "runtime" => Self::Runtime,
             "system" => Self::System,
-            _ => Self::Runtime
-        }
+            _ => {
+                return Err(SmaliError {
+                    details: "Unknown Annotation visibility".to_string(),
+                });
+            }
+        })
     }
 }
-
 
 /// Name, value pair for annotation elements. There can be several of these per annotation.
 ///
@@ -672,7 +636,6 @@ pub struct SmaliField {
     pub annotations: Vec<SmaliAnnotation>,
 }
 
-
 /// Represents a protected range in a try/catch directive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TryRange {
@@ -697,22 +660,23 @@ pub enum CatchDirective {
         handler: Label,
     },
     /// A catch-all directive.
-    CatchAll {
-        try_range: TryRange,
-        handler: Label,
-    },
+    CatchAll { try_range: TryRange, handler: Label },
 }
 
 impl fmt::Display for CatchDirective {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CatchDirective::Catch { exception, try_range, handler } => {
+            CatchDirective::Catch {
+                exception,
+                try_range,
+                handler,
+            } => {
                 // Print as: .catch <exception> <try_range> <handler>
-                write!(f, ".catch {} {} {}", exception, try_range, handler)
+                write!(f, ".catch {exception} {try_range} {handler}")
             }
             CatchDirective::CatchAll { try_range, handler } => {
                 // Print as: .catchall <try_range> <handler>
-                write!(f, ".catchall {} {}", try_range, handler)
+                write!(f, ".catchall {try_range} {handler}")
             }
         }
     }
@@ -731,10 +695,10 @@ pub enum ArrayDataElement {
 impl fmt::Display for ArrayDataElement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ArrayDataElement::Byte(b)   => write!(f, "{:#x}t", b),
-            ArrayDataElement::Short(s)  => write!(f, "{:#x}s", s),
-            ArrayDataElement::Int(i)    => write!(f, "{:#x}", i),
-            ArrayDataElement::Long(l)   => write!(f, "{:#x}l", l),
+            ArrayDataElement::Byte(b) => write!(f, "{b:#x}t"),
+            ArrayDataElement::Short(s) => write!(f, "{s:#x}s"),
+            ArrayDataElement::Int(i) => write!(f, "{i:#x}"),
+            ArrayDataElement::Long(l) => write!(f, "{l:#x}l"),
             ArrayDataElement::Float(fl) => write!(f, "{:#x}f", fl.to_bits()),
             ArrayDataElement::Double(d) => write!(f, "{:#x}d", d.to_bits()),
         }
@@ -758,7 +722,7 @@ impl fmt::Display for ArrayDataDirective {
         for chunk in self.elements.chunks(4) {
             write!(f, "    ")?;
             for elem in chunk {
-                write!(f, "{} ", elem)?;
+                write!(f, "{elem} ")?;
             }
             writeln!(f)?;
         }
@@ -778,7 +742,7 @@ impl fmt::Display for PackedSwitchDirective {
         writeln!(f, ".packed-switch {:#x}", self.first_key)?;
         // Print each target label, indented.
         for target in &self.targets {
-            writeln!(f, "    {}", target)?;
+            writeln!(f, "    {target}")?;
         }
         // Print the footer without a trailing newline.
         write!(f, ".end packed-switch")
@@ -811,25 +775,35 @@ impl fmt::Display for SparseSwitchDirective {
         writeln!(f, ".sparse-switch")?;
         // Print each entry indented.
         for entry in &self.entries {
-            writeln!(f, "    {}", entry)?;
+            writeln!(f, "    {entry}")?;
         }
         // Print the footer.
         write!(f, ".end sparse-switch")
     }
 }
 
-
-/// An enum representing instructions within a method, these can be a label, a line number or a dex instruction as a String.
+/// An enum representing operations within a method, these can be a label, a line number or a dex operation as a String.
 ///
 #[derive(Debug)]
-pub enum SmaliInstruction {
+pub enum SmaliOp {
     Label(Label),
     Line(u32),
-    Instruction(DexInstruction),
+    Op(DexOp),
     Catch(CatchDirective),
     ArrayData(ArrayDataDirective),
     PackedSwitch(PackedSwitchDirective),
     SparseSwitch(SparseSwitchDirective),
+}
+
+/// Struct representing a method parameter
+#[derive(Debug)]
+pub struct SmaliParam {
+    /// Parameter name
+    pub name: Option<String>,
+    /// Register used for the parameter
+    pub register: String,
+    /// Parameter annotations
+    pub annotations: Vec<SmaliAnnotation>,
 }
 
 /// Struct representing a Java method
@@ -844,12 +818,14 @@ pub struct SmaliMethod {
     pub constructor: bool,
     /// Method signature
     pub signature: MethodSignature,
-    /// Number of local variables required by the instructions
+    /// Number of local variables required by the operations
     pub locals: u32,
+    /// Method params
+    pub params: Vec<SmaliParam>,
     /// Any method level annotations
     pub annotations: Vec<SmaliAnnotation>,
-    /// Method instructions
-    pub instructions: Vec<SmaliInstruction>,
+    /// Method operations
+    pub ops: Vec<SmaliOp>,
 }
 
 /// Represents a smali class i.e. the whole .smali file
@@ -884,7 +860,7 @@ pub struct SmaliClass {
 
     // Internal
     /// The file path where this class was loaded from (.smali file)
-    pub file_path: Option<PathBuf>
+    pub file_path: Option<PathBuf>,
 }
 
 impl PartialEq<Self> for SmaliClass {
@@ -902,7 +878,6 @@ impl Hash for SmaliClass {
 }
 
 impl SmaliClass {
-
     /// Creates a SmaliClass from a String containing a valid smali document
     ///
     /// # Examples
@@ -914,13 +889,16 @@ impl SmaliClass {
     ///  let c = SmaliClass::from_smali(smali).expect("Parse error");
     ///
     /// ```
-    pub fn from_smali(s: &str) -> Result<SmaliClass, SmaliError>
-    {
+    pub fn from_smali(s: &str) -> Result<SmaliClass, SmaliError> {
         let d = parse_class(s);
         match d {
             Ok((_, cl)) => Ok(cl),
-            Err(Failure(e)) => Err(SmaliError { details: format!("Class parse error at: {:?}", e.to_string()) }),
-            _ => Err(SmaliError { details: "Unknown class parse error".to_string() })
+            Err(Failure(e)) => Err(SmaliError {
+                details: format!("Class parse error at: {:?}", e.to_string()),
+            }),
+            _ => Err(SmaliError {
+                details: "Unknown class parse error".to_string(),
+            }),
         }
     }
 
@@ -935,16 +913,16 @@ impl SmaliClass {
     ///  let c = SmaliClass::read_from_file(Path::new("smali/com/cool/Class.smali")).expect("Uh oh, does the file exist?");
     ///
     /// ```
-    pub fn read_from_file(path: &Path) -> Result<SmaliClass, SmaliError>
-    {
-        match fs::read_to_string(path)
-        {
+    pub fn read_from_file(path: &Path) -> Result<SmaliClass, SmaliError> {
+        match fs::read_to_string(path) {
             Ok(s) => {
                 let mut c = SmaliClass::from_smali(&s)?;
                 c.file_path = Some(PathBuf::from(path));
                 Ok(c)
             }
-            Err(e) => { Err(SmaliError { details: format!("Error loading file {}: {}", path.to_str().unwrap(), e) }) }
+            Err(e) => Err(SmaliError {
+                details: format!("Error loading file {}: {}", path.to_str().unwrap(), e),
+            }),
         }
     }
 
@@ -960,8 +938,7 @@ impl SmaliClass {
     ///  println!("{}", c.to_smali());
     ///
     /// ```
-    pub fn to_smali(&self) -> String
-    {
+    pub fn to_smali(&self) -> String {
         write_class(self)
     }
 
@@ -977,14 +954,15 @@ impl SmaliClass {
     ///  c.write_to_file(Path::new("smali_classes2/com/cool/Class.smali")).unwrap();
     ///
     /// ```
-    pub fn write_to_file(&self, path: &Path) -> Result<(), SmaliError>
-    {
+    pub fn write_to_file(&self, path: &Path) -> Result<(), SmaliError> {
         let smali = self.to_smali();
-        if let Err(e) = fs::write(path, smali)
-        {
-            Err(SmaliError { details: e.to_string() })
+        if let Err(e) = fs::write(path, smali) {
+            Err(SmaliError {
+                details: e.to_string(),
+            })
+        } else {
+            Ok(())
         }
-        else { Ok(()) }
     }
 
     /// Writes the current SmaliClass to the specified directory, automatically creating sub-directories for packages
@@ -999,23 +977,24 @@ impl SmaliClass {
     ///  c.write_to_directory(Path::new("smali_classes2")).unwrap();
     ///
     /// ```
-    pub fn write_to_directory(&self, path: &Path) -> Result<(), SmaliError>
-    {
-
-        if !path.exists() { let _ = fs::create_dir(path); }
+    pub fn write_to_directory(&self, path: &Path) -> Result<(), SmaliError> {
+        if !path.exists() {
+            let _ = fs::create_dir(path);
+        }
 
         // Create package dir structure
         let class_name = self.name.as_java_type();
         let package_dirs: Vec<&str> = class_name.split('.').collect();
         let mut dir = PathBuf::from(path);
-        for p in package_dirs[0..package_dirs.len()-1].to_vec()
-        {
+        for p in package_dirs[0..package_dirs.len() - 1].iter().copied() {
             dir.push(p);
-            if !dir.exists() { let _ = fs::create_dir(&dir); }
+            if !dir.exists() {
+                let _ = fs::create_dir(&dir);
+            }
         }
 
         // Create file
-        dir.push(package_dirs[package_dirs.len()-1].to_string() + ".smali");
+        dir.push(package_dirs[package_dirs.len() - 1].to_string() + ".smali");
 
         self.write_to_file(&dir)
     }
@@ -1033,93 +1012,86 @@ impl SmaliClass {
     ///  c.save().unwrap();
     ///
     /// ```
-    pub fn save(&self) -> Result<(), SmaliError>
-    {
-        if let Some(p) = &self.file_path
-        {
+    pub fn save(&self) -> Result<(), SmaliError> {
+        if let Some(p) = &self.file_path {
             self.write_to_file(p)
+        } else {
+            Err(SmaliError {
+                details: format!(
+                    "Unable to save, no file_path set for class: {}",
+                    self.name.as_java_type()
+                ),
+            })
         }
-        else { Err(SmaliError { details: format!("Unable to save, no file_path set for class: {}", self.name.as_java_type()) }) }
     }
 }
 
 #[cfg(test)]
-mod tests
-{
+mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
 
     use crate::types::{MethodSignature, TypeSignature};
 
     #[test]
-    fn test_signature()
-    {
+    fn test_signature() {
         let ts = "Ljava/util/HashMap<Ljava/lang/Class<+Lorg/antlr/v4/runtime/atn/Transition;>;Ljava/lang/Integer;>;";
         let o = TypeSignature::from_jni(ts);
         assert_eq!(o.to_jni(), ts);
     }
 
     #[test]
-    fn test_signature2()
-    {
+    fn test_signature2() {
         let ts = "Lorg/jf/dexlib2/writer/DexWriter<Lorg/jf/dexlib2/writer/builder/BuilderStringReference;Lorg/jf/dexlib2/writer/builder/BuilderStringReference;Lorg/jf/dexlib2/writer/builder/BuilderTypeReference;Lorg/jf/dexlib2/writer/builder/BuilderTypeReference;Lorg/jf/dexlib2/writer/builder/BuilderMethodProtoReference;Lorg/jf/dexlib2/writer/builder/BuilderFieldReference;Lorg/jf/dexlib2/writer/builder/BuilderMethodReference;Lorg/jf/dexlib2/writer/builder/BuilderClassDef;Lorg/jf/dexlib2/writer/builder/BuilderCallSiteReference;Lorg/jf/dexlib2/writer/builder/BuilderMethodHandleReference;Lorg/jf/dexlib2/writer/builder/BuilderAnnotation;Lorg/jf/dexlib2/writer/builder/BuilderAnnotationSet;Lorg/jf/dexlib2/writer/builder/BuilderTypeList;Lorg/jf/dexlib2/writer/builder/BuilderField;Lorg/jf/dexlib2/writer/builder/BuilderMethod;Lorg/jf/dexlib2/writer/builder/BuilderEncodedValues$BuilderArrayEncodedValue;Lorg/jf/dexlib2/writer/builder/BuilderEncodedValues$BuilderEncodedValue;Lorg/jf/dexlib2/writer/builder/BuilderAnnotationElement;Lorg/jf/dexlib2/writer/builder/BuilderStringPool;Lorg/jf/dexlib2/writer/builder/BuilderTypePool;Lorg/jf/dexlib2/writer/builder/BuilderProtoPool;Lorg/jf/dexlib2/writer/builder/BuilderFieldPool;Lorg/jf/dexlib2/writer/builder/BuilderMethodPool;Lorg/jf/dexlib2/writer/builder/BuilderClassPool;Lorg/jf/dexlib2/writer/builder/BuilderCallSitePool;Lorg/jf/dexlib2/writer/builder/BuilderMethodHandlePool;Lorg/jf/dexlib2/writer/builder/BuilderTypeListPool;Lorg/jf/dexlib2/writer/builder/BuilderAnnotationPool;Lorg/jf/dexlib2/writer/builder/BuilderAnnotationSetPool;Lorg/jf/dexlib2/writer/builder/BuilderEncodedArrayPool;>.SectionProvider;";
         let o = TypeSignature::from_jni(ts);
-        println!("{:?}", o);
+        println!("{o:?}");
         assert_eq!(o.to_jni(), ts);
     }
 
     #[test]
-    fn test_signature3()
-    {
+    fn test_signature3() {
         let ts = "<TSource:Ljava/lang/Object;TAccumulate:Ljava/lang/Object;TResult:Ljava/lang/Object;>Ljava/lang/Object;";
         let o = TypeSignature::from_jni(ts);
-        println!("{:?}", o);
+        println!("{o:?}");
         assert_eq!(o.to_jni(), ts);
     }
 
     #[test]
-    fn test_method_signature1()
-    {
+    fn test_method_signature1() {
         let ts = "(TTSource;TTAccumulate;Lcom/strobel/core/Accumulator<TTSource;TTAccumulate;>;Lcom/strobel/core/Selector<TTAccumulate;TTResult;>;)TTResult;";
         let m = MethodSignature::from_jni(ts);
-        println!("{:?}", m);
+        println!("{m:?}");
         assert_eq!(m.to_jni(), ts);
     }
 
     #[test]
-    fn test_method_signature2()
-    {
-        let ts =
-            "<R2:Ljava/lang/Object;>(Lcom/strobel/core/Selector<-TR;+TR2;>;)Ljava/lang/Iterable<TR2;>;^Ljava/lang/Exception;";
+    fn test_method_signature2() {
+        let ts = "<R2:Ljava/lang/Object;>(Lcom/strobel/core/Selector<-TR;+TR2;>;)Ljava/lang/Iterable<TR2;>;^Ljava/lang/Exception;";
         let m = MethodSignature::from_jni(ts);
-        println!("{:?}", m);
+        println!("{m:?}");
         assert_eq!(m.to_jni(), ts);
     }
 
     #[test]
-    fn test_method_signature3()
-    {
+    fn test_method_signature3() {
         let ts = "<U:TT;>(TU;)I";
         let m = MethodSignature::from_jni(ts);
-        println!("{:?}", m);
+        println!("{m:?}");
         assert_eq!(m.to_jni(), ts);
     }
 
     #[test]
-    fn test_method_signature4()
-    {
+    fn test_method_signature4() {
         let ts = "<R2:Ljava/lang/Object;>(Lcom/strobel/core/Selector<-TR;+TR2;>;)Ljava/lang/Iterable<TR2;>;";
         let m = MethodSignature::from_jni(ts);
-        println!("{:?}", m);
+        println!("{m:?}");
         assert_eq!(m.to_jni(), ts);
     }
 
     #[test]
-    fn test_method_signature5()
-    {
+    fn test_method_signature5() {
         let ts = "<T:Landroidx/lifecycle/ViewModel;>(Ljava/lang/Class<TT;>;)TT;";
         let m = MethodSignature::from_jni(ts);
-        println!("{:?}", m);
+        println!("{m:?}");
         assert_eq!(m.to_jni(), ts);
     }
 }
-

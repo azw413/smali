@@ -35,9 +35,9 @@ fn process_apk(apk_file: &str) -> Result<(), Box<dyn Error>>
                 if m.signature.result == TypeSignature::Bool && m.signature.args.len() == 0
                 {
                     let mut new_instructions = vec![];
-                    new_instructions.push(Instruction(DexInstruction::Const4 { dest: v(0), value: 0 }));  // "const/4 v0, 0x0" - Set v0 to false
-                    new_instructions.push(Instruction(DexInstruction::Return { src: v(0) }));  //  "return v0" - return v0
-                    m.instructions = new_instructions;
+                    new_instructions.push(Op(DexOp::Const4 { dest: v(0), value: 0 }));  // "const/4 v0, 0x0" - Set v0 to false
+                    new_instructions.push(Op(DexOp::Return { src: v(0) }));  //  "return v0" - return v0
+                    m.ops = new_instructions;
                     m.locals = 1;
                     println!("{} method {} successfully patched.", c.name.as_java_type(), &m.name);
                 }
@@ -46,7 +46,7 @@ fn process_apk(apk_file: &str) -> Result<(), Box<dyn Error>>
         // Save all classes, even unmodified so we can thoroughly test parser and writer
         c.save()?;
     }
-
+ 
     // Repack the APK
     execute_command("apktool", &["build", "out", "-o", "out.apk"])?;
 

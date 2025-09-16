@@ -710,12 +710,10 @@ impl Header
         c += write_u4(bytes, self.link_size);
         c += write_u4(bytes, self.link_off);
         c += write_u4(bytes, self.map_off);
-        c += write_u4(bytes, self.file_size);
         c += write_u4(bytes, self.string_ids_size);
         c += write_u4(bytes, self.string_ids_off);
         c += write_u4(bytes, self.type_ids_size);
         c += write_u4(bytes, self.type_ids_off);
-        c += write_u4(bytes, self.file_size);
         c += write_u4(bytes, self.proto_ids_size);
         c += write_u4(bytes, self.proto_ids_off);
         c += write_u4(bytes, self.field_ids_size);
