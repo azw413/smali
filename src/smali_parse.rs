@@ -460,7 +460,7 @@ fn parse_sparse_switch(input: &str) -> IResult<&str, SparseSwitchDirective> {
     Ok((input, SparseSwitchDirective { entries }))
 }
 
-fn parse_op(smali: &str) -> IResult<&str, SmaliOp> {
+pub(crate) fn parse_op(smali: &str) -> IResult<&str, SmaliOp> {
     // Line
     if let IResult::Ok((o, _)) = ws(tag::<&str, &str, Error<&str>>(".line")).parse(smali) {
         let (o, n) = take_until_eol(o)?;

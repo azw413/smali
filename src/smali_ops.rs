@@ -1149,17 +1149,17 @@ impl fmt::Display for DexOp {
             DexOp::Return { src } => write!(f, "return {src}"),
             DexOp::ReturnWide { src } => write!(f, "return-wide {src}"),
             DexOp::ReturnObject { src } => write!(f, "return-object {src}"),
-            DexOp::Const4 { dest, value } => write!(f, "const/4 {dest}, {value}"),
-            DexOp::Const16 { dest, value } => write!(f, "const/16 {dest}, {value}"),
-            DexOp::Const { dest, value } => write!(f, "const {dest}, {value}"),
+            DexOp::Const4 { dest, value } => write!(f, "const/4 {dest}, 0x{value:0x}"),
+            DexOp::Const16 { dest, value } => write!(f, "const/16 {dest}, 0x{value:0x}"),
+            DexOp::Const { dest, value } => write!(f, "const {dest}, 0x{value:0x}"),
             DexOp::ConstHigh16 { dest, value } => {
                 write!(f, "const/high16 {dest}, 0x{value:0x}0000")
             }
             DexOp::ConstWide16 { dest, value } => {
-                write!(f, "const-wide/16 {dest}, {value}")
+                write!(f, "const-wide/16 {dest}, 0x{value:0x}")
             }
             DexOp::ConstWide32 { dest, value } => {
-                write!(f, "const-wide/32 {dest}, {value}")
+                write!(f, "const-wide/32 {dest}, 0x{value:0x}")
             }
             DexOp::ConstWide { dest, value } => {
                 write!(f, "const-wide {dest}, 0x{value:0x}L")
@@ -2287,6 +2287,11 @@ pub fn parse_op(input: &str) -> IResult<&str, DexOp> {
         "invoke-interface" => invoke_case!(InvokeInterface, input),
         "invoke-direct" => invoke_case!(InvokeDirect, input),
 
+        // Quickened invoke synonyms (normalize to standard forms)
+        "invoke-virtual-quick" => invoke_case!(InvokeVirtual, input),
+        "invoke-super-quick" => invoke_case!(InvokeSuper, input),
+        "invoke-direct-quick" => invoke_case!(InvokeDirect, input),
+
         // One-register operations.
         "move-result" => one_reg_case!(MoveResult, dest, input),
         "move-result-wide" => one_reg_case!(MoveResultWide, dest, input),
@@ -2566,6 +2571,11 @@ pub fn parse_op(input: &str) -> IResult<&str, DexOp> {
         "invoke-static/range" => range_method_case!(InvokeStaticRange, input),
         "invoke-interface/range" => range_method_case!(InvokeInterfaceRange, input),
 
+        // Quickened range invoke synonyms (normalize to standard forms)
+        "invoke-virtual-quick/range" => range_method_case!(InvokeVirtualRange, input),
+        "invoke-super-quick/range" => range_method_case!(InvokeSuperRange, input),
+        "invoke-direct-quick/range" => range_method_case!(InvokeDirectRange, input),
+
         // Oddities
         "invoke-polymorphic" => parse_invoke_polymorphic(input),
         "invoke-polymorphic/range" => parse_invoke_polymorphic_range(input),
@@ -2647,6 +2657,25 @@ mod tests {
             instr,
             DexOp::InvokeDirect {
                 registers: vec![p(0)],
+                method: expected_method,
+            }
+        );
+    }
+
+    #[test]
+    fn test_invoke_direct_2() {
+        let input = "invoke-direct {v0}, Landroid/support/v4/app/INotificationSideChannel$Default;-><init>()V";
+        let (rest, instr) = parse_op(input).unwrap();
+        assert!(rest.trim().is_empty());
+        let expected_method = MethodRef {
+            class: "Landroid/support/v4/app/INotificationSideChannel$Default;".to_owned(),
+            name: "<init>".to_owned(),
+            descriptor: "()V".to_owned(),
+        };
+        assert_eq!(
+            instr,
+            DexOp::InvokeDirect {
+                registers: vec![v(0)],
                 method: expected_method,
             }
         );

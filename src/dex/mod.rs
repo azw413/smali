@@ -122,3 +122,35 @@ pub(crate) fn write_x(buffer: &mut Vec<u8>, val: &[u8]) -> usize
     buffer.extend(val);
     len
 }
+
+// Local helpers for signed LEB128 used by encoded_catch_handler.size
+fn read_sleb128(bytes: &[u8], ix: &mut usize) -> Result<i32, DexError> {
+    let mut result: i32 = 0;
+    let mut shift = 0;
+    let mut byte: u8;
+    loop {
+        byte = read_u1(bytes, ix)?;
+        result |= ((byte & 0x7f) as i32) << shift;
+        shift += 7;
+        if (byte & 0x80) == 0 { break; }
+    }
+    // sign-extend if sign bit set and we didn't consume full i32 width
+    if shift < 32 && (byte & 0x40) != 0 {
+        result |= (!0) << shift;
+    }
+    Ok(result)
+}
+
+fn write_sleb128(bytes: &mut Vec<u8>, mut value: i32) -> usize {
+    let mut written = 0;
+    loop {
+        let mut byte = (value as u8) & 0x7f;
+        let sign = (byte & 0x40) != 0;
+        value >>= 7; // arithmetic shift
+        let done = (value == 0 && !sign) || (value == -1 && sign);
+        if !done { byte |= 0x80; }
+        written += write_u1(bytes, byte);
+        if done { break; }
+    }
+    written
+}

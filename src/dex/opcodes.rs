@@ -2,7 +2,7 @@ use once_cell::sync::Lazy;
 use crate::dex::opcode_format::{Format, Opcode, OpcodeFlags, ReferenceType};
 
 
-static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
+pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
     vec![
         // NOP
         Opcode::new(

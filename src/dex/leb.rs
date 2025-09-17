@@ -24,16 +24,24 @@ pub(crate) fn encode_uleb128(value: u32) -> Vec<u8> {
 }
 
 pub(crate) fn decode_uleb128(encoded: &[u8]) -> (u32, usize) {
-    let mut value = 0;
-    let mut shift = 0;
-    let mut count = 0;
+    let mut value: u32 = 0;
+    let mut shift: u32 = 0;
+    let mut count: usize = 0;
 
     for &byte in encoded {
         count += 1;
-        value |= ((byte & 0x7F) as u32) << shift;
-        shift += 7;
 
-        if byte & 0x80 == 0 {
+        let low = (byte & 0x7F) as u32;
+        if shift < 32 {
+            // guard against UB: saturate the shift and use wrapping to avoid panic
+            value = value.wrapping_add(low.wrapping_shl(shift));
+        }
+
+        let cont = (byte & 0x80) != 0;
+        shift = shift.saturating_add(7);
+
+        // DEX uleb128 values are 32-bit — valid encodings are ≤ 5 bytes.
+        if !cont || count == 5 {
             break;
         }
     }
@@ -65,23 +73,34 @@ pub(crate) fn encode_sleb128(value: i32) -> Vec<u8> {
 }
 
 
-
-pub(crate) fn decode_sleb128(encoded: &[u8]) -> (i32, usize) {
-    let mut value = 0;
-    let mut shift = 0;
-    let mut count = 0;
+pub(crate) fn decode_sleb128(encoded: &[u8]) -> (i32, usize) 
+{
+    let mut value: i32 = 0;
+    let mut shift: u32 = 0;
+    let mut count: usize = 0;
+    let mut last_byte: u8 = 0;
 
     for &byte in encoded {
         count += 1;
-        value |= ((byte & 0x7F) as i32) << shift;
-        shift += 7;
+        last_byte = byte;
 
-        if byte & 0x80 == 0 {
-            if shift < 32 && (byte & 0x40) != 0 {
-                value |= -1 << shift;
-            }
+        let low = (byte & 0x7F) as i32;
+        if shift < 32 {
+            value |= low.wrapping_shl(shift);
+        }
+
+        let cont = (byte & 0x80) != 0;
+        shift = shift.saturating_add(7);
+
+        // i32 sleb128 likewise fits within 5 bytes
+        if !cont || count == 5 {
             break;
         }
+    }
+
+    // Sign-extend if needed and we didn't fill all 32 bits
+    if (last_byte & 0x40) != 0 && shift < 32 {
+        value |= (-1i32).wrapping_shl(shift);
     }
 
     (value, count)

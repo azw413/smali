@@ -1,7 +1,7 @@
 /* Struct to represent a java object type identifer e.g. java.lang.Object */
 /* They are stored in the smali native (also JNI) format e.g. Ljava/lang/Object; */
 
-use crate::smali_ops::{DexOp, Label};
+pub(crate) use crate::smali_ops::{DexOp, Label};
 use crate::smali_parse::parse_class;
 use crate::smali_write::write_class;
 use nom::Err::Failure;

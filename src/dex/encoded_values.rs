@@ -3,7 +3,7 @@ use crate::dex::error::DexError;
 use crate::dex::{read_u1, read_uleb128, write_u1, write_uleb128, write_x};
 use crate::dex::dex_file::DexString;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct EncodedAnnotation {
     pub type_idx: u32,
     pub elements: Vec<AnnotationElement>,
@@ -40,7 +40,7 @@ impl EncodedAnnotation {
 }
 
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct AnnotationElement {
     pub name_idx: u32,
     pub value: EncodedValue,
@@ -67,7 +67,7 @@ impl AnnotationElement {
 }
 
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum EncodedValue {
     Byte(i8),
     Short(i16),
@@ -91,6 +91,15 @@ pub enum EncodedValue {
 
 impl EncodedValue
 {
+
+    /// Return a shared reference to the inner `EncodedAnnotation` if this value is `EncodedValue::Annotation`.
+    #[inline]
+    pub fn as_annotation(&self) -> Option<&EncodedAnnotation> {
+        match self {
+            EncodedValue::Annotation(ann) => Some(ann),
+            _ => None,
+        }
+    }
 
     pub fn to_string(&self, strings: &Vec<DexString>) -> String
     {
