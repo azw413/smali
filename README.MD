@@ -1,15 +1,18 @@
 # Smali Crate
 
-A pure rust implementation of a parser, writer and set of types for the smali file format.
+A pure rust implementation of a parser, writer and set of types for the smali file format and a dex file reader and writer(not yet implemented).
 
 Smali is used in the Android reversing community to examine and modify Android APK files. It's a human readable text format that represents the complete structure of a Dex VM class including all of its instructions. 
+The serialization and deserialization aim to be 100% compatible with Jesus Freke's Smali/Baksmali implementation.
 
-With this crate you can use it in conjunction with [apktool](https://ibotpeaches.github.io/Apktool/) to perform analysis and/or patches to Android applications. 
+The examples folder contains two examples :- 
 
-There is a simple example in examples/main.rs that illustrates this. The example, will invoke apktool to expand any application and then parse all the smali files looking for [RootBeer](https://github.com/scottyab/rootbeer) (an open source root detection framework), it will then patch RootBeer's methods to always return false so that the app can be run on a rooted device.
-Finally, it calls apktool again to repackage the app.
+1. rootbeer.rs which uses apktool to unpack an APK and then parses all of the smali into this crate's representation which is then used to search for rootbeer's classes and patches them to disable the root check. It then calls apktool to rebuild the apk file. 
+2. dex2smali.rs which takes a dex file and writes each contained class into the out directory in a package directory heirarchy.
 
-Here's the simple example :-
+With this crate you can use it to disassemble, analyse and patch Android DEX files. Currently writing of dex files is not implemented so if you want to roundtrip then you'll need to use apktool or the Java smali library to rebuild the dex file.
+
+Here's the simple example from rootbeer.rs illustrating patching with apktool :-
 
 ```rust
 /* Expand the APK and patch RootBeer */
@@ -53,3 +56,5 @@ fn process_apk(apk_file: &str) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 ```
+
+Take a look at dex2smali.rs on how to use DexFile to deserialise into smali.

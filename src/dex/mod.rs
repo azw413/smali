@@ -2,10 +2,11 @@
 pub mod error;
 
 pub(crate) mod dex_file;
-pub(crate) mod leb;
-pub(crate) mod annotations;
-pub(crate) mod instructions;
-pub(crate) mod encoded_values;
+pub use dex_file::DexFile;
+mod leb;
+mod annotations;
+mod instructions;
+mod encoded_values;
 mod opcode_format;
 mod opcodes;
 

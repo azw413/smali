@@ -8,7 +8,7 @@ use crate::types::{SmaliClass, SmaliError};
 pub mod types;
 mod smali_parse;
 mod smali_write;
-mod dex;
+pub mod dex;
 pub mod smali_ops;
 
 /// Recurses a base path, typically a 'smali' folder from apktool returning a Vector of all found smali classes

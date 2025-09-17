@@ -1149,9 +1149,9 @@ impl fmt::Display for DexOp {
             DexOp::Return { src } => write!(f, "return {src}"),
             DexOp::ReturnWide { src } => write!(f, "return-wide {src}"),
             DexOp::ReturnObject { src } => write!(f, "return-object {src}"),
-            DexOp::Const4 { dest, value } => write!(f, "const/4 {dest}, 0x{value:0x}"),
-            DexOp::Const16 { dest, value } => write!(f, "const/16 {dest}, 0x{value:0x}"),
-            DexOp::Const { dest, value } => write!(f, "const {dest}, 0x{value:0x}"),
+            DexOp::Const4 { dest, value } => write!(f, "const/4 {dest}, {value}"),
+            DexOp::Const16 { dest, value } => write!(f, "const/16 {dest}, {value}"),
+            DexOp::Const { dest, value } => write!(f, "const {dest}, {value}"),
             DexOp::ConstHigh16 { dest, value } => {
                 write!(f, "const/high16 {dest}, 0x{value:0x}0000")
             }

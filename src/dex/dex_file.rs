@@ -9,6 +9,8 @@ use crate::dex::encoded_values::{read_encoded_array, EncodedValue};
 use crate::types::{Modifiers, ObjectIdentifier, SmaliClass, SmaliField, SmaliMethod, SmaliParam, SmaliAnnotation, AnnotationElement as SmaliAnnElement, AnnotationValue as SmaliAnnValue, AnnotationVisibility as SmaliAnnVis, TypeSignature, MethodSignature};
 
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use crate::dex::opcode_format::{decode_with_ctx, RefResolver, RegMapper};
 /* Constants */
 pub const DEX_FILE_MAGIC: [u8; 8] = [ 0x64, 0x65, 0x78, 0x0a, 0x30, 0x33, 0x39, 0x00 ];
@@ -595,7 +597,7 @@ pub struct DexFile {
 
 impl DexFile {
 
-    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<DexFile, DexError> 
+    fn read(bytes: &[u8], ix: &mut usize) -> Result<DexFile, DexError> 
     {
         let header = Header::read(bytes, ix)?;
 
@@ -1112,6 +1114,18 @@ impl DexFile {
         }
         let art_version = if has_quick { 1 } else { 0 };
         (api, art_version)
+    }
+    
+    pub fn from_bytes(bytes: &[u8]) -> Result<DexFile, DexError> 
+    {
+        let mut ix = 0;
+        DexFile::read(bytes, &mut ix)
+    }
+
+    pub fn from_file(path: &Path) -> Result<DexFile, DexError>
+    {
+        let bytes = fs::read(path).map_err(|e| DexError::new(&format!("io Error: {}", e)))?;
+        DexFile::from_bytes(&bytes)
     }
     
 }
