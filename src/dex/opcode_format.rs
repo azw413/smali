@@ -20,7 +20,7 @@ fn fmt_reg(mapper: Option<&RegMapper>, raw: u16) -> String {
 use std::collections::HashMap;
 use bitflags::bitflags;
 use rangemap::{RangeInclusiveMap};
-use std::ops::{ RangeBounds, RangeInclusive };
+use std::ops::{ RangeInclusive };
 use once_cell::sync::Lazy;
 use crate::dex::error::DexError;
 use crate::dex::opcodes::OPCODES;
@@ -70,7 +70,7 @@ pub enum ReferenceType {
     MethodHandle,
 }
 
-/// Defines various flags that can be associated with an opcode.
+// Defines various flags that can be associated with an opcode.
 bitflags! {
     pub struct OpcodeFlags: u32 {
         const CAN_THROW = 0x1;
@@ -448,7 +448,6 @@ fn reg_valid(mapper: Option<&RegMapper>, r: u16) -> bool {
     if let Some(m) = mapper { r < m.registers_size } else { true }
 }
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -590,7 +589,7 @@ fn parse_array_payload(code: &[u16], pc: usize) -> Result<(ArrayDataDirective, u
 
     let bytes_len = elem_width.checked_mul(count).ok_or_else(|| DexError::new("array-data overflow"))?;
     let data_start_cu = pc + 4;
-    let data_cu = (bytes_len + 1) / 2; // ceil to code units
+    let data_cu = bytes_len.div_ceil(2); // ceil to code units
     if data_start_cu + data_cu > code.len() {
         return Err(DexError::new("Truncated array-data elements"));
     }
@@ -925,7 +924,7 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
             let inst0 = u16_at(code, pc);
             let inst1 = u16_at(code, pc+1);
             let a = a8(inst0) as u16;
-            let b = (inst1 & 0x00ff) as u16;
+            let b = inst1 & 0x00ff;
             let lit = s8((inst1 >> 8) as u8);
             (format!("{} {}, {}, {}", op.name, fmt_reg(regmap, a), fmt_reg(regmap, b), lit), 2)
         }
@@ -942,8 +941,8 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
             let inst0 = u16_at(code, pc);
             let inst1 = u16_at(code, pc + 1);
             let a = a8(inst0) as u16;
-            let b = (inst1 & 0x00ff) as u16;  // low byte
-            let c = (inst1 >> 8) as u16;      // high byte
+            let b = inst1 & 0x00ff;  // low byte
+            let c = inst1 >> 8;      // high byte
             (
                 format!(
                     "{} {}, {}, {}",
@@ -1154,7 +1153,7 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
                 _ => format!("ref@{}", idx),
             };
             let mut regs = Vec::new();
-            for (i, r) in [c,d,e,f,g].into_iter().take(a as usize).enumerate() {
+            for (_, r) in [c,d,e,f,g].into_iter().take(a as usize).enumerate() {
                 regs.push(fmt_reg(regmap, r as u16));
             }
             (format!("{} {{{}}}, {}", op.name, regs.join(", "), target), 3)
@@ -1364,8 +1363,8 @@ pub fn decode_with_ctx(
                     // AA | op, C:B
                     let a = a8(inst) as u16;
                     let w1 = if pc + 1 < code.len() { u16_at(&code, pc + 1) } else { 0 };
-                    let b = (w1 & 0x00ff) as u16;
-                    let c = (w1 >> 8) as u16;
+                    let b = w1 & 0x00ff;
+                    let c = w1 >> 8;
                     if !reg_valid(Some(m), a) || !reg_valid(Some(m), b) || !reg_valid(Some(m), c) {
                         let w0 = u16_at(&code, pc);
                         eprintln!(

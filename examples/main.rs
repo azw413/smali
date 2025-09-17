@@ -30,7 +30,7 @@ fn is_rootbeer_class(c: &SmaliClass) -> bool
     {
         // Probably unreliable if the ordering changes
         if c.fields[0].signature == TypeSignature::Bool && c.methods[1].signature.result == TypeSignature::Bool
-            && c.methods[4].signature.args.len() == 0 && c.methods[4].signature.result == TypeSignature::Bool
+            && c.methods[4].signature.args.is_empty() && c.methods[4].signature.result == TypeSignature::Bool
         {
             println!("Detected RootBeer class: {}", c.name.as_java_type());
             return true;
@@ -54,12 +54,12 @@ fn process_apk(apk_file: &str) -> Result<(), Box<dyn Error>>
    // Search for the RootBeer class
    for c in classes.iter_mut()
    {
-       if is_rootbeer_class(&c)
+       if is_rootbeer_class(c)
        {
            // Patch all the methods returning a boolean
            for m in c.methods.iter_mut()
            {
-               if m.signature.result == TypeSignature::Bool && m.signature.args.len() == 0
+               if m.signature.result == TypeSignature::Bool && m.signature.args.is_empty()
                {
                    let mut new_instructions = vec![];
                    new_instructions.push(Op(DexOp::Const4 { dest: v(0), value: 0 }));  // "const/4 v0, 0x0" - Set v0 to false

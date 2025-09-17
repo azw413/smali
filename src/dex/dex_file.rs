@@ -9,7 +9,7 @@ use crate::dex::encoded_values::{read_encoded_array, EncodedValue};
 use crate::types::{Modifiers, ObjectIdentifier, SmaliClass, SmaliField, SmaliMethod, SmaliParam, SmaliAnnotation, AnnotationElement as SmaliAnnElement, AnnotationValue as SmaliAnnValue, AnnotationVisibility as SmaliAnnVis, TypeSignature, MethodSignature};
 
 use std::collections::HashMap;
-use crate::dex::opcode_format::{decode_with_ctx, decode_with_resolver, RefResolver, RegMapper};
+use crate::dex::opcode_format::{decode_with_ctx, RefResolver, RegMapper};
 /* Constants */
 pub const DEX_FILE_MAGIC: [u8; 8] = [ 0x64, 0x65, 0x78, 0x0a, 0x30, 0x33, 0x39, 0x00 ];
 pub const ENDIAN_CONSTANT: u32 = 0x12345678;
@@ -48,8 +48,7 @@ type FieldId = usize;
 type MethodId = usize;
 
 #[derive(Debug)]
-struct TypeList(Vec<TypeId>);
-
+pub struct TypeList(Vec<TypeId>);
 impl TypeList
 {
     pub fn read(bytes: &[u8], ix: &mut usize) -> Result<crate::dex::dex_file::TypeList, DexError>
@@ -176,13 +175,7 @@ impl crate::dex::dex_file::DebugInfo
         let line_start = read_uleb128(bytes, ix)?;
         let parameters_size = read_uleb128(bytes, ix)?;
         let mut parameter_names = vec![];
-        let mut last = 0;
-        /* for _ in 0..parameters_size
-        {
-            let diff = read_uleb128p1(bytes, ix)?; // Maybe it's not a diff
-            last += diff;
-            parameter_names.push(last as u32);
-        } */
+
         for _ in 0..parameters_size {
             let idx = read_uleb128p1(bytes, ix)?;   // -1 => NO_INDEX
             if idx < 0 {
@@ -566,7 +559,7 @@ impl ClassDefItem
         c
     }
 
-    pub fn write(&self, bytes: &mut Vec<u8>) -> usize
+    pub fn write(&self, _bytes: &mut Vec<u8>) -> usize
     {
         // ClassDefItem participates in a sectioned layout; a higher-level builder should
         // compute and supply the offsets. Use `write_with_offsets` instead of this method.
@@ -634,7 +627,7 @@ impl DexFile {
         for _ in 0..dex.header.type_ids_size
         {
             let type_id: TypeId = read_u4(bytes, ix)? as usize;
-            if let DexString::Decoded(s) = &dex.strings[type_id]
+            if let DexString::Decoded(_s) = &dex.strings[type_id]
             {
                 dex.types.push(type_id);
             }
@@ -774,7 +767,7 @@ impl DexFile {
     }
 
     fn convert_annotation(&self, item: &AnnotationItem) -> Result<SmaliAnnotation, DexError> {
-        use crate::dex::encoded_values::{EncodedAnnotation as EA, EncodedValue as EV};
+        use crate::dex::encoded_values::EncodedValue as EV;
 
         let vis = Self::convert_visibility(item.visibility);
         let ann_type_desc = self.type_desc(item.annotation.type_idx as usize)?;
@@ -937,7 +930,7 @@ impl DexFile {
                 }
 
                 // Instance fields
-                for (i, f) in class_data.instance_fields.iter().enumerate()
+                for (_i, f) in class_data.instance_fields.iter().enumerate()
                 {
                     let dex_field = &self.fields[f.field_idx];
 
@@ -1074,8 +1067,8 @@ impl DexFile {
         let d1 = self.header.magic[5];
         let d2 = self.header.magic[6];
         if d0.is_ascii_digit() && d1.is_ascii_digit() && d2.is_ascii_digit() {
-            let v = ((d0 - b'0') as u32) * 100 + ((d1 - b'0') as u32) * 10 + ((d2 - b'0') as u32);
-            v
+            
+            ((d0 - b'0') as u32) * 100 + ((d1 - b'0') as u32) * 10 + ((d2 - b'0') as u32)
         } else {
             35
         }
@@ -1095,7 +1088,7 @@ impl DexFile {
             40 => 28, // Pie
             41 => 29, // Android 10
             _  => 33, // default to recent
-        } as i32;
+        };
 
         // Heuristic quick/odex detection: look for known quick opcodes in low byte
         let mut has_quick = false;
@@ -1126,7 +1119,7 @@ impl DexFile {
 
 struct DexRefResolver<'a> { dex: &'a DexFile }
 
-impl<'a> DexRefResolver<'a> {
+impl DexRefResolver<'_> {
     fn escape_smali_string(s: &str) -> String {
         let mut out = String::with_capacity(s.len()+2);
         for ch in s.chars() {
@@ -1169,7 +1162,7 @@ impl<'a> DexRefResolver<'a> {
     }
 }
 
-impl<'a> RefResolver for DexRefResolver<'a> {
+impl RefResolver for DexRefResolver<'_> {
     fn string(&self, idx: u32) -> String {
         let raw = self.string_idx(idx as usize);
         format!("\"{}\"", Self::escape_smali_string(&raw))
@@ -1384,8 +1377,7 @@ mod tests {
         let dex_bytes = read(dex_path).expect("Failed to read DEX file");
         let mut ix = 0;
         let header = Header::read(&dex_bytes, &mut ix).expect("Failed to parse DEX header");
-        let mut encoded_bytes = vec![];
-        let encoded_size = header.write(&mut encoded_bytes);
+        let encoded_bytes = vec![];
         ix = 0;
         let decoded = Header::read(encoded_bytes.as_slice(), &mut ix).unwrap();
 
@@ -1459,11 +1451,10 @@ mod tests {
 
         // First varint should encode a negative count since catch_all is present
         // Decode with the crate's SLEB128 to ensure sign is negative
-        let mut ix0 = 0;
         let (size_signed, used0) = crate::dex::leb::decode_sleb128(&bytes);
         assert!(size_signed < 0, "first SLEB128 should be negative when catch_all present");
         assert_eq!((-size_signed) as usize, h.handlers.len());
-        assert!(used0 >= 1 && used0 <= 5);
+        assert!((1..=5).contains(&used0));
 
         let mut ix = 0;
         let h2 = EncodedCatchHandler::read(&bytes, &mut ix).expect("EncodedCatchHandler read failed");

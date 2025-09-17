@@ -437,7 +437,7 @@ mod tests {
 
     #[test]
     fn test_encoded_value_byte() {
-        let mut bytes = vec![0x00, 0x7F];  // 0x00 is the header, 0x7F (127) is the value
+        let bytes = vec![0x00, 0x7F];  // 0x00 is the header, 0x7F (127) is the value
         let mut ix = 0;
         let encoded_value = EncodedValue::read(&bytes, &mut ix).expect("Failed to read EncodedValue");
         match encoded_value {
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn test_encoded_value_short() {
-        let mut bytes = vec![34, 0x34, 0x12];  // 0x10 is the header, 0x1234 in little-endian
+        let bytes = vec![34, 0x34, 0x12];  // 0x10 is the header, 0x1234 in little-endian
         let mut ix = 0;
         let encoded_value = EncodedValue::read(&bytes, &mut ix).expect("Failed to read EncodedValue");
         match encoded_value {
@@ -469,7 +469,7 @@ mod tests {
 
     #[test]
     fn test_encoded_value_char() {
-        let mut bytes = vec![35, 0x34, 0x12];  // 0x30 is the header, 0x1234 in little-endian
+        let bytes = vec![35, 0x34, 0x12];  // 0x30 is the header, 0x1234 in little-endian
         let mut ix = 0;
         let encoded_value = EncodedValue::read(&bytes, &mut ix).expect("Failed to read EncodedValue");
         match encoded_value {
@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn test_encoded_value_int() {
-        let mut bytes = vec![0x64, 0x78, 0x56, 0x34, 0x12];  // 0x40 is the header, 0x12345678 in little-endian
+        let bytes = vec![0x64, 0x78, 0x56, 0x34, 0x12];  // 0x40 is the header, 0x12345678 in little-endian
         let mut ix = 0;
         let encoded_value = EncodedValue::read(&bytes, &mut ix).expect("Failed to read EncodedValue");
         match encoded_value {
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn test_encoded_value_null() {
-        let mut bytes = vec![0x1E];  // 0x1E is the header for null
+        let bytes = vec![0x1E];  // 0x1E is the header for null
         let mut ix = 0;
         let encoded_value = EncodedValue::read(&bytes, &mut ix).expect("Failed to read EncodedValue");
         match encoded_value {
@@ -517,11 +517,11 @@ mod tests {
 
     #[test]
     fn test_encoded_value_boolean_true() {
-        let mut bytes = vec![0x1F | (1 << 5)];  // 0x1F is the header for boolean, 1 << 5 is the value_arg
+        let bytes = vec![0x1F | (1 << 5)];  // 0x1F is the header for boolean, 1 << 5 is the value_arg
         let mut ix = 0;
         let encoded_value = EncodedValue::read(&bytes, &mut ix).expect("Failed to read EncodedValue");
         match encoded_value {
-            EncodedValue::Boolean(val) => assert_eq!(val, true),
+            EncodedValue::Boolean(val) => assert!(val),
             _ => panic!("Unexpected variant"),
         }
 
@@ -533,11 +533,11 @@ mod tests {
 
     #[test]
     fn test_encoded_value_boolean_false() {
-        let mut bytes = vec![0x1F];  // 0x1F is the header for boolean with value_arg = 0
+        let bytes = vec![0x1F];  // 0x1F is the header for boolean with value_arg = 0
         let mut ix = 0;
         let encoded_value = EncodedValue::read(&bytes, &mut ix).expect("Failed to read EncodedValue");
         match encoded_value {
-            EncodedValue::Boolean(val) => assert_eq!(val, false),
+            EncodedValue::Boolean(val) => assert!(!val),
             _ => panic!("Unexpected variant"),
         }
 
