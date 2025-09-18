@@ -4,7 +4,7 @@ use crate::dex::error::DexError;
 use crate::dex::annotations::{AnnotationsDirectoryItem, AnnotationItem, AnnotationSetItem, AnnotationSetRefList};
 use crate::dex::{read_sleb128, read_u1, read_u2, read_u4, read_uleb128, read_uleb128p1, read_x, write_sleb128, write_u1, write_u2, write_u4, write_uleb128, write_uleb128p1, write_x};
 use cesu8::to_java_cesu8;
-use log::error;
+use log::{error, info, warn};
 use crate::dex::encoded_values::{read_encoded_array, EncodedValue};
 use crate::types::{Modifiers, ObjectIdentifier, SmaliClass, SmaliField, SmaliMethod, SmaliParam, SmaliAnnotation, AnnotationElement as SmaliAnnElement, AnnotationValue as SmaliAnnValue, AnnotationVisibility as SmaliAnnVis, TypeSignature, MethodSignature};
 
@@ -1038,6 +1038,7 @@ impl DexFile {
                         registers_size: ci.registers_size,
                         ins_size: ci.args_in_size,
                     };
+                    
                     let decoded = decode_with_ctx(&bc, api_level, art_version, &resolver, Some(&regmap))
                         .map_err(|e| DexError::with_context(e, format!(
                             "while decoding {}->{}{}", class_desc, name, sig
@@ -1181,32 +1182,104 @@ impl RefResolver for DexRefResolver<'_> {
         let raw = self.string_idx(idx as usize);
         format!("\"{}\"", Self::escape_smali_string(&raw))
     }
-    fn type_desc(&self, idx: u32) -> String { self.type_desc_idx(idx as usize) }
+    fn type_desc(&self, idx: u32) -> String {
+        self.type_desc_idx(idx as usize)
+    }
     fn field_ref(&self, idx: u32) -> (String, String, String) {
-        if let Some(f) = self.dex.fields.get(idx as usize) {
-            (
-                self.type_desc_idx(f.class_idx),
-                self.string_idx(f.name_idx),
-                self.type_desc_idx(f.type_idx),
-            )
+        let i = idx as usize;
+        if let Some(f) = self.dex.fields.get(i) {
+            let class_desc = if f.class_idx < self.dex.types.len() {
+                self.type_desc_idx(f.class_idx)
+            } else {
+                warn!(
+                    "[resolver] field_ref {}: class_idx {} OOB (types.len={})",
+                    idx, f.class_idx, self.dex.types.len()
+                );
+                format!("Ltype@{};", f.class_idx)
+            };
+            let name = if f.name_idx < self.dex.strings.len() {
+                self.string_idx(f.name_idx)
+            } else {
+                warn!(
+                    "[resolver] field_ref {}: name_idx {} OOB (strings.len={})",
+                    idx, f.name_idx, self.dex.strings.len()
+                );
+                format!("field@{}", f.name_idx)
+            };
+            let ty_desc = if f.type_idx < self.dex.types.len() {
+                self.type_desc_idx(f.type_idx)
+            } else {
+                warn!(
+                    "[resolver] field_ref {}: type_idx {} OOB (types.len={})",
+                    idx, f.type_idx, self.dex.types.len()
+                );
+                format!("Ltype@{};", f.type_idx)
+            };
+            (class_desc, name, ty_desc)
         } else {
-            (format!("Lclass@{};", idx), format!("field@{}", idx), String::from("Ljava/lang/Object;"))
+            warn!(
+                "[resolver] field_ref {} OOB (fields.len={})",
+                idx, self.dex.fields.len()
+            );
+            (
+                format!("Lclass@{};", idx),
+                format!("field@{}", idx),
+                String::from("Ljava/lang/Object;"),
+            )
         }
     }
     fn method_ref(&self, idx: u32) -> (String, String, String) {
-        if let Some(m) = self.dex.methods.get(idx as usize) {
-            (
-                self.type_desc_idx(m.class_idx),
-                self.string_idx(m.name_idx),
-                self.proto_desc(m.proto_idx),
-            )
+        let i = idx as usize;
+        if let Some(m) = self.dex.methods.get(i) {
+            let class_desc = if m.class_idx < self.dex.types.len() {
+                self.type_desc_idx(m.class_idx)
+            } else {
+                warn!(
+                    "[resolver] method_ref {}: class_idx {} OOB (types.len={})",
+                    idx, m.class_idx, self.dex.types.len()
+                );
+                format!("Ltype@{};", m.class_idx)
+            };
+            let name = if m.name_idx < self.dex.strings.len() {
+                self.string_idx(m.name_idx)
+            } else {
+                warn!(
+                    "[resolver] method_ref {}: name_idx {} OOB (strings.len={})",
+                    idx, m.name_idx, self.dex.strings.len()
+                );
+                format!("method@{}", m.name_idx)
+            };
+            let proto = if m.proto_idx < self.dex.prototypes.len() {
+                self.proto_desc(m.proto_idx)
+            } else {
+                warn!(
+                    "[resolver] method_ref {}: proto_idx {} OOB (protos.len={})",
+                    idx, m.proto_idx, self.dex.prototypes.len()
+                );
+                String::from("()V")
+            };
+            (class_desc, name, proto)
         } else {
-            (format!("Lclass@{};", idx), format!("method@{}", idx), String::from("()V"))
+            warn!(
+                "[resolver] method_ref {} OOB (methods.len={})",
+                idx, self.dex.methods.len()
+            );
+            (
+                format!("Lclass@{};", idx),
+                format!("method@{}", idx),
+                String::from("()V"),
+            )
         }
     }
-    fn call_site(&self, idx: u32) -> String { format!("callsite@{}", idx) }
-    fn method_handle(&self, idx: u32) -> String { format!("handle@{}", idx) }
-    fn proto(&self, idx: u32) -> String { self.proto_desc(idx as usize) }
+    fn call_site(&self, idx: u32) -> String {
+        format!("callsite@{}", idx)
+    }
+    fn method_handle(&self, idx: u32) -> String {
+        format!("handle@{}", idx)
+    }
+    fn proto(&self, idx: u32) -> String {
+        self.proto_desc(idx as usize)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1391,7 +1464,8 @@ mod tests {
         let dex_bytes = read(dex_path).expect("Failed to read DEX file");
         let mut ix = 0;
         let header = Header::read(&dex_bytes, &mut ix).expect("Failed to parse DEX header");
-        let encoded_bytes = vec![];
+        let mut encoded_bytes = vec![];
+        header.write(&mut encoded_bytes);
         ix = 0;
         let decoded = Header::read(encoded_bytes.as_slice(), &mut ix).unwrap();
 
@@ -1416,10 +1490,7 @@ mod tests {
         println!("Classes: {:} [header: {:}]", dex.class_defs.len(), dex.header.class_defs_size);
 
         let smali = dex.to_smali().expect("Failed to generate smali");
-        println!("\n{}", &smali[3104].to_smali());
-        println!("\n{}", &smali[3105].to_smali());
-        println!("\n{}", &smali[3106].to_smali());
-
+        
     }
     #[test]
     fn test_try_item_roundtrip() {

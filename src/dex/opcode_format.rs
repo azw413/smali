@@ -1,3 +1,21 @@
+// Tracing options
+
+//macro_rules! smali_trace { ($($arg:tt)*) => { eprintln!($($arg)*); } }
+macro_rules! smali_trace { ($($arg:tt)*) => {}; }
+
+//macro_rules! smali_warn { ($($arg:tt)*) => { eprintln!($($arg)*); } }
+macro_rules! smali_warn { ($($arg:tt)*) => {}; }
+
+
+use std::collections::HashMap;
+use bitflags::bitflags;
+use rangemap::{RangeInclusiveMap};
+use std::ops::{ RangeInclusive };
+use once_cell::sync::Lazy;
+use crate::dex::error::DexError;
+use crate::dex::opcodes::OPCODES;
+
+
 /// Maps raw Dalvik register numbers to smali-style names (vN / pN)
 /// based on a method's total register count and input (parameter) size.
 pub struct RegMapper {
@@ -17,13 +35,7 @@ impl RegMapper {
 fn fmt_reg(mapper: Option<&RegMapper>, raw: u16) -> String {
     if let Some(m) = mapper { m.map_name(raw) } else { format!("v{}", raw) }
 }
-use std::collections::HashMap;
-use bitflags::bitflags;
-use rangemap::{RangeInclusiveMap};
-use std::ops::{ RangeInclusive };
-use once_cell::sync::Lazy;
-use crate::dex::error::DexError;
-use crate::dex::opcodes::OPCODES;
+
 ///
 /// Resolves DEX pool references (string/type/field/method/...) into printable Smali text.
 /// The decoder works with any resolver; callers can pass a real Dex-backed resolver later.
@@ -45,10 +57,23 @@ impl RefResolver for PlaceholderResolver {
     fn string(&self, idx: u32) -> String { format!("\"string@{}\"", idx) }
     fn type_desc(&self, idx: u32) -> String { format!("Ltype@{};", idx) }
     fn field_ref(&self, idx: u32) -> (String, String, String) {
-        (format!("Lclass@{};", idx), format!("field@{}", idx), String::from("Ljava/lang/Object;"))
+        // Disambiguate placeholder pools: field refs live in a different index space
+        // than type/class ids in real DEX. Use a distinct class prefix so it’s obvious
+        // in logs/traces that this was derived from a field-id, not a type-id.
+        (
+            format!("Lfield_class@{};", idx),
+            format!("field@{}", idx),
+            String::from("Ljava/lang/Object;"),
+        )
     }
     fn method_ref(&self, idx: u32) -> (String, String, String) {
-        (format!("Lclass@{};", idx), format!("method@{}", idx), String::from("()V"))
+        // Same idea: method refs are a separate pool. Keep a valid descriptor so the
+        // smali parser accepts it, but mark the class with a method-specific prefix.
+        (
+            format!("Lmethod_class@{};", idx),
+            format!("method@{}", idx),
+            String::from("()V"),
+        )
     }
     fn call_site(&self, idx: u32) -> String { format!("callsite@{}", idx) }
     fn method_handle(&self, idx: u32) -> String { format!("handle@{}", idx) }
@@ -413,6 +438,8 @@ impl Format {
 
 // Helpers for pulling format encoding
 #[inline] fn u16_at(code: &[u16], pc: usize) -> u16 { code[pc] }
+#[inline]
+fn u16_at_opt(code: &[u16], pc: usize) -> Option<u16> { code.get(pc).copied() }
 
 #[inline]
 fn require_cu(code: &[u16], pc: usize, need: usize, opname: &str) -> Result<(), DexError> {
@@ -443,6 +470,22 @@ fn format_size_cu(fmt: Format) -> usize {
     }
 }
 
+// Helper for computing branch targets robustly: (pc as i32 + off), but only if in bounds
+#[inline]
+fn add_off_i32(pc: usize, off: i32, len: usize) -> Option<usize> {
+    // Compute (pc as i32 + off) safely, returning None if result is <0 or >= len
+    let base = pc as i32;
+    let sum = base.checked_add(off)?;
+    if sum < 0 || (sum as usize) >= len { None } else { Some(sum as usize) }
+}
+
+#[inline]
+fn add_off_from(base_pc: usize, off: i32, len: usize) -> Option<usize> {
+    let base = base_pc as i32;
+    let sum = base.checked_add(off)?;
+    if sum < 0 || (sum as usize) >= len { None } else { Some(sum as usize) }
+}
+
 #[inline]
 fn reg_valid(mapper: Option<&RegMapper>, r: u16) -> bool {
     if let Some(m) = mapper { r < m.registers_size } else { true }
@@ -453,12 +496,42 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PayloadKind { Array, PackedSwitch, SparseSwitch }
 
+#[inline]
+fn payload_len_cu(kind: PayloadKind, code: &[u16], pc: usize) -> Option<usize> {
+    match kind {
+        PayloadKind::Array => {
+            // header: ident(0x0300), element_width(u16), size(lo u16, hi u16)
+            if pc + 4 > code.len() { return None; }
+            let elem_width = u16_at(code, pc+1) as usize;
+            let size_lo = u16_at(code, pc+2) as usize;
+            let size_hi = u16_at(code, pc+3) as usize;
+            let count = (size_hi << 16) | size_lo;
+            let bytes_len = elem_width.checked_mul(count)?;
+            let data_cu = (bytes_len + 1) / 2; // ceil(bytes/2)
+            Some(4 + data_cu)
+        }
+        PayloadKind::PackedSwitch => {
+            // header: ident(0x0100), size(u16), first_key(i32), then size * target(i32)
+            if pc + 4 > code.len() { return None; }
+            let sz = u16_at(code, pc+1) as usize;
+            Some(4 + sz * 2)
+        }
+        PayloadKind::SparseSwitch => {
+            // header: ident(0x0200), size(u16), then size * key(i32) and size * target(i32)
+            if pc + 2 > code.len() { return None; }
+            let sz = u16_at(code, pc+1) as usize;
+            Some(2 + sz * 4)
+        }
+    }
+}
+
 fn collect_labels_and_payloads(
     code: &[u16],
     opcode_cache: &HashMap<u16, &Opcode>,
-) -> (HashMap<usize, String>, HashMap<usize, PayloadKind>) {
+) -> (HashMap<usize, String>, HashMap<usize, PayloadKind>, HashMap<usize, usize>) {
     let mut labels: HashMap<usize, String> = HashMap::new();
     let mut payloads: HashMap<usize, PayloadKind> = HashMap::new();
+    let mut payload_base: HashMap<usize, usize> = HashMap::new();
     let mut cond_count = 0usize;
     let mut goto_count = 0usize;
     let mut array_count = 0usize;
@@ -467,47 +540,164 @@ fn collect_labels_and_payloads(
 
     let mut pc: usize = 0;
     while pc < code.len() {
+        // If we are sitting on a known payload target, skip its body so we don't
+        // misinterpret payload words as opcodes in this pass.
+        if let Some(kind) = payloads.get(&pc).copied() {
+            if let Some(consumed) = payload_len_cu(kind, code, pc) {
+                smali_trace!("[smali][collect] skip payload {:?} at pc {} ({} CU)", kind, pc, consumed);
+                pc += consumed;
+                continue;
+            } else {
+                smali_warn!("[smali][collect] WARN: truncated payload {:?} at pc {} — stopping", kind, pc);
+                break;
+            }
+        }
         let inst = u16_at(code, pc);
         let opc = op(inst) as u16;
         let Some(opdef) = opcode_cache.get(&opc) else {
             pc += 1; continue;
         };
         let fmt = opdef.format;
+        // Ensure we have enough code units for this instruction before reading operands
+        let need_cu = format_size_cu(fmt);
+        if pc + need_cu > code.len() {
+            smali_warn!(
+                "[smali][collect] WARN: truncated {} at pc {} in first pass: need {} CU, have {} — stopping",
+                opdef.name, pc, need_cu, code.len().saturating_sub(pc)
+            );
+            break;
+        }
         match fmt {
             // conditional branches (16-bit offset)
             Format::Format21t | Format::Format22t => {
                 let off = s16(u16_at(code, pc+1)) as i32;
-                let tgt = (pc as i32 + off) as usize;
-                labels.entry(tgt).or_insert_with(|| { let s = format!(":cond_{}", cond_count); cond_count+=1; s });
-                pc += format_size_cu(fmt);
+                let size_cu = format_size_cu(fmt);
+                let tgt_cur = add_off_i32(pc, off, code.len());
+                let tgt_nxt = add_off_from(pc + size_cu, off, code.len());
+                smali_trace!("[smali][collect][t] {} @pc {} off {} -> cur={:?} nxt={:?}",
+                          opdef.name, pc, off, tgt_cur, tgt_nxt);
+                let chosen = match (tgt_cur, tgt_nxt) {
+                    (Some(t), None) | (Some(t), Some(_)) => Some(t),
+                    (None, Some(t)) => {
+                        smali_trace!("[smali][collect][t] NOTE: using next-pc base for {} at pc {}",
+                                  opdef.name, pc);
+                        Some(t)
+                    }
+                    (None, None) => None,
+                };
+                if let Some(tgt) = chosen {
+                    labels.entry(tgt).or_insert_with(|| { let s = format!(":cond_{}", cond_count); cond_count+=1; s });
+                } else {
+                    smali_warn!("[smali][collect] WARN: 2xt branch target OOB at pc {} (off {}), skipping", pc, off);
+                }
+                pc += size_cu;
             }
             // gotos
             Format::Format10t => {
                 let off = s8(a8(inst)) as i32;
-                let tgt = (pc as i32 + off) as usize;
-                labels.entry(tgt).or_insert_with(|| { let s = format!(":goto_{}", goto_count); goto_count+=1; s });
-                pc += format_size_cu(fmt);
+                let size_cu = format_size_cu(fmt);
+                let tgt_cur = add_off_i32(pc, off, code.len());
+                let tgt_nxt = add_off_from(pc + size_cu, off, code.len());
+                smali_trace!("[smali][collect][t] {} @pc {} off {} -> cur={:?} nxt={:?}",
+                          opdef.name, pc, off, tgt_cur, tgt_nxt);
+                let chosen = match (tgt_cur, tgt_nxt) {
+                    (Some(t), None) | (Some(t), Some(_)) => Some(t),
+                    (None, Some(t)) => {
+                        smali_trace!("[smali][collect][t] NOTE: using next-pc base for {} at pc {}",
+                                  opdef.name, pc);
+                        Some(t)
+                    }
+                    (None, None) => None,
+                };
+                if let Some(tgt) = chosen {
+                    labels.entry(tgt).or_insert_with(|| { let s = format!(":goto_{}", goto_count); goto_count+=1; s });
+                } else {
+                    smali_warn!("[smali][collect] WARN: 10t target OOB at pc {} (off {}), skipping", pc, off);
+                }
+                pc += size_cu;
             }
             Format::Format20t => {
                 let off = s16(u16_at(code, pc+1)) as i32;
-                let tgt = (pc as i32 + off) as usize;
-                labels.entry(tgt).or_insert_with(|| { let s = format!(":goto_{}", goto_count); goto_count+=1; s });
-                pc += format_size_cu(fmt);
+                let size_cu = format_size_cu(fmt);
+                let tgt_cur = add_off_i32(pc, off, code.len());
+                let tgt_nxt = add_off_from(pc + size_cu, off, code.len());
+                smali_trace!("[smali][collect][t] {} @pc {} off {} -> cur={:?} nxt={:?}",
+                          opdef.name, pc, off, tgt_cur, tgt_nxt);
+                let chosen = match (tgt_cur, tgt_nxt) {
+                    (Some(t), None) | (Some(t), Some(_)) => Some(t),
+                    (None, Some(t)) => {
+                        smali_trace!("[smali][collect][t] NOTE: using next-pc base for {} at pc {}",
+                                  opdef.name, pc);
+                        Some(t)
+                    }
+                    (None, None) => None,
+                };
+                if let Some(tgt) = chosen {
+                    labels.entry(tgt).or_insert_with(|| { let s = format!(":goto_{}", goto_count); goto_count+=1; s });
+                } else {
+                    smali_warn!("[smali][collect] WARN: 20t target OOB at pc {} (off {}), skipping", pc, off);
+                }
+                pc += size_cu;
             }
             Format::Format30t => {
                 let lo = u16_at(code, pc+1) as u32;
                 let hi = u16_at(code, pc+2) as u32;
                 let off32 = ((hi << 16) | lo) as i32;
-                let tgt = (pc as i32 + off32) as usize;
-                labels.entry(tgt).or_insert_with(|| { let s = format!(":goto_{}", goto_count); goto_count+=1; s });
-                pc += format_size_cu(fmt);
+                let size_cu = format_size_cu(fmt);
+                let tgt_cur = add_off_i32(pc, off32, code.len());
+                let tgt_nxt = add_off_from(pc + size_cu, off32, code.len());
+                smali_trace!("[smali][collect][t] {} @pc {} off {} -> cur={:?} nxt={:?}",
+                          opdef.name, pc, off32, tgt_cur, tgt_nxt);
+                let chosen = match (tgt_cur, tgt_nxt) {
+                    (Some(t), None) | (Some(t), Some(_)) => Some(t),
+                    (None, Some(t)) => {
+                        smali_trace!("[smali][collect][t] NOTE: using next-pc base for {} at pc {}",
+                                  opdef.name, pc);
+                        Some(t)
+                    }
+                    (None, None) => None,
+                };
+                if let Some(tgt) = chosen {
+                    labels.entry(tgt).or_insert_with(|| { let s = format!(":goto_{}", goto_count); goto_count+=1; s });
+                } else {
+                    smali_warn!("[smali][collect] WARN: 30t target OOB at pc {} (off {}), skipping", pc, off32);
+                }
+                pc += size_cu;
             }
             // payload targets via 31t
             Format::Format31t => {
                 let lo = u16_at(code, pc+1) as u32;
                 let hi = u16_at(code, pc+2) as u32;
                 let off32 = ((hi << 16) | lo) as i32;
-                let tgt = (pc as i32 + off32) as usize;
+                let size_cu = format_size_cu(fmt);
+                let tgt_cur = add_off_i32(pc, off32, code.len());
+                let tgt_nxt = add_off_from(pc + size_cu, off32, code.len());
+                smali_trace!("[smali][collect][t] {} @pc {} off {} -> cur={:?} nxt={:?}",
+                          opdef.name, pc, off32, tgt_cur, tgt_nxt);
+                let Some(tgt) = (match (tgt_cur, tgt_nxt) {
+                    (Some(t), None) | (Some(t), Some(_)) => Some(t),
+                    (None, Some(t)) => {
+                        smali_trace!("[smali][collect][t] NOTE: using next-pc base for {} at pc {}",
+                                  opdef.name, pc);
+                        Some(t)
+                    }
+                    (None, None) => None,
+                }) else {
+                    smali_warn!("[smali][collect] WARN: 31t target {} for {} at pc {} is out of bounds (code len {}), skipping payload collection",
+                              off32, opdef.name, pc, code.len());
+                    pc += size_cu;
+                    continue;
+                };
+                if tgt % 2 != 0 {
+                    smali_warn!("[smali][collect][t] WARN: payload target {} for {} not 32-bit aligned", tgt, opdef.name);
+                }
+                if let Some(id) = code.get(tgt) {
+                    smali_trace!("[smali][collect][t] 31t payload ident at {} = 0x{:04x}", tgt, id);
+                }
+
+                // record the base pc of the switch instruction for this payload
+                payload_base.insert(tgt, pc);
+
                 // classify by opcode name
                 let (prefix, kind) = if opdef.name == "fill-array-data" {
                     (":array_", PayloadKind::Array)
@@ -530,32 +720,44 @@ fn collect_labels_and_payloads(
                 match kind {
                     PayloadKind::PackedSwitch => {
                         // header: ident(0x0100), size(u16), first_key(i32), then size * target(i32)
-                        if tgt + 4 <= code.len() {
+                        if tgt + 4 > code.len() {
+                            smali_warn!("[smali][collect] WARN: truncated packed-switch payload at {} — header not complete", tgt);
+                        } else {
                             let size = u16_at(code, tgt+1) as usize;
                             let targets_start = tgt + 4;
+                            let base_pc = pc; // targets are relative to the switch instruction, not the payload
                             for i in 0..size {
                                 if targets_start + i*2 + 1 >= code.len() { break; }
                                 let lo = u16_at(code, targets_start + i*2) as u32;
                                 let hi = u16_at(code, targets_start + i*2 + 1) as u32;
                                 let off = ((hi << 16) | lo) as i32;
-                                let case_pc = (tgt as i32 + off) as usize;
-                                labels.entry(case_pc).or_insert_with(|| format!(":pswitch_{}", i));
+                                if let Some(case_pc) = add_off_i32(base_pc, off, code.len()) {
+                                    labels.entry(case_pc).or_insert_with(|| format!(":pswitch_{}", i));
+                                } else {
+                                    smali_warn!("[smali][collect] WARN: packed-switch case OOB at payload {} (off {}), skipping case {}", tgt, off, i);
+                                }
                             }
                         }
                     }
                     PayloadKind::SparseSwitch => {
                         // header: ident(0x0200), size(u16), then size * key(i32) and size * target(i32)
-                        if tgt + 2 <= code.len() {
+                        if tgt + 2 > code.len() {
+                            smali_warn!("[smali][collect] WARN: truncated sparse-switch payload at {} — header not complete", tgt);
+                        } else {
                             let size = u16_at(code, tgt+1) as usize;
                             let keys_start = tgt + 2;
                             let targets_start = keys_start + 2*size;
+                            let base_pc = pc; // targets are relative to the switch instruction, not the payload
                             for i in 0..size {
                                 if targets_start + i*2 + 1 >= code.len() { break; }
                                 let lo = u16_at(code, targets_start + i*2) as u32;
                                 let hi = u16_at(code, targets_start + i*2 + 1) as u32;
                                 let off = ((hi << 16) | lo) as i32;
-                                let case_pc = (tgt as i32 + off) as usize;
-                                labels.entry(case_pc).or_insert_with(|| format!(":sswitch_{}", i));
+                                if let Some(case_pc) = add_off_i32(base_pc, off, code.len()) {
+                                    labels.entry(case_pc).or_insert_with(|| format!(":sswitch_{}", i));
+                                } else {
+                                    smali_warn!("[smali][collect] WARN: sparse-switch case OOB at payload {} (off {}), skipping case {}", tgt, off, i);
+                                }
                             }
                         }
                     }
@@ -570,7 +772,7 @@ fn collect_labels_and_payloads(
         }
     }
 
-    (labels, payloads)
+    (labels, payloads, payload_base)
 }
 
 fn parse_array_payload(code: &[u16], pc: usize) -> Result<(ArrayDataDirective, usize), DexError> {
@@ -642,8 +844,10 @@ fn parse_array_payload(code: &[u16], pc: usize) -> Result<(ArrayDataDirective, u
 fn parse_packed_switch_payload(
     code: &[u16],
     pc: usize,
+    base_pc: usize,
     labels: &HashMap<usize, String>,
 ) -> Result<(PackedSwitchDirective, usize), DexError> {
+    smali_trace!("[smali][parse][switch] payload pc {} base pc {}", pc, base_pc);
     // Expect ident 0x0100, size (u16), first_key (i32), then size * target (i32 rel to payload)
     if pc + 4 > code.len() {
         return Err(DexError::new("Truncated packed-switch header"));
@@ -664,7 +868,7 @@ fn parse_packed_switch_payload(
         let lo = u16_at(code, targets_start + i*2) as u32;
         let hi = u16_at(code, targets_start + i*2 + 1) as u32;
         let off = ((hi << 16) | lo) as i32;
-        let case_pc = (pc as i32 + off) as usize;
+        let case_pc = (base_pc as i32 + off) as usize;
         let name = labels
             .get(&case_pc)
             .cloned()
@@ -679,8 +883,10 @@ fn parse_packed_switch_payload(
 fn parse_sparse_switch_payload(
     code: &[u16],
     pc: usize,
+    base_pc: usize,
     labels: &HashMap<usize, String>,
 ) -> Result<(SparseSwitchDirective, usize), DexError> {
+    smali_trace!("[smali][parse][switch] payload pc {} base pc {}", pc, base_pc);
     // Expect ident 0x0200, size (u16), then size * key (i32) then size * target (i32)
     if pc + 2 > code.len() {
         return Err(DexError::new("Truncated sparse-switch header"));
@@ -707,7 +913,7 @@ fn parse_sparse_switch_payload(
         let lo = u16_at(code, targets_start + i*2) as u32;
         let hi = u16_at(code, targets_start + i*2 + 1) as u32;
         let off = ((hi << 16) | lo) as i32;
-        let case_pc = (pc as i32 + off) as usize;
+        let case_pc = (base_pc as i32 + off) as usize;
         let name = labels
             .get(&case_pc)
             .cloned()
@@ -878,11 +1084,17 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
             // AA | op, +BBBB (signed 16-bit code-unit offset)
             let inst = u16_at(code, pc);
             let off  = s16(u16_at(code, pc+1)) as i32;
-            let tgt = (pc as i32 + off) as usize;
-            let label = labels
-                .and_then(|m| m.get(&tgt))
-                .cloned()
-                .unwrap_or_else(|| off.to_string());
+            let size_cu = format_size_cu(Format::Format21t);
+            let tgt_cur = add_off_i32(pc, off, code.len());
+            let tgt_nxt = add_off_from(pc + size_cu, off, code.len());
+            let label = if let Some(t) = tgt_cur {
+                labels.and_then(|m| m.get(&t)).cloned().unwrap_or_else(|| off.to_string())
+            } else if let Some(t) = tgt_nxt {
+                smali_trace!("[smali][fmt][t] NOTE: using next-pc base for {} at pc {}", op.name, pc);
+                labels.and_then(|m| m.get(&t)).cloned().unwrap_or_else(|| off.to_string())
+            } else {
+                off.to_string()
+            };
             (format!("{} {}, {}", op.name, fmt_reg(regmap, a8(inst) as u16), label), 2)
         }
         Format::Format21ih => {
@@ -905,11 +1117,11 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
             let va = a4(inst);
             let vb = b4(inst);
             let off = s16(u16_at(code, pc+1)) as i32;
-            let tgt = (pc as i32 + off) as usize;
-            let label = labels
-                .and_then(|m| m.get(&tgt))
-                .cloned()
-                .unwrap_or_else(|| off.to_string());
+            let label = if let Some(tgt) = add_off_i32(pc, off, code.len()) {
+                labels.and_then(|m| m.get(&tgt)).cloned().unwrap_or_else(|| off.to_string())
+            } else {
+                off.to_string()
+            };
             (format!("{} {}, {}, {}", op.name, fmt_reg(regmap, va as u16), fmt_reg(regmap, vb as u16), label), 2)
         }
         Format::Format22x => {
@@ -957,31 +1169,31 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
         Format::Format10t => {
             let inst = u16_at(code, pc);
             let off = s8(a8(inst)) as i32;
-            let tgt = (pc as i32 + off) as usize;
-            let label = labels
-                .and_then(|m| m.get(&tgt))
-                .cloned()
-                .unwrap_or_else(|| off.to_string());
+            let label = if let Some(tgt) = add_off_i32(pc, off, code.len()) {
+                labels.and_then(|m| m.get(&tgt)).cloned().unwrap_or_else(|| off.to_string())
+            } else {
+                off.to_string()
+            };
             (format!("{} {}", op.name, label), 1)
         }
         Format::Format20t => {
             let off  = s16(u16_at(code, pc+1)) as i32;
-            let tgt = (pc as i32 + off) as usize;
-            let label = labels
-                .and_then(|m| m.get(&tgt))
-                .cloned()
-                .unwrap_or_else(|| off.to_string());
+            let label = if let Some(tgt) = add_off_i32(pc, off, code.len()) {
+                labels.and_then(|m| m.get(&tgt)).cloned().unwrap_or_else(|| off.to_string())
+            } else {
+                off.to_string()
+            };
             (format!("{} {}", op.name, label), 2)
         }
         Format::Format30t => {
             let lo = u16_at(code, pc+1) as u32;
             let hi = u16_at(code, pc+2) as u32;
             let off32 = ((hi << 16) | lo) as i32;
-            let tgt = (pc as i32 + off32) as usize;
-            let label = labels
-                .and_then(|m| m.get(&tgt))
-                .cloned()
-                .unwrap_or_else(|| off32.to_string());
+            let label = if let Some(tgt) = add_off_i32(pc, off32, code.len()) {
+                labels.and_then(|m| m.get(&tgt)).cloned().unwrap_or_else(|| off32.to_string())
+            } else {
+                off32.to_string()
+            };
             (format!("{} {}", op.name, label), 3)
         }
         Format::Format22c => {
@@ -1110,11 +1322,11 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
             let lo = u16_at(code, pc+1) as u32;
             let hi = u16_at(code, pc+2) as u32;
             let off32 = ((hi << 16) | lo) as i32;
-            let tgt = (pc as i32 + off32) as usize;
-            let label = labels
-                .and_then(|m| m.get(&tgt))
-                .cloned()
-                .unwrap_or_else(|| off32.to_string());
+            let label = if let Some(tgt) = add_off_i32(pc, off32, code.len()) {
+                labels.and_then(|m| m.get(&tgt)).cloned().unwrap_or_else(|| off32.to_string())
+            } else {
+                off32.to_string()
+            };
             (format!("{} {}, {}", op.name, fmt_reg(regmap, a8(inst0) as u16), label), 3)
         }
         Format::Format32x => {
@@ -1239,7 +1451,7 @@ pub fn decode_with_ctx(
         .collect();
 
     // First pass: collect labels and payload kinds
-    let (mut labels, payloads) = collect_labels_and_payloads(&code, &opcode_cache);
+    let (mut labels, payloads, payload_base) = collect_labels_and_payloads(&code, &opcode_cache);
 
     let mut output: Vec<SmaliOp> = Vec::new();
     let mut pc: usize = 0;
@@ -1256,6 +1468,8 @@ pub fn decode_with_ctx(
                     Err(e) => fail!("Error parsing label: {}, {}", labelline, e),
                 }
             }
+            // Switch-case targets are relative to the switch instruction, not the payload.
+            let base_pc = payload_base.get(&pc).copied().unwrap_or(pc);
             match kind {
                 PayloadKind::Array => {
                     let (dir, consumed) = parse_array_payload(&code, pc)?;
@@ -1264,13 +1478,13 @@ pub fn decode_with_ctx(
                     continue;
                 }
                 PayloadKind::PackedSwitch => {
-                    let (dir, consumed) = parse_packed_switch_payload(&code, pc, &labels)?;
+                    let (dir, consumed) = parse_packed_switch_payload(&code, pc, base_pc, &labels)?;
                     output.push(SmaliOp::PackedSwitch(dir));
                     pc += consumed;
                     continue;
                 }
                 PayloadKind::SparseSwitch => {
-                    let (dir, consumed) = parse_sparse_switch_payload(&code, pc, &labels)?;
+                    let (dir, consumed) = parse_sparse_switch_payload(&code, pc, base_pc, &labels)?;
                     output.push(SmaliOp::SparseSwitch(dir));
                     pc += consumed;
                     continue;
@@ -1395,30 +1609,35 @@ pub fn decode_with_ctx(
         match opdef.format {
             Format::Format21t => {
                 let off  = s16(u16_at(&code, pc+1)) as i32;
-                let tgt = (pc as i32 + off) as usize;
-                labels.entry(tgt).or_insert_with(|| format!(":addr_{:x}", tgt));
+                if let Some(tgt) = add_off_i32(pc, off, code.len()) {
+                    labels.entry(tgt).or_insert_with(|| format!(":addr_{:x}", tgt));
+                }
             }
             Format::Format22t => {
                 let off  = s16(u16_at(&code, pc+1)) as i32;
-                let tgt = (pc as i32 + off) as usize;
-                labels.entry(tgt).or_insert_with(|| format!(":addr_{:x}", tgt));
+                if let Some(tgt) = add_off_i32(pc, off, code.len()) {
+                    labels.entry(tgt).or_insert_with(|| format!(":addr_{:x}", tgt));
+                }
             }
             Format::Format10t => {
                 let off = s8(a8(inst)) as i32;
-                let tgt = (pc as i32 + off) as usize;
-                labels.entry(tgt).or_insert_with(|| format!(":addr_{:x}", tgt));
+                if let Some(tgt) = add_off_i32(pc, off, code.len()) {
+                    labels.entry(tgt).or_insert_with(|| format!(":addr_{:x}", tgt));
+                }
             }
             Format::Format20t => {
                 let off  = s16(u16_at(&code, pc+1)) as i32;
-                let tgt = (pc as i32 + off) as usize;
-                labels.entry(tgt).or_insert_with(|| format!(":addr_{:x}", tgt));
+                if let Some(tgt) = add_off_i32(pc, off, code.len()) {
+                    labels.entry(tgt).or_insert_with(|| format!(":addr_{:x}", tgt));
+                }
             }
             Format::Format30t => {
                 let lo = u16_at(&code, pc+1) as u32;
                 let hi = u16_at(&code, pc+2) as u32;
                 let off32 = ((hi << 16) | lo) as i32;
-                let tgt = (pc as i32 + off32) as usize;
-                labels.entry(tgt).or_insert_with(|| format!(":addr_{:x}", tgt));
+                if let Some(tgt) = add_off_i32(pc, off32, code.len()) {
+                    labels.entry(tgt).or_insert_with(|| format!(":addr_{:x}", tgt));
+                }
             }
             _ => {}
         }
@@ -1466,4 +1685,27 @@ pub fn decode_with_resolver(
 pub fn decode(bytecode: &[u8], api:i32, art_version: i32) -> Result<Vec<SmaliOp>, DexError> {
     let resolver = PlaceholderResolver;
     decode_with_resolver(bytecode, api, art_version, &resolver)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_decode_bytecode_1()
+    {
+        let bc: Vec<u8> = vec![84, 32, 63, 26, 51, 3, 4, 0, 18, 0, 17, 0, 84, 32, 63, 26, 56, 0, 16, 0, 84, 33, 61, 26, 56, 1, 5, 0, 114, 32, 152, 2, 16, 0, 84, 33, 65, 26, 56, 1, 5, 0, 114, 32, 153, 2, 16, 0, 91, 35, 63, 26, 56, 3, 31, 0, 84, 33, 61, 26, 56, 1, 5, 0, 114, 32, 149, 2, 19, 0, 84, 33, 65, 26, 56, 1, 5, 0, 114, 32, 150, 2, 19, 0, 26, 1, 145, 30, 114, 32, 137, 2, 19, 0, 10, 1, 89, 33, 68, 26, 18, 17, 92, 33, 66, 26, 110, 16, 218, 47, 2, 0, 40, 10, 18, 241, 89, 33, 68, 26, 18, 1, 92, 33, 66, 26, 110, 16, 219, 47, 2, 0, 17, 0];
+        let ops = decode(bc.as_slice(), 33, 0).unwrap();
+        
+        println!("{:?}", ops);
+    }
+
+    #[test]
+    fn test_decode_bytecode_2()
+    {
+        let bc: Vec<u8> = vec![84, 16, 75, 26, 112, 48, 253, 47, 33, 0, 111, 32, 245, 47, 33, 0, 12, 0, 17, 0];
+        let ops = decode(bc.as_slice(), 33, 0).unwrap();
+
+        println!("{:?}", ops);
+    }
 }
