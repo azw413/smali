@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fmt, fs};
 use crate::dex::dex_file::{ACC_ABSTRACT, ACC_ANNOTATION, ACC_BRIDGE, ACC_CONSTRUCTOR, ACC_DECLARED_SYNCHRONIZED, ACC_ENUM, ACC_FINAL, ACC_INTERFACE, ACC_NATIVE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_STRICT, ACC_SYNCHRONIZED, ACC_SYNTHETIC, ACC_TRANSIENT, ACC_VARARGS, ACC_VOLATILE};
-
+use crate::smali_write::{write_method, write_field};
 
 /* Custom error for our command helper */
 #[derive(Debug)]
@@ -636,6 +636,12 @@ pub struct SmaliField {
     pub annotations: Vec<SmaliAnnotation>,
 }
 
+impl fmt::Display for SmaliField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", write_field(&self))
+    }
+}
+
 /// Represents a protected range in a try/catch directive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TryRange {
@@ -828,6 +834,12 @@ pub struct SmaliMethod {
     pub ops: Vec<SmaliOp>,
 }
 
+impl fmt::Display for SmaliMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", write_method(&self))
+    }
+}
+
 /// Represents a smali class i.e. the whole .smali file
 ///
 /// # Examples
@@ -874,6 +886,12 @@ impl Eq for SmaliClass {}
 impl Hash for SmaliClass {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);
+    }
+}
+
+impl fmt::Display for SmaliClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", write_class(&self))
     }
 }
 

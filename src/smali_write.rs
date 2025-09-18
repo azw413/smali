@@ -1,6 +1,4 @@
-use crate::types::{
-    AnnotationValue, Modifier, SmaliAnnotation, SmaliClass, SmaliMethod, SmaliOp, SmaliParam,
-};
+use crate::types::{AnnotationValue, Modifier, SmaliAnnotation, SmaliClass, SmaliField, SmaliMethod, SmaliOp, SmaliParam};
 
 fn write_modifiers(mods: &Vec<Modifier>) -> String {
     let mut out = "".to_string();
@@ -108,7 +106,7 @@ fn write_param(param: &SmaliParam) -> String {
     output
 }
 
-fn write_method(method: &SmaliMethod) -> String {
+pub(crate) fn write_method(method: &SmaliMethod) -> String {
     let mut out = format!(".method {}", write_modifiers(&method.modifiers));
     if method.constructor {
         out.push_str("constructor ");
@@ -165,6 +163,29 @@ fn write_method(method: &SmaliMethod) -> String {
     out
 }
 
+pub(crate) fn write_field(f: &SmaliField) -> String 
+{
+    let mut out = String::new();
+    out.push_str(&format!(
+        ".field {}{}:{}",
+        write_modifiers(&f.modifiers),
+        f.name,
+        f.signature.to_jni()
+    ));
+    if let Some(iv) = &f.initial_value {
+        out.push_str(&format!(" = {iv}"));
+    }
+    out.push('\n');
+    if !f.annotations.is_empty() {
+        for a in &f.annotations {
+            out.push_str(&write_annotation(a, false, true));
+        }
+        out.push_str(".end field\n");
+    }
+    out.push('\n');
+    out
+}
+
 pub(crate) fn write_class(dex: &SmaliClass) -> String {
     let mut out = format!(
         ".class {}{}\n",
@@ -195,25 +216,7 @@ pub(crate) fn write_class(dex: &SmaliClass) -> String {
 
     if !dex.fields.is_empty() {
         out.push_str("\n# fields\n");
-        for f in &dex.fields {
-            out.push_str(&format!(
-                ".field {}{}:{}",
-                write_modifiers(&f.modifiers),
-                f.name,
-                f.signature.to_jni()
-            ));
-            if let Some(iv) = &f.initial_value {
-                out.push_str(&format!(" = {iv}"));
-            }
-            out.push('\n');
-            if !f.annotations.is_empty() {
-                for a in &f.annotations {
-                    out.push_str(&write_annotation(a, false, true));
-                }
-                out.push_str(".end field\n");
-            }
-            out.push('\n');
-        }
+        for f in &dex.fields { out.push_str(&write_field(f)); }
     }
 
     if !dex.methods.is_empty() {
