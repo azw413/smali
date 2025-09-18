@@ -5,7 +5,6 @@ pub(crate) mod dex_file;
 pub use dex_file::DexFile;
 mod leb;
 mod annotations;
-mod instructions;
 mod encoded_values;
 mod opcode_format;
 mod opcodes;
