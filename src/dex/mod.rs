@@ -123,20 +123,37 @@ pub(crate) fn write_x(buffer: &mut Vec<u8>, val: &[u8]) -> usize
     len
 }
 
-// Local helpers for signed LEB128 used by encoded_catch_handler.size
 fn read_sleb128(bytes: &[u8], ix: &mut usize) -> Result<i32, DexError> {
     let mut result: i32 = 0;
-    let mut shift = 0;
+    let mut shift = 0;   // bits filled
+    let mut count = 0;   // bytes consumed
     let mut byte: u8;
+
     loop {
-        byte = read_u1(bytes, ix)?;
+        if *ix >= bytes.len() {
+            return Err(DexError::new(&format!(
+                "Unexpected end of stream reading sleb128 at index {}",
+                *ix
+            )));
+        }
+        byte = bytes[*ix];
+        *ix += 1;
+
+        // For 32-bit signed values, at most 5 bytes are valid; also prevent shift >= 32.
+        if shift >= 32 || count >= 5 {
+            return Err(DexError::new("Malformed SLEB128: too many continuation bytes"));
+        }
+
         result |= ((byte & 0x7f) as i32) << shift;
         shift += 7;
+        count += 1;
+
         if (byte & 0x80) == 0 { break; }
     }
-    // sign-extend if sign bit set and we didn't consume full i32 width
+
+    // Sign-extend if sign bit of last byte is set and we didn't fill 32 bits.
     if shift < 32 && (byte & 0x40) != 0 {
-        result |= (!0) << shift;
+        result |= -1i32 << shift;
     }
     Ok(result)
 }

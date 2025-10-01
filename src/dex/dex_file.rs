@@ -306,6 +306,7 @@ impl crate::dex::dex_file::CodeItem
 {
     pub fn read(bytes: &[u8], ix: &mut usize) -> Result<crate::dex::dex_file::CodeItem, DexError>
     {
+        let code_item_start = *ix;
         let registers_size = read_u2(bytes, ix)?;
         let args_in_size = read_u2(bytes, ix)?;
         let args_out_size = read_u2(bytes, ix)?;
@@ -325,14 +326,51 @@ impl crate::dex::dex_file::CodeItem
         
         if tries_size > 0 {
             if (instructions_size & 1) != 0 { padding = read_u2(bytes, ix)?; }
+            if (instructions_size & 1) != 0 && padding != 0 {
+                warn!(
+                    "[codeitem] non-zero padding 0x{:04x} at 0x{:x} (code_item_start=0x{:x})",
+                    padding, *ix as usize - 2, code_item_start
+                );
+            }
             for _ in 0..tries_size { tries.push(TryItem::read(bytes, ix)?); }
-            // encoded_catch_handler_list
+            // encoded_catch_handler_list starts here
             let handlers_size = read_uleb128(bytes, ix)? as usize;
-            // Extremely defensive: avoid walking absurd numbers of handlers
             if handlers_size > 1_000_000 {
                 return Err(DexError::new("encoded_catch_handler_list size is implausibly large"));
             }
-            for _ in 0..handlers_size { handlers.push(EncodedCatchHandler::read(bytes, ix)?); }
+            let handlers_base = *ix; // first handler entry will start here
+
+            // Sanity: verify each try's handler_off points somewhere within file bounds
+            for (ti, t) in tries.iter().enumerate() {
+                let abs = handlers_base.saturating_add(t.handler_off as usize);
+                if abs >= bytes.len() {
+                    warn!(
+                        "[codeitem] TryItem#{} handler_off {} -> OOB abs=0x{:x} (base=0x{:x}, file_size=0x{:x})",
+                        ti, t.handler_off, abs, handlers_base, bytes.len()
+                    );
+                }
+            }
+
+            // Read all handlers with a temporary cursor so we can produce good error context
+            let mut scan = handlers_base;
+            for i in 0..handlers_size {
+                let entry_off = scan;
+                match EncodedCatchHandler::read(bytes, &mut scan) {
+                    Ok(h) => handlers.push(h),
+                    Err(e) => {
+                        let ctx = format!(
+                            "while reading EncodedCatchHandler #{}/{} at 0x{:x} (base=0x{:x}, code_item_start=0x{:x}, tries_size={}, insns_size={})",
+                            i + 1, handlers_size, entry_off, handlers_base, code_item_start, tries_size, instructions_size
+                        );
+                        return Err(DexError::with_context(e, ctx));
+                    }
+                }
+                if scan <= entry_off {
+                    return Err(DexError::new("EncodedCatchHandler did not advance cursor (corrupt data)"));
+                }
+            }
+            // Advance main cursor only after successful scan
+            *ix = scan;
         }
 
         Ok(CodeItem { registers_size, args_in_size, args_out_size, tries_size, debug_info, instructions, padding, tries, handlers })
