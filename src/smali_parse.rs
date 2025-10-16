@@ -12,7 +12,7 @@ use nom::character::complete::{
 };
 use nom::combinator::{opt, value};
 use nom::error::{Error, ErrorKind, ParseError};
-use nom::multi::{many0, many1};
+use nom::multi::{many0, many1, separated_list0};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::{IResult, Parser};
 
@@ -388,18 +388,29 @@ fn parse_array_element_with_width(input: &str, width: i32) -> IResult<&str, Arra
 
 /// Parses the entire .array-data block.
 pub fn parse_array_data(input: &str) -> IResult<&str, ArrayDataDirective> {
+    // Allow leading indentation
+    let (input, _) = multispace0.parse(input)?;
+
+    // .array-data <width>
     let (input, _) = tag(".array-data").parse(input)?;
-    let (input, _) = space1(input)?;
-    let (input, width_val): (&str, i32) = parse_literal_int(input)?;
+    let (input, _) = space1.parse(input)?;
+    let (input, width_val): (&str, i32) = parse_literal_int.parse(input)?;
     let element_width = width_val;
-    let (input, _) = opt(newline).parse(input)?;
-    let (input, elements) = many0(terminated(
+
+    // Any mix of spaces/newlines after the width
+    let (input, _) = multispace0.parse(input)?;
+
+    // Elements separated by any whitespace (spaces/newlines)
+    let (input, elements) = separated_list0(
+        multispace1,
         |i| parse_array_element_with_width(i, element_width),
-        opt(newline),
-    ))
+    )
         .parse(input)?;
-    let (input, _) = space0(input)?;
+
+    // Trailing whitespace before the end directive
+    let (input, _) = multispace0.parse(input)?;
     let (input, _) = tag(".end array-data").parse(input)?;
+
     Ok((
         input,
         ArrayDataDirective {
@@ -417,18 +428,24 @@ pub fn parse_array_data(input: &str) -> IResult<&str, ArrayDataDirective> {
 ///        :pswitch_1
 ///    .end packed-switch
 fn parse_packed_switch(input: &str) -> IResult<&str, PackedSwitchDirective> {
-    // Parse the header.
+    // Allow leading indentation before the directive
+    let (input, _) = multispace0.parse(input)?;
+
+    // .packed-switch <first_key>
     let (input, _) = tag(".packed-switch").parse(input)?;
-    let (input, _) = space1(input)?;
-    let (input, first_key): (&str, i32) = parse_literal_int(input)?;
-    let (input, _) = opt(newline).parse(input)?; // optional newline
+    let (input, _) = space1.parse(input)?;
+    let (input, first_key): (&str, i32) = parse_literal_int.parse(input)?;
 
-    // Parse one or more target labels.
-    let (input, targets) =
-        many1(preceded(space0, terminated(parse_label, opt(newline)))).parse(input)?;
+    // Any whitespace/newlines before labels
+    let (input, _) = multispace0.parse(input)?;
 
-    // Parse the footer.
-    let (input, _) = preceded(space0, tag(".end packed-switch")).parse(input)?;
+    // One or more target labels, separated by arbitrary whitespace/newlines
+    let (input, targets) = many1(preceded(multispace0, parse_label)).parse(input)?;
+
+    // Allow trailing whitespace then the footer
+    let (input, _) = multispace0.parse(input)?;
+    let (input, _) = tag(".end packed-switch").parse(input)?;
+
     Ok((input, PackedSwitchDirective { first_key, targets }))
 }
 
@@ -920,7 +937,7 @@ mod tests {
     }
 
     #[test]
-    fn test_array_data() {
+    fn test_array_data_1() {
         let input = r#".array-data 4
                                 0x0
                                 0x3f800000    # 1.0f
@@ -928,6 +945,33 @@ mod tests {
         let ad = parse_array_data(input).unwrap();
         println!("{ad:?}");
     }
+
+    #[test]
+    fn test_array_data_2() {
+        let input = r#"   .array-data 0x2
+                                    0x30s 0x31s 0x32s 0x33s
+                                    0x34s 0x35s 0x36s 0x37s
+                                    0x38s 0x39s 0x61s 0x62s
+                                    0x63s 0x64s 0x65s 0x66s
+                                .end array-data"#;
+        let ad = parse_array_data(input).unwrap();
+        println!("{ad:?}");
+    }
+
+    #[test]
+    fn test_packed_switch_1() {
+        let input = r#"   .packed-switch 0x2
+                                    :pswitch_0
+                                    :pswitch_1
+                                    :pswitch_2
+                                    :pswitch_3
+                                    :pswitch_4
+                                    :pswitch_5
+                                .end packed-switch"#;
+        let (_, ps) = parse_packed_switch(input).unwrap();
+        println!("{}", ps.to_string());
+    }
+
 
     #[test]
     fn test_parse_param_block_with_annotation() {

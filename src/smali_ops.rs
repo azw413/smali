@@ -34,7 +34,8 @@ pub fn parse_label(input: &str) -> IResult<&str, Label> {
 impl fmt::Display for Label {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Prepend a colon when printing
-        write!(f, ":{}", self.0)
+        if self.0.starts_with(':') { write!(f, "{}", self.0) } 
+        else { write!(f, ":{}", self.0) }
     }
 }
 
@@ -1741,108 +1742,88 @@ fn parse_string_literal(input: &str) -> IResult<&str, String> {
         .parse(input)?;
 
     IResult::Ok((i, s.to_string()))
-
-    /*delimited(
-        char('"'),
-        // Use take_while instead of take_while1 so that the inner content may be empty.
-        map(take_while(|c| c != '"'), |s: &str| s.to_string()),
-        char('"')
-    ).parse(input)*/
 }
 
 pub(crate) fn parse_literal_int<T>(input: &str) -> IResult<&str, T>
 where
     T: num_traits::Num + std::ops::Neg<Output = T> + std::str::FromStr + TryFrom<i64>,
-    <T as TryFrom<i64>>::Error: Debug,
+    <T as TryFrom<i64>>::Error: core::fmt::Debug,
 {
-    // Consume an optional sign.
+    use nom::{
+        branch::alt,
+        bytes::complete::{tag, take_while1},
+        character::complete::{char, digit1},
+        combinator::opt,
+        error::{Error, ErrorKind},
+        Parser,
+    };
+
+    // Optional leading '-'
     let (input, sign) = opt(char('-')).parse(input)?;
 
     if input.starts_with("0x") || input.starts_with("0X") {
+        // Hex path
         let (input, _) = alt((tag("0x"), tag("0X"))).parse(input)?;
         let (input, hex_digits) = take_while1(|c: char| c.is_ascii_hexdigit()).parse(input)?;
         let (input, _) = opt(char('L')).parse(input)?;
+
+        let value_u128 = u128::from_str_radix(hex_digits, 16)
+            .map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Digit)))?;
+
         if sign.is_some() {
-            // Parse the digits as a u64, then handle the negative value.
-            let value_u64 = u64::from_str_radix(hex_digits, 16).map_err(|_| {
-                nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Digit))
-            })?;
-            let value_i64 = if value_u64 == 0x8000000000000000 {
-                i64::MIN
-            } else if value_u64 <= i64::MAX as u64 {
-                -(value_u64 as i64)
-            } else {
-                return Err(nom::Err::Failure(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Digit,
-                )));
-            };
-            let value = T::try_from(value_i64).expect("Conversion failed");
-            Ok((input, value))
-        } else {
-            let value_u64 = u64::from_str_radix(hex_digits, 16).map_err(|_| {
-                nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Digit))
-            })?;
-            if value_u64 > i64::MAX as u64 {
-                return Err(nom::Err::Failure(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Digit,
-                )));
+            // Signed hex: "-0x...". Range-check for i64, including MIN special-case.
+            if value_u128 > i64::MAX as u128 && value_u128 != 0x8000_0000_0000_0000 {
+                return Err(nom::Err::Failure(Error::new(input, ErrorKind::Digit)));
             }
-            let value_i64 = value_u64 as i64;
-            let value = T::try_from(value_i64).expect("Conversion failed");
-            Ok((input, value))
+            let value_i64 = if value_u128 == 0x8000_0000_0000_0000 {
+                i64::MIN
+            } else {
+                -(value_u128 as i64)
+            };
+            let out =
+                T::try_from(value_i64).map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Digit)))?;
+            return Ok((input, out));
+        } else {
+            // Unsigned hex: interpret as two's complement for the width of T.
+            let bits = (core::mem::size_of::<T>() * 8).min(64);
+            if bits == 0 {
+                return Err(nom::Err::Failure(Error::new(input, ErrorKind::Digit)));
+            }
+            // Require the literal to fit in the target width (no silent truncation).
+            if value_u128 >= (1u128 << bits) {
+                return Err(nom::Err::Failure(Error::new(input, ErrorKind::Digit)));
+            }
+
+            let signed_i128 = if (value_u128 & (1u128 << (bits - 1))) != 0 {
+                // Negative in two's complement
+                (value_u128 as i128) - (1i128 << bits)
+            } else {
+                value_u128 as i128
+            };
+
+            if signed_i128 < i64::MIN as i128 || signed_i128 > i64::MAX as i128 {
+                return Err(nom::Err::Failure(Error::new(input, ErrorKind::Digit)));
+            }
+            let value_i64 = signed_i128 as i64;
+            let out =
+                T::try_from(value_i64).map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Digit)))?;
+            return Ok((input, out));
         }
-    } else {
-        let (input, num_str) = digit1(input)?;
-        let (input, _) = opt(char('L')).parse(input)?;
-        let mut value_i64 = num_str.parse::<i64>().map_err(|_| {
-            nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Digit))
-        })?;
-        if sign.is_some() {
-            value_i64 = -value_i64;
-        }
-        let value = T::try_from(value_i64).expect("Conversion failed");
-        Ok((input, value))
     }
+
+    // Decimal path: strict signed integer (no wrapping)
+    let (input, num_str) = digit1.parse(input)?;
+    let (input, _) = opt(char('L')).parse(input)?;
+    let mut value_i64 = num_str
+        .parse::<i64>()
+        .map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Digit)))?;
+    if sign.is_some() {
+        value_i64 = -value_i64;
+    }
+    let out = T::try_from(value_i64).map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Digit)))?;
+    Ok((input, out))
 }
 
-/*
-pub(crate) fn parse_literal_int<T>(input: &str) -> IResult<&str, T>
-    where
-        T: num_traits::Num
-        + std::ops::Neg<Output = T>
-        + std::str::FromStr
-        + TryFrom<i64>,
-        <T as TryFrom<i64>>::Error: std::fmt::Debug,
-{
-    // Consume an optional sign.
-    let (input, sign) = opt(char('-')).parse(input)?;
-
-    if input.starts_with("0x") || input.starts_with("0X") {
-        let (input, _) = alt((tag("0x"), tag("0X"))).parse(input)?;
-        let (input, hex_digits) = take_while1(|c: char| c.is_digit(16)).parse(input)?;
-        let (input, _) = opt(char('L')).parse(input)?;
-        let mut value_i64 = i64::from_str_radix(hex_digits, 16)
-            .map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Digit)))?;
-        if sign.is_some() {
-            value_i64 = -value_i64;
-        }
-        let value = T::try_from(value_i64).expect("Conversion failed");
-        Ok((input, value))
-    } else {
-        let (input, num_str) = digit1(input)?;
-        let (input, _) = opt(char('L')).parse(input)?;
-        let mut value_i64 = num_str.parse::<i64>()
-            .map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Digit)))?;
-        if sign.is_some() {
-            value_i64 = -value_i64;
-        }
-        let value = T::try_from(value_i64).expect("Conversion failed");
-        Ok((input, value))
-    }
-}
- */
 
 /// Parse a method reference of the form:
 ///    L<class>;-><method>(<args>)<ret>
@@ -2691,6 +2672,9 @@ mod tests {
 
         let (_, i): (_, i16) = parse_literal_int("-0x7c05").unwrap();
         assert_eq!(i, -0x7c05);
+
+        let (_, i): (_, i16) = parse_literal_int("0xffff").unwrap();
+        assert_eq!(i, -1);
 
         let (_, i): (_, i32) = parse_literal_int("0x7fffffff").unwrap();
         assert_eq!(i, 0x7fffffff);

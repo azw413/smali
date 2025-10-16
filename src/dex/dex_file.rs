@@ -959,6 +959,10 @@ impl DexFile {
                                 match s[i]
                                 {
                                     EncodedValue::Null => None,
+                                    EncodedValue::String(sid) => {
+                                        let raw = self.get_string(sid as usize)?;
+                                        Some(format!("\"{}\"", DexRefResolver::escape_smali_string(&raw)))
+                                    }
                                     _ => Some(s[i].to_string(&self.strings))
                                 }
                             }
@@ -1172,17 +1176,24 @@ impl DexFile {
 
 struct DexRefResolver<'a> { dex: &'a DexFile }
 
-impl DexRefResolver<'_> {
+impl DexRefResolver<'_> 
+{
     fn escape_smali_string(s: &str) -> String {
-        let mut out = String::with_capacity(s.len()+2);
+        let mut out = String::with_capacity(s.len() + 8);
         for ch in s.chars() {
             match ch {
                 '\\' => out.push_str("\\\\"),
-                '"'  => out.push_str("\\\""),
+                '"' => out.push_str("\\\""),
                 '\n' => out.push_str("\\n"),
                 '\r' => out.push_str("\\r"),
                 '\t' => out.push_str("\\t"),
+                // ASCII control chars (C0)
                 c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                // C1 control block 0x7F..0x9F
+                c if (0x7F..=0x9F).contains(&(c as u32)) => out.push_str(&format!("\\u{:04x}", c as u32)),
+                // Any Unicode whitespace other than regular ASCII space should be escaped
+                c if c.is_whitespace() && c != ' ' => out.push_str(&format!("\\u{:04x}", c as u32)),
+                // Safe to emit directly
                 c => out.push(c),
             }
         }

@@ -76,27 +76,29 @@ fn write_annotation(ann: &SmaliAnnotation, subannotation: bool, indented: bool) 
     out
 }
 
-fn write_param(param: &SmaliParam) -> String {
+fn write_param(param: &SmaliParam) -> String 
+{
     let mut output = String::new();
-
-    // Start the .param directive
-    output.push_str(".param ");
-    output.push_str(&param.register);
-
-    // Add name if present
-    if let Some(name) = &param.name {
-        output.push_str(", \"");
-        output.push_str(name);
-        output.push('"');
-    }
-
-    // Handle annotations if present
-    if !param.annotations.is_empty() {
+    
+    // Handle only if annotations if present
+    if !param.annotations.is_empty() 
+    {
+        // Start the .param directive
+        output.push_str(".param ");
+        output.push_str(&param.register);
+    
+        // Add name if present
+        if let Some(name) = &param.name {
+            output.push_str(", \"");
+            output.push_str(name);
+            output.push('"');
+        }
+        
         output.push('\n');
 
         // Write each annotation
         for annotation in &param.annotations {
-            output.push_str(&write_annotation(annotation, true, true));
+            output.push_str(&write_annotation(annotation, false, true));
         }
 
         // Close the param block
@@ -113,11 +115,6 @@ pub(crate) fn write_method(method: &SmaliMethod) -> String {
     }
     out.push_str(&format!("{}{}\n", method.name, method.signature.to_jni()));
 
-    // Write method annotations
-    for a in &method.annotations {
-        out.push_str(&write_annotation(a, false, true));
-    }
-
     // Write parameters
     for param in &method.params {
         let param_str = write_param(param);
@@ -127,6 +124,11 @@ pub(crate) fn write_method(method: &SmaliMethod) -> String {
             out.push_str(line);
             out.push('\n');
         }
+    }
+    
+    // Write method annotations
+    for a in &method.annotations {
+        out.push_str(&write_annotation(a, false, true));
     }
 
     if !method.ops.is_empty() {
