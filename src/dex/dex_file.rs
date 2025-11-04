@@ -66,6 +66,9 @@ impl TypeList
         let mut c = 0;
         c += write_u4(bytes, self.0.len() as u32);
         for i in &self.0 { c += write_u2(bytes, *i as u16); }
+        if (self.0.len() & 1) != 0 {
+            c += write_u2(bytes, 0); // 4-byte alignment padding per spec
+        }
         c
     }
 
@@ -90,6 +93,17 @@ impl PrototypeItem
         s.push(')');
         s.push_str(&dex_file.strings[dex_file.types[self.return_type_idx]].to_string()?) ;
         Ok(s)
+    }
+
+    /// Write the `proto_id_item` entry. `parameters_off` must be the file-absolute offset to the
+    /// associated `type_list` in the data section (or 0 if the prototype has no parameters).
+    pub fn write(&self, bytes: &mut Vec<u8>, parameters_off: u32) -> usize
+    {
+        let mut c = 0;
+        c += write_u4(bytes, self.shorty_idx as u32);
+        c += write_u4(bytes, self.return_type_idx as u32);
+        c += write_u4(bytes, parameters_off);
+        c
     }
 }
 
@@ -160,14 +174,27 @@ pub struct EncodedField
 }
 
 
-#[derive(Debug)]
+impl EncodedField {
+    /// Write this encoded field, updating `last_index` per DEX diff encoding rules.
+    pub fn write(&self, bytes: &mut Vec<u8>, last_index: &mut FieldId) -> usize {
+        let mut c = 0;
+        let diff = self.field_idx - *last_index;
+        c += write_uleb128(bytes, diff as u32);
+        *last_index = self.field_idx;
+        c += write_uleb128(bytes, self.access_flags);
+        c
+    }
+}
+
+
+pub const DBG_END_SEQUENCE: u8 = 0x00;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DebugInfo
 {
     pub line_start: u32,
-    pub parameter_names: Vec<u32>
-
-    // todo: Byte code follows
-
+    pub parameter_names: Vec<Option<u32>>,
+    pub debug_opcodes: Vec<u8>,
 }
 
 impl crate::dex::dex_file::DebugInfo
@@ -175,21 +202,17 @@ impl crate::dex::dex_file::DebugInfo
     pub fn read(bytes: &[u8], ix: &mut usize) -> Result<crate::dex::dex_file::DebugInfo, DexError>
     {
         let line_start = read_uleb128(bytes, ix)?;
+
         let parameters_size = read_uleb128(bytes, ix)?;
-        let mut parameter_names = vec![];
+        let mut parameter_names = Vec::with_capacity(parameters_size as usize);
 
         for _ in 0..parameters_size {
             let idx = read_uleb128p1(bytes, ix)?;   // -1 => NO_INDEX
-            if idx < 0 {
-                parameter_names.push(NO_INDEX as u32);
-            } else {
-                parameter_names.push(idx as u32);
-            }
+            parameter_names.push(if idx < 0 { None } else { Some(idx as u32) });
         }
 
         // todo: read byte code
-
-        Ok(DebugInfo { line_start, parameter_names })
+        Ok(DebugInfo { line_start, parameter_names, debug_opcodes: vec![] })
     }
 
     pub fn write(&self, bytes: &mut Vec<u8>) -> usize
@@ -197,17 +220,18 @@ impl crate::dex::dex_file::DebugInfo
         let mut c = 0;
         c += write_uleb128(bytes, self.line_start);
         c += write_uleb128(bytes, self.parameter_names.len() as u32);
-        let mut last = 0;
-        for p in &self.parameter_names
-        {
-            let diff = (*p as i32) - (last as i32);
-            c += write_uleb128p1(bytes, diff);
-            last = *p;
+        for p in &self.parameter_names {
+            let idx = match p {
+                Some(val) => *val as i32,
+                None => -1,
+            };
+            c += write_uleb128p1(bytes, idx);
         }
 
-        // todo: write the bytecode
-        c += write_u1(bytes, 0); // DBG_END_SEQUENCE
-
+        c += write_x(bytes, &self.debug_opcodes);
+        if self.debug_opcodes.last().copied() != Some(DBG_END_SEQUENCE) {
+            c += write_u1(bytes, DBG_END_SEQUENCE);
+        }
         c
     }
 }
@@ -240,6 +264,7 @@ pub struct TryItem {
     pub start_addr: u32,
     pub insn_count: u16,
     pub handler_off: u16, // offset (in bytes) into the encoded_catch_handler_list
+    pub handler_idx: Option<usize>, // helper for re-encoding handler_off
 }
 
 impl TryItem {
@@ -248,6 +273,7 @@ impl TryItem {
             start_addr: read_u4(bytes, ix)?,
             insn_count: read_u2(bytes, ix)?,
             handler_off: read_u2(bytes, ix)?,
+            handler_idx: None,
         })
     }
 
@@ -353,6 +379,7 @@ impl crate::dex::dex_file::CodeItem
 
             // Read all handlers with a temporary cursor so we can produce good error context
             let mut scan = handlers_base;
+            let mut handler_offsets = Vec::with_capacity(handlers_size);
             for i in 0..handlers_size {
                 let entry_off = scan;
                 match EncodedCatchHandler::read(bytes, &mut scan) {
@@ -368,23 +395,41 @@ impl crate::dex::dex_file::CodeItem
                 if scan <= entry_off {
                     return Err(DexError::new("EncodedCatchHandler did not advance cursor (corrupt data)"));
                 }
+                handler_offsets.push((entry_off - handlers_base) as u32);
             }
             // Advance main cursor only after successful scan
             *ix = scan;
+
+            let mut offset_to_index = HashMap::with_capacity(handler_offsets.len());
+            for (idx, off) in handler_offsets.iter().enumerate() {
+                offset_to_index.entry(*off).or_insert(idx);
+            }
+            for (ti, t) in tries.iter_mut().enumerate() {
+                let abs_off = t.handler_off as u32;
+                if let Some(&idx) = offset_to_index.get(&abs_off) {
+                    t.handler_idx = Some(idx);
+                } else {
+                    warn!(
+                        "[codeitem] could not resolve handler offset {} for try #{} (handlers_size={})",
+                        abs_off, ti, handler_offsets.len()
+                    );
+                }
+            }
         }
 
         Ok(CodeItem { registers_size, args_in_size, args_out_size, tries_size, debug_info, instructions, padding, tries, handlers })
     }
 
     // Written to the data section
-    pub fn write(&self, bytes: &mut Vec<u8>) -> usize
+    pub fn write(&self, bytes: &mut Vec<u8>, code_item_base: u32) -> Result<usize, DexError>
     {
         let mut c = 0;
+        let start = bytes.len();
         c += write_u2(bytes, self.registers_size);
         c += write_u2(bytes, self.args_in_size);
         c += write_u2(bytes, self.args_out_size);
-        // Always derive tries_size from the vector to avoid mismatches
-        c += write_u2(bytes, self.tries.len() as u16);
+        let tries_len = self.tries.len() as u16;
+        c += write_u2(bytes, tries_len);
 
         // Reserve space for debug_info_off; we'll patch it after writing the debug block
         let debug_off_pos = bytes.len();
@@ -398,25 +443,67 @@ impl crate::dex::dex_file::CodeItem
             c += write_u2(bytes, 0);
         }
 
-        // try_item array
-        for t in &self.tries { c += t.write(bytes); }
-
-        // encoded_catch_handler_list (only present if tries exist)
         if !self.tries.is_empty() {
+            let mut handler_offsets: Vec<u16> = Vec::with_capacity(self.handlers.len());
+            let mut handler_entries: Vec<Vec<u8>> = Vec::with_capacity(self.handlers.len());
+            for h in &self.handlers {
+                let mut entry_buf = Vec::new();
+                h.write(&mut entry_buf);
+                handler_entries.push(entry_buf);
+            }
+
+            let mut prefix_buf = Vec::new();
+            write_uleb128(&mut prefix_buf, self.handlers.len() as u32);
+            let mut running = prefix_buf.len();
+            for entry in &handler_entries {
+                if running > u16::MAX as usize {
+                    return Err(DexError::new("encoded_catch_handler_list exceeds u16 offset range"));
+                }
+                handler_offsets.push(running as u16);
+                running += entry.len();
+            }
+
+            for (idx, t) in self.tries.iter().enumerate() {
+                let resolved = if let Some(handler_index) = t.handler_idx {
+                    handler_offsets.get(handler_index).copied().ok_or_else(|| {
+                        DexError::new(&format!(
+                            "handler_idx {} out of range for try #{} (handlers={})",
+                            handler_index,
+                            idx,
+                            handler_offsets.len()
+                        ))
+                    })?
+                } else if self.handlers.is_empty() {
+                    t.handler_off
+                } else {
+                    return Err(DexError::new("TryItem missing handler_idx while handlers present"));
+                };
+                let mut try_record = t.clone();
+                try_record.handler_off = resolved;
+                c += try_record.write(bytes);
+            }
+
             c += write_uleb128(bytes, self.handlers.len() as u32);
-            for h in &self.handlers { c += h.write(bytes); }
+            for entry in handler_entries {
+                let before = bytes.len();
+                bytes.extend_from_slice(&entry);
+                c += bytes.len() - before;
+            }
         }
 
         // Patch debug_info_off and append the debug block (if any)
         if let Some(di) = &self.debug_info {
-            let debug_info_off = bytes.len() as u32; // NOTE: caller should ensure this becomes a correct file-absolute offset during final assembly
+            let debug_info_start = bytes.len();
+            let absolute = code_item_base
+                .checked_add((debug_info_start - start) as u32)
+                .ok_or_else(|| DexError::new("debug_info offset overflow"))?;
             let mut tmp = Vec::with_capacity(4);
-            write_u4(&mut tmp, debug_info_off);
+            write_u4(&mut tmp, absolute);
             bytes[debug_off_pos..debug_off_pos+4].copy_from_slice(&tmp);
             c += di.write(bytes);
         }
 
-        c
+        Ok(c)
     }
 }
 
@@ -425,7 +512,20 @@ pub struct EncodedMethod
 {
     pub method_idx: MethodId,
     pub access_flags: u32,
+    pub code_off: u32,
     pub code: Option<CodeItem>
+}
+
+impl EncodedMethod {
+    pub fn write(&self, bytes: &mut Vec<u8>, last_index: &mut MethodId) -> usize {
+        let mut c = 0;
+        let diff = self.method_idx - *last_index;
+        c += write_uleb128(bytes, diff as u32);
+        *last_index = self.method_idx;
+        c += write_uleb128(bytes, self.access_flags);
+        c += write_uleb128(bytes, self.code_off);
+        c
+    }
 }
 
 
@@ -468,20 +568,22 @@ impl ClassDataItem
         for _ in 0..direct_method_size {
             offset += read_uleb128(bytes, ix)?;
             let access_flags = read_uleb128(bytes, ix)?;
-            let mut code_offset = read_uleb128(bytes, ix)? as usize;
-            let code = if code_offset > 0 { Some(CodeItem::read(bytes, &mut code_offset)?) }
+            let code_off = read_uleb128(bytes, ix)?;
+            let mut code_cursor = code_off as usize;
+            let code = if code_off > 0 { Some(CodeItem::read(bytes, &mut code_cursor)?) }
                 else { None };
-            direct_methods.push( EncodedMethod { method_idx: offset as MethodId, access_flags, code } );
+            direct_methods.push( EncodedMethod { method_idx: offset as MethodId, access_flags, code_off, code } );
         }
 
         offset = 0;
         for _ in 0..virtual_method_size {
             offset += read_uleb128(bytes, ix)?;
             let access_flags = read_uleb128(bytes, ix)?;
-            let mut code_offset = read_uleb128(bytes, ix)? as usize;
-            let code = if code_offset > 0 { Some(CodeItem::read(bytes, &mut code_offset)?) }
+            let code_off = read_uleb128(bytes, ix)?;
+            let mut code_cursor = code_off as usize;
+            let code = if code_off > 0 { Some(CodeItem::read(bytes, &mut code_cursor)?) }
                 else { None };
-            virtual_methods.push( EncodedMethod { method_idx: offset as MethodId, access_flags, code } );
+            virtual_methods.push( EncodedMethod { method_idx: offset as MethodId, access_flags, code_off, code } );
         }
 
         Ok(ClassDataItem { static_fields, instance_fields, direct_methods, virtual_methods })
@@ -495,26 +597,24 @@ impl ClassDataItem
         c += write_uleb128(bytes, self.direct_methods.len() as u32);
         c += write_uleb128(bytes, self.virtual_methods.len() as u32);
 
-        let mut last = 0;
-        for i in &self.static_fields {
-            c += write_uleb128(bytes, (i.field_idx - last) as u32);
-            last = i.field_idx;
-            c += write_uleb128(bytes, i.access_flags);
+        let mut last_field: FieldId = 0;
+        for field in &self.static_fields {
+            c += field.write(bytes, &mut last_field);
         }
 
-        let mut last = 0;
-        for i in &self.instance_fields {
-            c += write_uleb128(bytes, (i.field_idx - last) as u32);
-            last = i.field_idx;
-            c += write_uleb128(bytes, i.access_flags);
+        last_field = 0;
+        for field in &self.instance_fields {
+            c += field.write(bytes, &mut last_field);
         }
 
-        let mut last = 0;
-        for i in &self.direct_methods {
-            c += write_uleb128(bytes, (i.method_idx - last) as u32);
-            last = i.method_idx;
-            c += write_uleb128(bytes, i.access_flags);
+        let mut last_method: MethodId = 0;
+        for method in &self.direct_methods {
+            c += method.write(bytes, &mut last_method);
+        }
 
+        last_method = 0;
+        for method in &self.virtual_methods {
+            c += method.write(bytes, &mut last_method);
         }
 
         c
@@ -1486,7 +1586,8 @@ impl DexString
 
             DexString::Decoded(s) => {
                 let encoded = to_java_cesu8(s).to_vec();
-                c += write_uleb128(bytes, s.chars().count() as u32);
+                let utf16_len = s.encode_utf16().count() as u32;
+                c += write_uleb128(bytes, utf16_len);
                 c += write_x(bytes, encoded.as_slice());
                 c += write_u1(bytes, 0);
             }
@@ -1543,7 +1644,7 @@ mod tests {
     }
     #[test]
     fn test_try_item_roundtrip() {
-        let t = TryItem { start_addr: 0x12345678, insn_count: 0x0102, handler_off: 0x2030 };
+        let t = TryItem { start_addr: 0x12345678, insn_count: 0x0102, handler_off: 0x2030, handler_idx: None };
         let mut bytes = vec![];
         let written = t.write(&mut bytes);
         assert_eq!(written, 8); // 4 + 2 + 2
@@ -1594,5 +1695,236 @@ mod tests {
         let h2 = EncodedCatchHandler::read(&bytes, &mut ix).expect("EncodedCatchHandler read failed");
         assert_eq!(ix, bytes.len());
         assert_eq!(h, h2);
+    }
+
+    #[test]
+    fn test_debug_info_write_encodes_params_and_opcodes() {
+        let di = DebugInfo {
+            line_start: 123,
+            parameter_names: vec![Some(5), None],
+            debug_opcodes: vec![0x0A, 0x0B],
+        };
+        let mut buf = Vec::new();
+        let written = di.write(&mut buf);
+        assert_eq!(written, buf.len());
+
+        let mut ix = 0;
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 123);
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 2);
+        assert_eq!(read_uleb128p1(&buf, &mut ix).unwrap(), 5);
+        assert_eq!(read_uleb128p1(&buf, &mut ix).unwrap(), -1);
+        assert_eq!(&buf[ix..ix + 2], &[0x0A, 0x0B]);
+        ix += 2;
+        assert_eq!(buf[ix], DBG_END_SEQUENCE);
+    }
+
+    #[test]
+    fn test_debug_info_write_does_not_duplicate_end_sequence() {
+        let di = DebugInfo {
+            line_start: 0,
+            parameter_names: vec![],
+            debug_opcodes: vec![DBG_END_SEQUENCE],
+        };
+        let mut buf = Vec::new();
+        di.write(&mut buf);
+
+        assert_eq!(buf.last().copied(), Some(DBG_END_SEQUENCE));
+        assert_eq!(buf.len(), 3); // line_start + parameters_size + terminator
+        assert_eq!(buf[2], DBG_END_SEQUENCE);
+    }
+
+    #[test]
+    fn test_prototype_item_write_records_offsets() {
+        let proto = PrototypeItem {
+            shorty_idx: 3,
+            return_type_idx: 5,
+            parameters: TypeList(vec![1, 2, 3]),
+        };
+        let mut buf = Vec::new();
+        let written = proto.write(&mut buf, 0x1122_3344);
+        assert_eq!(written, 12);
+
+        let mut ix = 0;
+        assert_eq!(read_u4(&buf, &mut ix).unwrap(), 3);
+        assert_eq!(read_u4(&buf, &mut ix).unwrap(), 5);
+        assert_eq!(read_u4(&buf, &mut ix).unwrap(), 0x1122_3344);
+    }
+
+    #[test]
+    fn test_encoded_field_write_differential_encoding() {
+        let f1 = EncodedField { field_idx: 2, access_flags: 0x1 };
+        let f2 = EncodedField { field_idx: 5, access_flags: 0x2 };
+        let mut last: FieldId = 0;
+        let mut buf = Vec::new();
+        f1.write(&mut buf, &mut last);
+        f2.write(&mut buf, &mut last);
+
+        let mut ix = 0;
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 2);
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 0x1);
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 3);
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 0x2);
+    }
+
+    #[test]
+    fn test_encoded_method_write_differential_encoding() {
+        let m1 = EncodedMethod { method_idx: 4, access_flags: 0x100, code_off: 0x30, code: None };
+        let m2 = EncodedMethod { method_idx: 7, access_flags: 0x200, code_off: 0, code: None };
+        let mut last: MethodId = 0;
+        let mut buf = Vec::new();
+        m1.write(&mut buf, &mut last);
+        m2.write(&mut buf, &mut last);
+
+        let mut ix = 0;
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 4);
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 0x100);
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 0x30);
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 3);
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 0x200);
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_code_item_write_computes_handler_offsets_and_debug_info_base() {
+        let code = CodeItem {
+            registers_size: 2,
+            args_in_size: 0,
+            args_out_size: 0,
+            tries_size: 0,
+            debug_info: Some(DebugInfo {
+                line_start: 1,
+                parameter_names: vec![],
+                debug_opcodes: vec![],
+            }),
+            instructions: vec![0x0001, 0x0002, 0x0003],
+            padding: 0,
+            tries: vec![TryItem {
+                start_addr: 0,
+                insn_count: 1,
+                handler_off: 0,
+                handler_idx: Some(0),
+            }],
+            handlers: vec![EncodedCatchHandler {
+                handlers: vec![EncodedTypeAddrPair { type_idx: 1, addr: 0x10 }],
+                catch_all_addr: None,
+            }],
+        };
+
+        let mut buf = Vec::new();
+        let base = 0x2000;
+        let written = code.write(&mut buf, base).expect("write succeeds");
+        assert_eq!(written, buf.len());
+
+        let mut ix = 0;
+        assert_eq!(read_u2(&buf, &mut ix).unwrap(), 2); // registers_size
+        assert_eq!(read_u2(&buf, &mut ix).unwrap(), 0); // args_in_size
+        assert_eq!(read_u2(&buf, &mut ix).unwrap(), 0); // args_out_size
+        assert_eq!(read_u2(&buf, &mut ix).unwrap(), 1); // tries_size
+
+        let debug_info_off = read_u4(&buf, &mut ix).unwrap();
+        let insn_count = read_u4(&buf, &mut ix).unwrap() as usize;
+        assert_eq!(insn_count, 3);
+        ix += insn_count * 2; // instructions
+
+        let padding = read_u2(&buf, &mut ix).unwrap();
+        assert_eq!(padding, 0);
+
+        // try_item
+        assert_eq!(read_u4(&buf, &mut ix).unwrap(), 0);
+        assert_eq!(read_u2(&buf, &mut ix).unwrap(), 1);
+        let handler_off = read_u2(&buf, &mut ix).unwrap();
+        assert_eq!(handler_off, 1, "expected handler offset after handlers_size prefix");
+
+        let handler_count = read_uleb128(&buf, &mut ix).unwrap();
+        assert_eq!(handler_count, 1);
+        EncodedCatchHandler::read(&buf, &mut ix).expect("handler read");
+
+        let debug_info_start = ix;
+        assert_eq!(debug_info_off, base + debug_info_start as u32);
+
+        // Validate debug info payload: line_start=1, parameters_size=0, terminator
+        let mut di_ix = debug_info_start;
+        assert_eq!(read_uleb128(&buf, &mut di_ix).unwrap(), 1);
+        assert_eq!(read_uleb128(&buf, &mut di_ix).unwrap(), 0);
+        assert_eq!(buf[di_ix], DBG_END_SEQUENCE);
+    }
+
+    #[test]
+    fn test_class_data_item_write_encodes_fields_and_methods() {
+        let class_data = ClassDataItem {
+            static_fields: vec![EncodedField { field_idx: 2, access_flags: 0x1 }],
+            instance_fields: vec![EncodedField { field_idx: 4, access_flags: 0x2 }],
+            direct_methods: vec![EncodedMethod {
+                method_idx: 5,
+                access_flags: 0x0101,
+                code_off: 0x40,
+                code: None,
+            }],
+            virtual_methods: vec![EncodedMethod {
+                method_idx: 7,
+                access_flags: 0x0200,
+                code_off: 0,
+                code: None,
+            }],
+        };
+
+        let mut buf = Vec::new();
+        let written = class_data.write(&mut buf);
+        assert_eq!(written, buf.len());
+
+        let mut ix = 0;
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 1); // static fields
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 1); // instance fields
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 1); // direct methods
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 1); // virtual methods
+
+        // static field diffs
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 2);
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 0x1);
+
+        // instance field diffs
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 4);
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 0x2);
+
+        // direct method
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 5);
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 0x0101);
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 0x40);
+
+        // virtual method
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 7);
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 0x0200);
+        assert_eq!(read_uleb128(&buf, &mut ix).unwrap(), 0);
+
+        assert_eq!(ix, buf.len());
+    }
+
+    #[test]
+    fn test_typelist_write_includes_padding_for_odd_length() {
+        let list = TypeList(vec![1, 2, 3]);
+        let mut buf = Vec::new();
+        let written = list.write(&mut buf);
+
+        assert_eq!(written, buf.len());
+        assert_eq!(buf.len() % 4, 0, "type_list must be 4-byte aligned");
+
+        let mut ix = 0;
+        let size = read_u4(&buf, &mut ix).expect("size read");
+        assert_eq!(size, 3);
+        // consume items
+        ix += 2 * 3;
+        assert_eq!(&buf[ix..], &[0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_dexstring_write_reports_utf16_length() {
+        let s = "😀"; // surrogate pair → 2 UTF-16 code units
+        let ds = DexString::from_string(s);
+        let mut buf = Vec::new();
+        ds.write(&mut buf);
+
+        let mut ix = 0;
+        let utf16_len = read_uleb128(&buf, &mut ix).expect("utf16 len");
+        assert_eq!(utf16_len, 2);
     }
 }
