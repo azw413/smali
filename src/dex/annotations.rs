@@ -1,5 +1,3 @@
-
-
 //! DEX annotations-related structures and I/O
 //!
 //! Implements the core binary structures from the DEX spec:
@@ -8,11 +6,9 @@
 //! - annotation_set_ref_list
 //! - annotation_item (wraps EncodedAnnotation)
 
-use crate::dex::error::DexError;
-use crate::dex::{
-    read_u1, read_u4, write_u1, write_u4,
-};
 use crate::dex::encoded_values::EncodedAnnotation;
+use crate::dex::error::DexError;
+use crate::dex::{read_u1, read_u4, write_u1, write_u4};
 
 /// annotation_item
 /// https://source.android.com/docs/core/runtime/dex-format#annotation-item
@@ -28,7 +24,10 @@ impl AnnotationItem {
     pub fn read(bytes: &[u8], ix: &mut usize) -> Result<AnnotationItem, DexError> {
         let visibility = read_u1(bytes, ix)?;
         let annotation = EncodedAnnotation::read(bytes, ix)?;
-        Ok(AnnotationItem { visibility, annotation })
+        Ok(AnnotationItem {
+            visibility,
+            annotation,
+        })
     }
 
     pub fn write(&self, bytes: &mut Vec<u8>) -> usize {
@@ -61,7 +60,9 @@ impl AnnotationSetItem {
     pub fn write(&self, bytes: &mut Vec<u8>) -> usize {
         let mut c = 0;
         c += write_u4(bytes, self.entries.len() as u32);
-        for off in &self.entries { c += write_u4(bytes, *off); }
+        for off in &self.entries {
+            c += write_u4(bytes, *off);
+        }
         c
     }
 }
@@ -87,7 +88,9 @@ impl AnnotationSetRefList {
     pub fn write(&self, bytes: &mut Vec<u8>) -> usize {
         let mut c = 0;
         c += write_u4(bytes, self.list.len() as u32);
-        for off in &self.list { c += write_u4(bytes, *off); }
+        for off in &self.list {
+            c += write_u4(bytes, *off);
+        }
         c
     }
 }
@@ -180,13 +183,19 @@ impl AnnotationsDirectoryItem {
         let annotated_parameters_size = read_u4(bytes, ix)? as usize;
 
         let mut field_annotations = Vec::with_capacity(fields_size);
-        for _ in 0..fields_size { field_annotations.push(FieldAnnotations::read(bytes, ix)?); }
+        for _ in 0..fields_size {
+            field_annotations.push(FieldAnnotations::read(bytes, ix)?);
+        }
 
         let mut method_annotations = Vec::with_capacity(annotated_methods_size);
-        for _ in 0..annotated_methods_size { method_annotations.push(MethodAnnotations::read(bytes, ix)?); }
+        for _ in 0..annotated_methods_size {
+            method_annotations.push(MethodAnnotations::read(bytes, ix)?);
+        }
 
         let mut parameter_annotations = Vec::with_capacity(annotated_parameters_size);
-        for _ in 0..annotated_parameters_size { parameter_annotations.push(ParameterAnnotations::read(bytes, ix)?); }
+        for _ in 0..annotated_parameters_size {
+            parameter_annotations.push(ParameterAnnotations::read(bytes, ix)?);
+        }
 
         Ok(AnnotationsDirectoryItem {
             class_annotations_off,
@@ -203,9 +212,15 @@ impl AnnotationsDirectoryItem {
         c += write_u4(bytes, self.method_annotations.len() as u32);
         c += write_u4(bytes, self.parameter_annotations.len() as u32);
 
-        for fa in &self.field_annotations { c += fa.write(bytes); }
-        for ma in &self.method_annotations { c += ma.write(bytes); }
-        for pa in &self.parameter_annotations { c += pa.write(bytes); }
+        for fa in &self.field_annotations {
+            c += fa.write(bytes);
+        }
+        for ma in &self.method_annotations {
+            c += ma.write(bytes);
+        }
+        for pa in &self.parameter_annotations {
+            c += pa.write(bytes);
+        }
         c
     }
 }
@@ -218,8 +233,14 @@ mod tests {
     fn test_annotation_item_roundtrip() {
         // A tiny encoded annotation: type_idx=3, size=0
         // EncodedAnnotation::read/write is tested elsewhere; we just exercise framing here.
-        let enc = EncodedAnnotation { type_idx: 3, elements: vec![] };
-        let item = AnnotationItem { visibility: 1, annotation: enc };
+        let enc = EncodedAnnotation {
+            type_idx: 3,
+            elements: vec![],
+        };
+        let item = AnnotationItem {
+            visibility: 1,
+            annotation: enc,
+        };
 
         let mut buf = vec![];
         let _n = item.write(&mut buf);
@@ -231,7 +252,9 @@ mod tests {
 
     #[test]
     fn test_annotation_set_item_roundtrip() {
-        let set = AnnotationSetItem { entries: vec![0x10, 0x20, 0x30] };
+        let set = AnnotationSetItem {
+            entries: vec![0x10, 0x20, 0x30],
+        };
         let mut buf = vec![];
         let _ = set.write(&mut buf);
         let mut ix = 0;
@@ -244,9 +267,18 @@ mod tests {
     fn test_annotations_directory_roundtrip() {
         let dir = AnnotationsDirectoryItem {
             class_annotations_off: 0x1000,
-            field_annotations: vec![ FieldAnnotations { field_idx: 1, annotations_off: 0x2000 } ],
-            method_annotations: vec![ MethodAnnotations { method_idx: 2, annotations_off: 0x3000 } ],
-            parameter_annotations: vec![ ParameterAnnotations { method_idx: 3, annotations_off: 0x4000 } ],
+            field_annotations: vec![FieldAnnotations {
+                field_idx: 1,
+                annotations_off: 0x2000,
+            }],
+            method_annotations: vec![MethodAnnotations {
+                method_idx: 2,
+                annotations_off: 0x3000,
+            }],
+            parameter_annotations: vec![ParameterAnnotations {
+                method_idx: 3,
+                annotations_off: 0x4000,
+            }],
         };
         let mut buf = vec![];
         let _ = dir.write(&mut buf);

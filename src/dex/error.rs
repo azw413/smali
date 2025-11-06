@@ -21,7 +21,6 @@ macro_rules! err {
     };
 }
 
-
 #[macro_export]
 macro_rules! fail {
     ($msg:literal) => {
@@ -41,40 +40,35 @@ macro_rules! fail {
     };
 }
 
-
 #[derive(Debug, PartialEq, Eq)]
-pub struct DexError
-{
+pub struct DexError {
     msg: String,
     contexts: Vec<String>,
 }
 
-impl DexError
-{
-    pub(crate) fn new(msg: &str) -> Self
-    {
+impl DexError {
+    pub(crate) fn new(msg: &str) -> Self {
         DexError {
             msg: msg.to_string(),
             contexts: Vec::new(),
         }
     }
 
-    pub(crate) fn with_context(base: DexError, context: String) -> Self
-    {
+    pub(crate) fn with_context(base: DexError, context: String) -> Self {
         let mut contexts = base.contexts;
         contexts.push(context);
-        DexError { msg: base.msg, contexts }
+        DexError {
+            msg: base.msg,
+            contexts,
+        }
     }
 }
 
-impl fmt::Display for DexError
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
-    {
+impl fmt::Display for DexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.msg)?;
         let mut connector = " for ";
-        for context in &self.contexts
-        {
+        for context in &self.contexts {
             write!(f, "{}{}", connector, context)?;
             connector = " of ";
         }

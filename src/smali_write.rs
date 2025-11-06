@@ -1,4 +1,7 @@
-use crate::types::{AnnotationValue, Modifier, SmaliAnnotation, SmaliClass, SmaliField, SmaliMethod, SmaliOp, SmaliParam};
+use crate::types::{
+    AnnotationValue, Modifier, SmaliAnnotation, SmaliClass, SmaliField, SmaliMethod, SmaliOp,
+    SmaliParam,
+};
 
 fn write_modifiers(mods: &Vec<Modifier>) -> String {
     let mut out = "".to_string();
@@ -76,24 +79,22 @@ fn write_annotation(ann: &SmaliAnnotation, subannotation: bool, indented: bool) 
     out
 }
 
-fn write_param(param: &SmaliParam) -> String 
-{
+fn write_param(param: &SmaliParam) -> String {
     let mut output = String::new();
-    
+
     // Handle only if annotations if present
-    if !param.annotations.is_empty() 
-    {
+    if !param.annotations.is_empty() {
         // Start the .param directive
         output.push_str(".param ");
         output.push_str(&param.register);
-    
+
         // Add name if present
         if let Some(name) = &param.name {
             output.push_str(", \"");
             output.push_str(name);
             output.push('"');
         }
-        
+
         output.push('\n');
 
         // Write each annotation
@@ -125,7 +126,7 @@ pub(crate) fn write_method(method: &SmaliMethod) -> String {
             out.push('\n');
         }
     }
-    
+
     // Write method annotations
     for a in &method.annotations {
         out.push_str(&write_annotation(a, false, true));
@@ -165,8 +166,7 @@ pub(crate) fn write_method(method: &SmaliMethod) -> String {
     out
 }
 
-pub(crate) fn write_field(f: &SmaliField) -> String 
-{
+pub(crate) fn write_field(f: &SmaliField) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         ".field {}{}:{}",
@@ -218,7 +218,9 @@ pub(crate) fn write_class(dex: &SmaliClass) -> String {
 
     if !dex.fields.is_empty() {
         out.push_str("\n# fields\n");
-        for f in &dex.fields { out.push_str(&write_field(f)); }
+        for f in &dex.fields {
+            out.push_str(&write_field(f));
+        }
     }
 
     if !dex.methods.is_empty() {

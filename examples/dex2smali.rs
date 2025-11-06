@@ -1,23 +1,25 @@
+use smali::dex::DexFile;
 use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
-use smali::dex::DexFile;
 
-fn main()
-{
+fn main() {
     let args: Vec<String> = env::args().collect();
 
     // Do everything else with the error trap
     match process_dex(&args[1]) {
-        Ok(_) => { println!("All done: written smali to out/"); }
-        Err(e) => { println!("Aborted due to error: {:?}", e); }
+        Ok(_) => {
+            println!("All done: written smali to out/");
+        }
+        Err(e) => {
+            println!("Aborted due to error: {:?}", e);
+        }
     }
 }
 
 /* This is where all the processing takes place, to make error handling easier */
-fn process_dex(dex_file: &str) -> Result<(), Box<dyn Error>>
-{
+fn process_dex(dex_file: &str) -> Result<(), Box<dyn Error>> {
     // Parse the DEX
     let dex = DexFile::from_file(Path::new(dex_file))?;
 
@@ -41,7 +43,9 @@ fn process_dex(dex_file: &str) -> Result<(), Box<dyn Error>>
         path.set_extension("smali");
 
         // Create parent dirs and write the file
-        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let text = format!("{}", sc.to_smali());
         fs::write(&path, text)?;
     }

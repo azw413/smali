@@ -1,20 +1,22 @@
 // Tracing options
 
 //macro_rules! smali_trace { ($($arg:tt)*) => { eprintln!($($arg)*); } }
-macro_rules! smali_trace { ($($arg:tt)*) => {}; }
+macro_rules! smali_trace {
+    ($($arg:tt)*) => {};
+}
 
 //macro_rules! smali_warn { ($($arg:tt)*) => { eprintln!($($arg)*); } }
-macro_rules! smali_warn { ($($arg:tt)*) => {}; }
+macro_rules! smali_warn {
+    ($($arg:tt)*) => {};
+}
 
-
-use std::collections::HashMap;
-use bitflags::bitflags;
-use rangemap::{RangeInclusiveMap};
-use std::ops::{ RangeInclusive };
-use once_cell::sync::Lazy;
 use crate::dex::error::DexError;
 use crate::dex::opcodes::OPCODES;
-
+use bitflags::bitflags;
+use once_cell::sync::Lazy;
+use rangemap::RangeInclusiveMap;
+use std::collections::HashMap;
+use std::ops::RangeInclusive;
 
 /// Maps raw Dalvik register numbers to smali-style names (vN / pN)
 /// based on a method's total register count and input (parameter) size.
@@ -27,13 +29,21 @@ impl RegMapper {
     #[inline]
     pub fn map_name(&self, raw: u16) -> String {
         let params_base = self.registers_size.saturating_sub(self.ins_size);
-        if raw >= params_base { format!("p{}", raw - params_base) } else { format!("v{}", raw) }
+        if raw >= params_base {
+            format!("p{}", raw - params_base)
+        } else {
+            format!("v{}", raw)
+        }
     }
 }
 
 #[inline]
 fn fmt_reg(mapper: Option<&RegMapper>, raw: u16) -> String {
-    if let Some(m) = mapper { m.map_name(raw) } else { format!("v{}", raw) }
+    if let Some(m) = mapper {
+        m.map_name(raw)
+    } else {
+        format!("v{}", raw)
+    }
 }
 
 ///
@@ -42,7 +52,7 @@ fn fmt_reg(mapper: Option<&RegMapper>, raw: u16) -> String {
 pub trait RefResolver {
     fn string(&self, idx: u32) -> String;
     fn type_desc(&self, idx: u32) -> String;
-    fn field_ref(&self, idx: u32) -> (String, String, String);  // (class, name, desc)
+    fn field_ref(&self, idx: u32) -> (String, String, String); // (class, name, desc)
     fn method_ref(&self, idx: u32) -> (String, String, String); // (class, name, proto)
     fn call_site(&self, idx: u32) -> String;
     fn method_handle(&self, idx: u32) -> String;
@@ -54,8 +64,12 @@ pub trait RefResolver {
 pub struct PlaceholderResolver;
 
 impl RefResolver for PlaceholderResolver {
-    fn string(&self, idx: u32) -> String { format!("\"string@{}\"", idx) }
-    fn type_desc(&self, idx: u32) -> String { format!("Ltype@{};", idx) }
+    fn string(&self, idx: u32) -> String {
+        format!("\"string@{}\"", idx)
+    }
+    fn type_desc(&self, idx: u32) -> String {
+        format!("Ltype@{};", idx)
+    }
     fn field_ref(&self, idx: u32) -> (String, String, String) {
         // Disambiguate placeholder pools: field refs live in a different index space
         // than type/class ids in real DEX. Use a distinct class prefix so it’s obvious
@@ -75,12 +89,21 @@ impl RefResolver for PlaceholderResolver {
             String::from("()V"),
         )
     }
-    fn call_site(&self, idx: u32) -> String { format!("callsite@{}", idx) }
-    fn method_handle(&self, idx: u32) -> String { format!("handle@{}", idx) }
-    fn proto(&self, _idx: u32) -> String { String::from("()V") }
+    fn call_site(&self, idx: u32) -> String {
+        format!("callsite@{}", idx)
+    }
+    fn method_handle(&self, idx: u32) -> String {
+        format!("handle@{}", idx)
+    }
+    fn proto(&self, _idx: u32) -> String {
+        String::from("()V")
+    }
 }
 use crate::smali_parse::parse_op;
-use crate::types::{SmaliOp, ArrayDataDirective, ArrayDataElement, PackedSwitchDirective, SparseSwitchDirective, SparseSwitchEntry, Label};
+use crate::types::{
+    ArrayDataDirective, ArrayDataElement, Label, PackedSwitchDirective, SmaliOp,
+    SparseSwitchDirective, SparseSwitchEntry,
+};
 
 /// Represents different types of references used by opcodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,7 +154,6 @@ pub struct VersionConstraint {
 }
 
 impl Opcode {
-
     /// Creates a new Opcode instance.
     pub(crate) fn new(
         version_constraints: Vec<VersionConstraint>,
@@ -172,16 +194,15 @@ impl Opcode {
         version_constraints: Vec<VersionConstraint>,
         name: &'static str,
         reference_type: ReferenceType,
-        format: Format
-    ) -> Self
-    {
+        format: Format,
+    ) -> Self {
         Opcode::new(
             version_constraints,
             name,
             reference_type,
             None,
             format,
-            OpcodeFlags::empty()
+            OpcodeFlags::empty(),
         )
     }
 
@@ -204,7 +225,11 @@ impl Opcode {
     }
 
     /// Helper function similar to Java's `betweenApi`.
-    pub(crate) fn between_api(opcode_value: u16, min_api: i32, max_api: i32) -> Vec<VersionConstraint> {
+    pub(crate) fn between_api(
+        opcode_value: u16,
+        min_api: i32,
+        max_api: i32,
+    ) -> Vec<VersionConstraint> {
         vec![VersionConstraint {
             api_range: Some(min_api..=max_api),
             art_version_range: None,
@@ -258,7 +283,10 @@ impl Opcode {
     }
 
     /// Combines multiple vectors of `VersionConstraint` into one.
-    pub(crate) fn combine(constraints: Vec<VersionConstraint>, other: Vec<VersionConstraint>) -> Vec<VersionConstraint> {
+    pub(crate) fn combine(
+        constraints: Vec<VersionConstraint>,
+        other: Vec<VersionConstraint>,
+    ) -> Vec<VersionConstraint> {
         let mut combined = constraints;
         combined.extend(other);
         combined
@@ -437,9 +465,14 @@ impl Format {
 }
 
 // Helpers for pulling format encoding
-#[inline] fn u16_at(code: &[u16], pc: usize) -> u16 { code[pc] }
 #[inline]
-fn u16_at_opt(code: &[u16], pc: usize) -> Option<u16> { code.get(pc).copied() }
+fn u16_at(code: &[u16], pc: usize) -> u16 {
+    code[pc]
+}
+#[inline]
+fn u16_at_opt(code: &[u16], pc: usize) -> Option<u16> {
+    code.get(pc).copied()
+}
 
 #[inline]
 fn require_cu(code: &[u16], pc: usize, need: usize, opname: &str) -> Result<(), DexError> {
@@ -454,13 +487,34 @@ fn require_cu(code: &[u16], pc: usize, need: usize, opname: &str) -> Result<(), 
     }
     Ok(())
 }
-#[inline] fn op(inst: u16) -> u8 { (inst & 0x00ff) as u8 }
-#[inline] fn a8(inst: u16) -> u8 { (inst >> 8) as u8 }          // 11x AA, 21x AA, …
-#[inline] fn a4(inst: u16) -> u8 { ((inst >> 8) & 0x0f) as u8 } // 12x A (low nibble of high byte)
-#[inline] fn b4(inst: u16) -> u8 { ((inst >> 12) & 0x0f) as u8 } // 12x B (high nibble of high byte)
-#[inline] fn s16(x: u16) -> i16 { x as i16 }
-#[inline] fn s8(x: u8) -> i8 { x as i8 }
-#[inline] fn s4(x: u8) -> i8 { ((x as i8) << 4) >> 4 }
+#[inline]
+fn op(inst: u16) -> u8 {
+    (inst & 0x00ff) as u8
+}
+#[inline]
+fn a8(inst: u16) -> u8 {
+    (inst >> 8) as u8
+} // 11x AA, 21x AA, …
+#[inline]
+fn a4(inst: u16) -> u8 {
+    ((inst >> 8) & 0x0f) as u8
+} // 12x A (low nibble of high byte)
+#[inline]
+fn b4(inst: u16) -> u8 {
+    ((inst >> 12) & 0x0f) as u8
+} // 12x B (high nibble of high byte)
+#[inline]
+fn s16(x: u16) -> i16 {
+    x as i16
+}
+#[inline]
+fn s8(x: u8) -> i8 {
+    x as i8
+}
+#[inline]
+fn s4(x: u8) -> i8 {
+    ((x as i8) << 4) >> 4
+}
 
 #[inline]
 fn format_size_cu(fmt: Format) -> usize {
@@ -476,35 +530,53 @@ fn add_off_i32(pc: usize, off: i32, len: usize) -> Option<usize> {
     // Compute (pc as i32 + off) safely, returning None if result is <0 or >= len
     let base = pc as i32;
     let sum = base.checked_add(off)?;
-    if sum < 0 || (sum as usize) >= len { None } else { Some(sum as usize) }
+    if sum < 0 || (sum as usize) >= len {
+        None
+    } else {
+        Some(sum as usize)
+    }
 }
 
 #[inline]
 fn add_off_from(base_pc: usize, off: i32, len: usize) -> Option<usize> {
     let base = base_pc as i32;
     let sum = base.checked_add(off)?;
-    if sum < 0 || (sum as usize) >= len { None } else { Some(sum as usize) }
+    if sum < 0 || (sum as usize) >= len {
+        None
+    } else {
+        Some(sum as usize)
+    }
 }
 
 #[inline]
 fn reg_valid(mapper: Option<&RegMapper>, r: u16) -> bool {
-    if let Some(m) = mapper { r < m.registers_size } else { true }
+    if let Some(m) = mapper {
+        r < m.registers_size
+    } else {
+        true
+    }
 }
 
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PayloadKind { Array, PackedSwitch, SparseSwitch }
+enum PayloadKind {
+    Array,
+    PackedSwitch,
+    SparseSwitch,
+}
 
 #[inline]
 fn payload_len_cu(kind: PayloadKind, code: &[u16], pc: usize) -> Option<usize> {
     match kind {
         PayloadKind::Array => {
             // header: ident(0x0300), element_width(u16), size(lo u16, hi u16)
-            if pc + 4 > code.len() { return None; }
-            let elem_width = u16_at(code, pc+1) as usize;
-            let size_lo = u16_at(code, pc+2) as usize;
-            let size_hi = u16_at(code, pc+3) as usize;
+            if pc + 4 > code.len() {
+                return None;
+            }
+            let elem_width = u16_at(code, pc + 1) as usize;
+            let size_lo = u16_at(code, pc + 2) as usize;
+            let size_hi = u16_at(code, pc + 3) as usize;
             let count = (size_hi << 16) | size_lo;
             let bytes_len = elem_width.checked_mul(count)?;
             let data_cu = (bytes_len + 1) / 2; // ceil(bytes/2)
@@ -512,14 +584,18 @@ fn payload_len_cu(kind: PayloadKind, code: &[u16], pc: usize) -> Option<usize> {
         }
         PayloadKind::PackedSwitch => {
             // header: ident(0x0100), size(u16), first_key(i32), then size * target(i32)
-            if pc + 4 > code.len() { return None; }
-            let sz = u16_at(code, pc+1) as usize;
+            if pc + 4 > code.len() {
+                return None;
+            }
+            let sz = u16_at(code, pc + 1) as usize;
             Some(4 + sz * 2)
         }
         PayloadKind::SparseSwitch => {
             // header: ident(0x0200), size(u16), then size * key(i32) and size * target(i32)
-            if pc + 2 > code.len() { return None; }
-            let sz = u16_at(code, pc+1) as usize;
+            if pc + 2 > code.len() {
+                return None;
+            }
+            let sz = u16_at(code, pc + 1) as usize;
             Some(2 + sz * 4)
         }
     }
@@ -528,7 +604,11 @@ fn payload_len_cu(kind: PayloadKind, code: &[u16], pc: usize) -> Option<usize> {
 fn collect_labels_and_payloads(
     code: &[u16],
     opcode_cache: &HashMap<u16, &Opcode>,
-) -> (HashMap<usize, String>, HashMap<usize, PayloadKind>, HashMap<usize, usize>) {
+) -> (
+    HashMap<usize, String>,
+    HashMap<usize, PayloadKind>,
+    HashMap<usize, usize>,
+) {
     let mut labels: HashMap<usize, String> = HashMap::new();
     let mut payloads: HashMap<usize, PayloadKind> = HashMap::new();
     let mut payload_base: HashMap<usize, usize> = HashMap::new();
@@ -544,18 +624,28 @@ fn collect_labels_and_payloads(
         // misinterpret payload words as opcodes in this pass.
         if let Some(kind) = payloads.get(&pc).copied() {
             if let Some(consumed) = payload_len_cu(kind, code, pc) {
-                smali_trace!("[smali][collect] skip payload {:?} at pc {} ({} CU)", kind, pc, consumed);
+                smali_trace!(
+                    "[smali][collect] skip payload {:?} at pc {} ({} CU)",
+                    kind,
+                    pc,
+                    consumed
+                );
                 pc += consumed;
                 continue;
             } else {
-                smali_warn!("[smali][collect] WARN: truncated payload {:?} at pc {} — stopping", kind, pc);
+                smali_warn!(
+                    "[smali][collect] WARN: truncated payload {:?} at pc {} — stopping",
+                    kind,
+                    pc
+                );
                 break;
             }
         }
         let inst = u16_at(code, pc);
         let opc = op(inst) as u16;
         let Some(opdef) = opcode_cache.get(&opc) else {
-            pc += 1; continue;
+            pc += 1;
+            continue;
         };
         let fmt = opdef.format;
         // Ensure we have enough code units for this instruction before reading operands
@@ -563,32 +653,52 @@ fn collect_labels_and_payloads(
         if pc + need_cu > code.len() {
             smali_warn!(
                 "[smali][collect] WARN: truncated {} at pc {} in first pass: need {} CU, have {} — stopping",
-                opdef.name, pc, need_cu, code.len().saturating_sub(pc)
+                opdef.name,
+                pc,
+                need_cu,
+                code.len().saturating_sub(pc)
             );
             break;
         }
         match fmt {
             // conditional branches (16-bit offset)
             Format::Format21t | Format::Format22t => {
-                let off = s16(u16_at(code, pc+1)) as i32;
+                let off = s16(u16_at(code, pc + 1)) as i32;
                 let size_cu = format_size_cu(fmt);
                 let tgt_cur = add_off_i32(pc, off, code.len());
                 let tgt_nxt = add_off_from(pc + size_cu, off, code.len());
-                smali_trace!("[smali][collect][t] {} @pc {} off {} -> cur={:?} nxt={:?}",
-                          opdef.name, pc, off, tgt_cur, tgt_nxt);
+                smali_trace!(
+                    "[smali][collect][t] {} @pc {} off {} -> cur={:?} nxt={:?}",
+                    opdef.name,
+                    pc,
+                    off,
+                    tgt_cur,
+                    tgt_nxt
+                );
                 let chosen = match (tgt_cur, tgt_nxt) {
                     (Some(t), None) | (Some(t), Some(_)) => Some(t),
                     (None, Some(t)) => {
-                        smali_trace!("[smali][collect][t] NOTE: using next-pc base for {} at pc {}",
-                                  opdef.name, pc);
+                        smali_trace!(
+                            "[smali][collect][t] NOTE: using next-pc base for {} at pc {}",
+                            opdef.name,
+                            pc
+                        );
                         Some(t)
                     }
                     (None, None) => None,
                 };
                 if let Some(tgt) = chosen {
-                    labels.entry(tgt).or_insert_with(|| { let s = format!(":cond_{}", cond_count); cond_count+=1; s });
+                    labels.entry(tgt).or_insert_with(|| {
+                        let s = format!(":cond_{}", cond_count);
+                        cond_count += 1;
+                        s
+                    });
                 } else {
-                    smali_warn!("[smali][collect] WARN: 2xt branch target OOB at pc {} (off {}), skipping", pc, off);
+                    smali_warn!(
+                        "[smali][collect] WARN: 2xt branch target OOB at pc {} (off {}), skipping",
+                        pc,
+                        off
+                    );
                 }
                 pc += size_cu;
             }
@@ -598,101 +708,174 @@ fn collect_labels_and_payloads(
                 let size_cu = format_size_cu(fmt);
                 let tgt_cur = add_off_i32(pc, off, code.len());
                 let tgt_nxt = add_off_from(pc + size_cu, off, code.len());
-                smali_trace!("[smali][collect][t] {} @pc {} off {} -> cur={:?} nxt={:?}",
-                          opdef.name, pc, off, tgt_cur, tgt_nxt);
+                smali_trace!(
+                    "[smali][collect][t] {} @pc {} off {} -> cur={:?} nxt={:?}",
+                    opdef.name,
+                    pc,
+                    off,
+                    tgt_cur,
+                    tgt_nxt
+                );
                 let chosen = match (tgt_cur, tgt_nxt) {
                     (Some(t), None) | (Some(t), Some(_)) => Some(t),
                     (None, Some(t)) => {
-                        smali_trace!("[smali][collect][t] NOTE: using next-pc base for {} at pc {}",
-                                  opdef.name, pc);
+                        smali_trace!(
+                            "[smali][collect][t] NOTE: using next-pc base for {} at pc {}",
+                            opdef.name,
+                            pc
+                        );
                         Some(t)
                     }
                     (None, None) => None,
                 };
                 if let Some(tgt) = chosen {
-                    labels.entry(tgt).or_insert_with(|| { let s = format!(":goto_{}", goto_count); goto_count+=1; s });
+                    labels.entry(tgt).or_insert_with(|| {
+                        let s = format!(":goto_{}", goto_count);
+                        goto_count += 1;
+                        s
+                    });
                 } else {
-                    smali_warn!("[smali][collect] WARN: 10t target OOB at pc {} (off {}), skipping", pc, off);
+                    smali_warn!(
+                        "[smali][collect] WARN: 10t target OOB at pc {} (off {}), skipping",
+                        pc,
+                        off
+                    );
                 }
                 pc += size_cu;
             }
             Format::Format20t => {
-                let off = s16(u16_at(code, pc+1)) as i32;
+                let off = s16(u16_at(code, pc + 1)) as i32;
                 let size_cu = format_size_cu(fmt);
                 let tgt_cur = add_off_i32(pc, off, code.len());
                 let tgt_nxt = add_off_from(pc + size_cu, off, code.len());
-                smali_trace!("[smali][collect][t] {} @pc {} off {} -> cur={:?} nxt={:?}",
-                          opdef.name, pc, off, tgt_cur, tgt_nxt);
+                smali_trace!(
+                    "[smali][collect][t] {} @pc {} off {} -> cur={:?} nxt={:?}",
+                    opdef.name,
+                    pc,
+                    off,
+                    tgt_cur,
+                    tgt_nxt
+                );
                 let chosen = match (tgt_cur, tgt_nxt) {
                     (Some(t), None) | (Some(t), Some(_)) => Some(t),
                     (None, Some(t)) => {
-                        smali_trace!("[smali][collect][t] NOTE: using next-pc base for {} at pc {}",
-                                  opdef.name, pc);
+                        smali_trace!(
+                            "[smali][collect][t] NOTE: using next-pc base for {} at pc {}",
+                            opdef.name,
+                            pc
+                        );
                         Some(t)
                     }
                     (None, None) => None,
                 };
                 if let Some(tgt) = chosen {
-                    labels.entry(tgt).or_insert_with(|| { let s = format!(":goto_{}", goto_count); goto_count+=1; s });
+                    labels.entry(tgt).or_insert_with(|| {
+                        let s = format!(":goto_{}", goto_count);
+                        goto_count += 1;
+                        s
+                    });
                 } else {
-                    smali_warn!("[smali][collect] WARN: 20t target OOB at pc {} (off {}), skipping", pc, off);
+                    smali_warn!(
+                        "[smali][collect] WARN: 20t target OOB at pc {} (off {}), skipping",
+                        pc,
+                        off
+                    );
                 }
                 pc += size_cu;
             }
             Format::Format30t => {
-                let lo = u16_at(code, pc+1) as u32;
-                let hi = u16_at(code, pc+2) as u32;
+                let lo = u16_at(code, pc + 1) as u32;
+                let hi = u16_at(code, pc + 2) as u32;
                 let off32 = ((hi << 16) | lo) as i32;
                 let size_cu = format_size_cu(fmt);
                 let tgt_cur = add_off_i32(pc, off32, code.len());
                 let tgt_nxt = add_off_from(pc + size_cu, off32, code.len());
-                smali_trace!("[smali][collect][t] {} @pc {} off {} -> cur={:?} nxt={:?}",
-                          opdef.name, pc, off32, tgt_cur, tgt_nxt);
+                smali_trace!(
+                    "[smali][collect][t] {} @pc {} off {} -> cur={:?} nxt={:?}",
+                    opdef.name,
+                    pc,
+                    off32,
+                    tgt_cur,
+                    tgt_nxt
+                );
                 let chosen = match (tgt_cur, tgt_nxt) {
                     (Some(t), None) | (Some(t), Some(_)) => Some(t),
                     (None, Some(t)) => {
-                        smali_trace!("[smali][collect][t] NOTE: using next-pc base for {} at pc {}",
-                                  opdef.name, pc);
+                        smali_trace!(
+                            "[smali][collect][t] NOTE: using next-pc base for {} at pc {}",
+                            opdef.name,
+                            pc
+                        );
                         Some(t)
                     }
                     (None, None) => None,
                 };
                 if let Some(tgt) = chosen {
-                    labels.entry(tgt).or_insert_with(|| { let s = format!(":goto_{}", goto_count); goto_count+=1; s });
+                    labels.entry(tgt).or_insert_with(|| {
+                        let s = format!(":goto_{}", goto_count);
+                        goto_count += 1;
+                        s
+                    });
                 } else {
-                    smali_warn!("[smali][collect] WARN: 30t target OOB at pc {} (off {}), skipping", pc, off32);
+                    smali_warn!(
+                        "[smali][collect] WARN: 30t target OOB at pc {} (off {}), skipping",
+                        pc,
+                        off32
+                    );
                 }
                 pc += size_cu;
             }
             // payload targets via 31t
             Format::Format31t => {
-                let lo = u16_at(code, pc+1) as u32;
-                let hi = u16_at(code, pc+2) as u32;
+                let lo = u16_at(code, pc + 1) as u32;
+                let hi = u16_at(code, pc + 2) as u32;
                 let off32 = ((hi << 16) | lo) as i32;
                 let size_cu = format_size_cu(fmt);
                 let tgt_cur = add_off_i32(pc, off32, code.len());
                 let tgt_nxt = add_off_from(pc + size_cu, off32, code.len());
-                smali_trace!("[smali][collect][t] {} @pc {} off {} -> cur={:?} nxt={:?}",
-                          opdef.name, pc, off32, tgt_cur, tgt_nxt);
+                smali_trace!(
+                    "[smali][collect][t] {} @pc {} off {} -> cur={:?} nxt={:?}",
+                    opdef.name,
+                    pc,
+                    off32,
+                    tgt_cur,
+                    tgt_nxt
+                );
                 let Some(tgt) = (match (tgt_cur, tgt_nxt) {
                     (Some(t), None) | (Some(t), Some(_)) => Some(t),
                     (None, Some(t)) => {
-                        smali_trace!("[smali][collect][t] NOTE: using next-pc base for {} at pc {}",
-                                  opdef.name, pc);
+                        smali_trace!(
+                            "[smali][collect][t] NOTE: using next-pc base for {} at pc {}",
+                            opdef.name,
+                            pc
+                        );
                         Some(t)
                     }
                     (None, None) => None,
                 }) else {
-                    smali_warn!("[smali][collect] WARN: 31t target {} for {} at pc {} is out of bounds (code len {}), skipping payload collection",
-                              off32, opdef.name, pc, code.len());
+                    smali_warn!(
+                        "[smali][collect] WARN: 31t target {} for {} at pc {} is out of bounds (code len {}), skipping payload collection",
+                        off32,
+                        opdef.name,
+                        pc,
+                        code.len()
+                    );
                     pc += size_cu;
                     continue;
                 };
                 if tgt % 2 != 0 {
-                    smali_warn!("[smali][collect][t] WARN: payload target {} for {} not 32-bit aligned", tgt, opdef.name);
+                    smali_warn!(
+                        "[smali][collect][t] WARN: payload target {} for {} not 32-bit aligned",
+                        tgt,
+                        opdef.name
+                    );
                 }
                 if let Some(id) = code.get(tgt) {
-                    smali_trace!("[smali][collect][t] 31t payload ident at {} = 0x{:04x}", tgt, id);
+                    smali_trace!(
+                        "[smali][collect][t] 31t payload ident at {} = 0x{:04x}",
+                        tgt,
+                        id
+                    );
                 }
 
                 // record the base pc of the switch instruction for this payload
@@ -708,9 +891,21 @@ fn collect_labels_and_payloads(
                 };
                 let label = labels.entry(tgt).or_insert_with(|| {
                     let idx = match kind {
-                        PayloadKind::Array => { let x=array_count; array_count+=1; x },
-                        PayloadKind::PackedSwitch => { let x=psw_count; psw_count+=1; x },
-                        PayloadKind::SparseSwitch => { let x=ssw_count; ssw_count+=1; x },
+                        PayloadKind::Array => {
+                            let x = array_count;
+                            array_count += 1;
+                            x
+                        }
+                        PayloadKind::PackedSwitch => {
+                            let x = psw_count;
+                            psw_count += 1;
+                            x
+                        }
+                        PayloadKind::SparseSwitch => {
+                            let x = ssw_count;
+                            ssw_count += 1;
+                            x
+                        }
                     };
                     format!("{}{}", prefix, idx)
                 });
@@ -721,20 +916,32 @@ fn collect_labels_and_payloads(
                     PayloadKind::PackedSwitch => {
                         // header: ident(0x0100), size(u16), first_key(i32), then size * target(i32)
                         if tgt + 4 > code.len() {
-                            smali_warn!("[smali][collect] WARN: truncated packed-switch payload at {} — header not complete", tgt);
+                            smali_warn!(
+                                "[smali][collect] WARN: truncated packed-switch payload at {} — header not complete",
+                                tgt
+                            );
                         } else {
-                            let size = u16_at(code, tgt+1) as usize;
+                            let size = u16_at(code, tgt + 1) as usize;
                             let targets_start = tgt + 4;
                             let base_pc = pc; // targets are relative to the switch instruction, not the payload
                             for i in 0..size {
-                                if targets_start + i*2 + 1 >= code.len() { break; }
-                                let lo = u16_at(code, targets_start + i*2) as u32;
-                                let hi = u16_at(code, targets_start + i*2 + 1) as u32;
+                                if targets_start + i * 2 + 1 >= code.len() {
+                                    break;
+                                }
+                                let lo = u16_at(code, targets_start + i * 2) as u32;
+                                let hi = u16_at(code, targets_start + i * 2 + 1) as u32;
                                 let off = ((hi << 16) | lo) as i32;
                                 if let Some(case_pc) = add_off_i32(base_pc, off, code.len()) {
-                                    labels.entry(case_pc).or_insert_with(|| format!(":pswitch_{}", i));
+                                    labels
+                                        .entry(case_pc)
+                                        .or_insert_with(|| format!(":pswitch_{}", i));
                                 } else {
-                                    smali_warn!("[smali][collect] WARN: packed-switch case OOB at payload {} (off {}), skipping case {}", tgt, off, i);
+                                    smali_warn!(
+                                        "[smali][collect] WARN: packed-switch case OOB at payload {} (off {}), skipping case {}",
+                                        tgt,
+                                        off,
+                                        i
+                                    );
                                 }
                             }
                         }
@@ -742,21 +949,33 @@ fn collect_labels_and_payloads(
                     PayloadKind::SparseSwitch => {
                         // header: ident(0x0200), size(u16), then size * key(i32) and size * target(i32)
                         if tgt + 2 > code.len() {
-                            smali_warn!("[smali][collect] WARN: truncated sparse-switch payload at {} — header not complete", tgt);
+                            smali_warn!(
+                                "[smali][collect] WARN: truncated sparse-switch payload at {} — header not complete",
+                                tgt
+                            );
                         } else {
-                            let size = u16_at(code, tgt+1) as usize;
+                            let size = u16_at(code, tgt + 1) as usize;
                             let keys_start = tgt + 2;
-                            let targets_start = keys_start + 2*size;
+                            let targets_start = keys_start + 2 * size;
                             let base_pc = pc; // targets are relative to the switch instruction, not the payload
                             for i in 0..size {
-                                if targets_start + i*2 + 1 >= code.len() { break; }
-                                let lo = u16_at(code, targets_start + i*2) as u32;
-                                let hi = u16_at(code, targets_start + i*2 + 1) as u32;
+                                if targets_start + i * 2 + 1 >= code.len() {
+                                    break;
+                                }
+                                let lo = u16_at(code, targets_start + i * 2) as u32;
+                                let hi = u16_at(code, targets_start + i * 2 + 1) as u32;
                                 let off = ((hi << 16) | lo) as i32;
                                 if let Some(case_pc) = add_off_i32(base_pc, off, code.len()) {
-                                    labels.entry(case_pc).or_insert_with(|| format!(":sswitch_{}", i));
+                                    labels
+                                        .entry(case_pc)
+                                        .or_insert_with(|| format!(":sswitch_{}", i));
                                 } else {
-                                    smali_warn!("[smali][collect] WARN: sparse-switch case OOB at payload {} (off {}), skipping case {}", tgt, off, i);
+                                    smali_warn!(
+                                        "[smali][collect] WARN: sparse-switch case OOB at payload {} (off {}), skipping case {}",
+                                        tgt,
+                                        off,
+                                        i
+                                    );
                                 }
                             }
                         }
@@ -784,12 +1003,14 @@ fn parse_array_payload(code: &[u16], pc: usize) -> Result<(ArrayDataDirective, u
     if ident != 0x0300 {
         // Be lenient; proceed anyway
     }
-    let elem_width = u16_at(code, pc+1) as usize;
-    let size_lo = u16_at(code, pc+2) as u32;
-    let size_hi = u16_at(code, pc+3) as u32;
+    let elem_width = u16_at(code, pc + 1) as usize;
+    let size_lo = u16_at(code, pc + 2) as u32;
+    let size_hi = u16_at(code, pc + 3) as u32;
     let count = ((size_hi << 16) | size_lo) as usize;
 
-    let bytes_len = elem_width.checked_mul(count).ok_or_else(|| DexError::new("array-data overflow"))?;
+    let bytes_len = elem_width
+        .checked_mul(count)
+        .ok_or_else(|| DexError::new("array-data overflow"))?;
     let data_start_cu = pc + 4;
     let data_cu = bytes_len.div_ceil(2); // ceil to code units
     if data_start_cu + data_cu > code.len() {
@@ -803,31 +1024,44 @@ fn parse_array_payload(code: &[u16], pc: usize) -> Result<(ArrayDataDirective, u
         let lo = (cu & 0x00ff) as u8;
         let hi = (cu >> 8) as u8;
         bytes.push(lo);
-        if bytes.len() < bytes_len { bytes.push(hi); }
+        if bytes.len() < bytes_len {
+            bytes.push(hi);
+        }
     }
 
     let mut elements: Vec<ArrayDataElement> = Vec::with_capacity(count);
     match elem_width {
         1 => {
-            for i in 0..count { elements.push(ArrayDataElement::Byte(bytes[i] as i8)); }
+            for i in 0..count {
+                elements.push(ArrayDataElement::Byte(bytes[i] as i8));
+            }
         }
         2 => {
             for i in 0..count {
-                let o = i*2; let v = i16::from_le_bytes([bytes[o], bytes[o+1]]);
+                let o = i * 2;
+                let v = i16::from_le_bytes([bytes[o], bytes[o + 1]]);
                 elements.push(ArrayDataElement::Short(v));
             }
         }
         4 => {
             for i in 0..count {
-                let o = i*4; let v = i32::from_le_bytes([bytes[o], bytes[o+1], bytes[o+2], bytes[o+3]]);
+                let o = i * 4;
+                let v = i32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
                 elements.push(ArrayDataElement::Int(v));
             }
         }
         8 => {
             for i in 0..count {
-                let o = i*8; let v = i64::from_le_bytes([
-                    bytes[o], bytes[o+1], bytes[o+2], bytes[o+3],
-                    bytes[o+4], bytes[o+5], bytes[o+6], bytes[o+7]
+                let o = i * 8;
+                let v = i64::from_le_bytes([
+                    bytes[o],
+                    bytes[o + 1],
+                    bytes[o + 2],
+                    bytes[o + 3],
+                    bytes[o + 4],
+                    bytes[o + 5],
+                    bytes[o + 6],
+                    bytes[o + 7],
                 ]);
                 elements.push(ArrayDataElement::Long(v));
             }
@@ -838,7 +1072,13 @@ fn parse_array_payload(code: &[u16], pc: usize) -> Result<(ArrayDataDirective, u
     }
 
     let consumed_cu = 4 + data_cu;
-    Ok((ArrayDataDirective { element_width: elem_width as i32, elements }, consumed_cu))
+    Ok((
+        ArrayDataDirective {
+            element_width: elem_width as i32,
+            elements,
+        },
+        consumed_cu,
+    ))
 }
 
 fn parse_packed_switch_payload(
@@ -847,7 +1087,11 @@ fn parse_packed_switch_payload(
     base_pc: usize,
     labels: &HashMap<usize, String>,
 ) -> Result<(PackedSwitchDirective, usize), DexError> {
-    smali_trace!("[smali][parse][switch] payload pc {} base pc {}", pc, base_pc);
+    smali_trace!(
+        "[smali][parse][switch] payload pc {} base pc {}",
+        pc,
+        base_pc
+    );
     // Expect ident 0x0100, size (u16), first_key (i32), then size * target (i32 rel to payload)
     if pc + 4 > code.len() {
         return Err(DexError::new("Truncated packed-switch header"));
@@ -865,15 +1109,15 @@ fn parse_packed_switch_payload(
     let mut targets: Vec<Label> = Vec::with_capacity(size);
     let targets_start = pc + 4;
     for i in 0..size {
-        let lo = u16_at(code, targets_start + i*2) as u32;
-        let hi = u16_at(code, targets_start + i*2 + 1) as u32;
+        let lo = u16_at(code, targets_start + i * 2) as u32;
+        let hi = u16_at(code, targets_start + i * 2 + 1) as u32;
         let off = ((hi << 16) | lo) as i32;
         let case_pc = (base_pc as i32 + off) as usize;
         let name = labels
             .get(&case_pc)
             .cloned()
             .unwrap_or_else(|| format!(":pswitch_{}", i));
-        targets.push(Label( name ));
+        targets.push(Label(name));
     }
 
     let consumed_cu = 4 + size * 2; // header + targets (each target is i32 = 2 code units)
@@ -886,7 +1130,11 @@ fn parse_sparse_switch_payload(
     base_pc: usize,
     labels: &HashMap<usize, String>,
 ) -> Result<(SparseSwitchDirective, usize), DexError> {
-    smali_trace!("[smali][parse][switch] payload pc {} base pc {}", pc, base_pc);
+    smali_trace!(
+        "[smali][parse][switch] payload pc {} base pc {}",
+        pc,
+        base_pc
+    );
     // Expect ident 0x0200, size (u16), then size * key (i32) then size * target (i32)
     if pc + 2 > code.len() {
         return Err(DexError::new("Truncated sparse-switch header"));
@@ -904,21 +1152,24 @@ fn parse_sparse_switch_payload(
     // Read keys
     let mut keys: Vec<i32> = Vec::with_capacity(size);
     for i in 0..size {
-        let lo = u16_at(code, keys_start + i*2) as u32;
-        let hi = u16_at(code, keys_start + i*2 + 1) as u32;
+        let lo = u16_at(code, keys_start + i * 2) as u32;
+        let hi = u16_at(code, keys_start + i * 2 + 1) as u32;
         keys.push(((hi << 16) | lo) as i32);
     }
     // Read targets and pair with keys
     for i in 0..size {
-        let lo = u16_at(code, targets_start + i*2) as u32;
-        let hi = u16_at(code, targets_start + i*2 + 1) as u32;
+        let lo = u16_at(code, targets_start + i * 2) as u32;
+        let hi = u16_at(code, targets_start + i * 2 + 1) as u32;
         let off = ((hi << 16) | lo) as i32;
         let case_pc = (base_pc as i32 + off) as usize;
         let name = labels
             .get(&case_pc)
             .cloned()
             .unwrap_or_else(|| format!(":sswitch_{}", i));
-        entries.push(SparseSwitchEntry { key: keys[i], target: Label ( name ) });
+        entries.push(SparseSwitchEntry {
+            key: keys[i],
+            target: Label(name),
+        });
     }
 
     let consumed_cu = 2 + size * 4; // header + keys (2*size) + targets (2*size)
@@ -1006,13 +1257,14 @@ fn fmt_lit32_for(opname: &str, lit: i32) -> String {
 }
 
 // Global lazy cache for opcode maps keyed by (api, art_version)
-static OPCODE_MAP_CACHE: Lazy<Mutex<HashMap<(i32, i32), Arc<HashMap<u16, &'static Opcode>>>>> = Lazy::new(|| {
-    Mutex::new(HashMap::new())
-});
+static OPCODE_MAP_CACHE: Lazy<Mutex<HashMap<(i32, i32), Arc<HashMap<u16, &'static Opcode>>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn get_opcode_map(api: i32, art_version: i32) -> Arc<HashMap<u16, &'static Opcode>> {
     let key = (api, art_version);
-    let mut guard = OPCODE_MAP_CACHE.lock().expect("opcode map cache lock poisoned");
+    let mut guard = OPCODE_MAP_CACHE
+        .lock()
+        .expect("opcode map cache lock poisoned");
     if let Some(m) = guard.get(&key) {
         return Arc::clone(m);
     }
@@ -1028,8 +1280,14 @@ fn get_opcode_map(api: i32, art_version: i32) -> Arc<HashMap<u16, &'static Opcod
 }
 
 // Format the opcode args based on the defined opcode
-fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefResolver,
-                           regmap: Option<&RegMapper>, labels: Option<&HashMap<usize, String>>) -> (String, usize) {
+fn format_instruction_line(
+    op: &Opcode,
+    code: &[u16],
+    pc: usize,
+    res: &impl RefResolver,
+    regmap: Option<&RegMapper>,
+    labels: Option<&HashMap<usize, String>>,
+) -> (String, usize) {
     match op.format {
         // Size in code units = 1
         Format::Format10x => {
@@ -1045,116 +1303,201 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
         Format::Format11n => {
             // B:A | op  (A = dest register in low nibble, B = signed 4-bit literal in high nibble)
             let inst = u16_at(code, pc);
-            let va = a4(inst);          // low nibble of high byte
-            let lit = s4(b4(inst));     // high nibble of high byte (signed)
-            (format!("{} {}, {}", op.name, fmt_reg(regmap, va as u16), lit), 1)
+            let va = a4(inst); // low nibble of high byte
+            let lit = s4(b4(inst)); // high nibble of high byte (signed)
+            (
+                format!("{} {}, {}", op.name, fmt_reg(regmap, va as u16), lit),
+                1,
+            )
         }
         Format::Format12x => {
             // B:A | op  (B = high nibble, A = low nibble of high byte)
             let inst = u16_at(code, pc);
             let va = a4(inst);
             let vb = b4(inst);
-            (format!("{} {}, {}", op.name, fmt_reg(regmap, va as u16), fmt_reg(regmap, vb as u16)), 1)
+            (
+                format!(
+                    "{} {}, {}",
+                    op.name,
+                    fmt_reg(regmap, va as u16),
+                    fmt_reg(regmap, vb as u16)
+                ),
+                1,
+            )
         }
         // Size = 2
         Format::Format21s => {
             // AA | op, lit:BBBB (signed)
             let inst = u16_at(code, pc);
-            let lit  = s16(u16_at(code, pc+1));
-            (format!("{} {}, {}", op.name, fmt_reg(regmap, a8(inst) as u16), lit), 2)
+            let lit = s16(u16_at(code, pc + 1));
+            (
+                format!("{} {}, {}", op.name, fmt_reg(regmap, a8(inst) as u16), lit),
+                2,
+            )
         }
         Format::Format21c => {
             // AA | op, kind:BBBB (index → string/type/field/method/proto/handle/callsite)
             let inst = u16_at(code, pc);
-            let idx  = u16_at(code, pc+1) as u32;
-            let aa   = a8(inst);
+            let idx = u16_at(code, pc + 1) as u32;
+            let aa = a8(inst);
             let arg = match op.reference_type {
-                ReferenceType::String      => res.string(idx),
-                ReferenceType::Type        => res.type_desc(idx),
-                ReferenceType::Field       => { let (c,n,d)=res.field_ref(idx); format!("{}->{}:{}", c,n,d) }
-                ReferenceType::Method      => { let (c,n,p)=res.method_ref(idx); format!("{}->{}{}", c,n,p) }
+                ReferenceType::String => res.string(idx),
+                ReferenceType::Type => res.type_desc(idx),
+                ReferenceType::Field => {
+                    let (c, n, d) = res.field_ref(idx);
+                    format!("{}->{}:{}", c, n, d)
+                }
+                ReferenceType::Method => {
+                    let (c, n, p) = res.method_ref(idx);
+                    format!("{}->{}{}", c, n, p)
+                }
                 ReferenceType::MethodProto => res.proto(idx),
-                ReferenceType::MethodHandle=> res.method_handle(idx),
-                ReferenceType::CallSite    => res.call_site(idx),
-                ReferenceType::None        => format!("ref@{}", idx),
+                ReferenceType::MethodHandle => res.method_handle(idx),
+                ReferenceType::CallSite => res.call_site(idx),
+                ReferenceType::None => format!("ref@{}", idx),
             };
-            (format!("{} {}, {}", op.name, fmt_reg(regmap, aa as u16), arg), 2)
+            (
+                format!("{} {}, {}", op.name, fmt_reg(regmap, aa as u16), arg),
+                2,
+            )
         }
         Format::Format21t => {
             // AA | op, +BBBB (signed 16-bit code-unit offset)
             let inst = u16_at(code, pc);
-            let off  = s16(u16_at(code, pc+1)) as i32;
+            let off = s16(u16_at(code, pc + 1)) as i32;
             let size_cu = format_size_cu(Format::Format21t);
             let tgt_cur = add_off_i32(pc, off, code.len());
             let tgt_nxt = add_off_from(pc + size_cu, off, code.len());
             let label = if let Some(t) = tgt_cur {
-                labels.and_then(|m| m.get(&t)).cloned().unwrap_or_else(|| off.to_string())
+                labels
+                    .and_then(|m| m.get(&t))
+                    .cloned()
+                    .unwrap_or_else(|| off.to_string())
             } else if let Some(t) = tgt_nxt {
-                smali_trace!("[smali][fmt][t] NOTE: using next-pc base for {} at pc {}", op.name, pc);
-                labels.and_then(|m| m.get(&t)).cloned().unwrap_or_else(|| off.to_string())
+                smali_trace!(
+                    "[smali][fmt][t] NOTE: using next-pc base for {} at pc {}",
+                    op.name,
+                    pc
+                );
+                labels
+                    .and_then(|m| m.get(&t))
+                    .cloned()
+                    .unwrap_or_else(|| off.to_string())
             } else {
                 off.to_string()
             };
-            (format!("{} {}, {}", op.name, fmt_reg(regmap, a8(inst) as u16), label), 2)
+            (
+                format!(
+                    "{} {}, {}",
+                    op.name,
+                    fmt_reg(regmap, a8(inst) as u16),
+                    label
+                ),
+                2,
+            )
         }
         Format::Format21ih => {
             // AA | op, BBBB  (signed high-16 for 32-bit literal)
             let inst = u16_at(code, pc);
-            let hi = s16(u16_at(code, pc+1)) as i32;
+            let hi = s16(u16_at(code, pc + 1)) as i32;
             let lit = hi << 16;
-            (format!("{} {}, {}", op.name, fmt_reg(regmap, a8(inst) as u16), lit), 2)
+            (
+                format!("{} {}, {}", op.name, fmt_reg(regmap, a8(inst) as u16), lit),
+                2,
+            )
         }
         Format::Format21lh => {
             // AA | op, BBBB  (signed high-16 for 64-bit literal)
             let inst = u16_at(code, pc);
-            let hi = s16(u16_at(code, pc+1)) as i64;
+            let hi = s16(u16_at(code, pc + 1)) as i64;
             let lit = hi << 48;
-            (format!("{} {}, {}", op.name, fmt_reg(regmap, a8(inst) as u16), fmt_wide_lit64(lit)), 2)
+            (
+                format!(
+                    "{} {}, {}",
+                    op.name,
+                    fmt_reg(regmap, a8(inst) as u16),
+                    fmt_wide_lit64(lit)
+                ),
+                2,
+            )
         }
         Format::Format22t => {
             // B:A | op, +CCCC  (A,B are regs; CCCC is signed 16-bit offset)
             let inst = u16_at(code, pc);
             let va = a4(inst);
             let vb = b4(inst);
-            let off = s16(u16_at(code, pc+1)) as i32;
+            let off = s16(u16_at(code, pc + 1)) as i32;
             let label = if let Some(tgt) = add_off_i32(pc, off, code.len()) {
-                labels.and_then(|m| m.get(&tgt)).cloned().unwrap_or_else(|| off.to_string())
+                labels
+                    .and_then(|m| m.get(&tgt))
+                    .cloned()
+                    .unwrap_or_else(|| off.to_string())
             } else {
                 off.to_string()
             };
-            (format!("{} {}, {}, {}", op.name, fmt_reg(regmap, va as u16), fmt_reg(regmap, vb as u16), label), 2)
+            (
+                format!(
+                    "{} {}, {}, {}",
+                    op.name,
+                    fmt_reg(regmap, va as u16),
+                    fmt_reg(regmap, vb as u16),
+                    label
+                ),
+                2,
+            )
         }
         Format::Format22x => {
             // AA | op, BBBB  (two registers: vAA, vBBBB)
             let inst0 = u16_at(code, pc);
             let a = a8(inst0) as u16;
-            let b = u16_at(code, pc+1);
-            (format!("{} {}, {}", op.name, fmt_reg(regmap, a), fmt_reg(regmap, b)), 2)
+            let b = u16_at(code, pc + 1);
+            (
+                format!("{} {}, {}", op.name, fmt_reg(regmap, a), fmt_reg(regmap, b)),
+                2,
+            )
         }
         Format::Format22b => {
             // AA | op, BB|CC  (dest=vAA, src=vBB, literal=CC signed 8-bit)
             let inst0 = u16_at(code, pc);
-            let inst1 = u16_at(code, pc+1);
+            let inst1 = u16_at(code, pc + 1);
             let a = a8(inst0) as u16;
             let b = inst1 & 0x00ff;
             let lit = s8((inst1 >> 8) as u8);
-            (format!("{} {}, {}, {}", op.name, fmt_reg(regmap, a), fmt_reg(regmap, b), lit), 2)
+            (
+                format!(
+                    "{} {}, {}, {}",
+                    op.name,
+                    fmt_reg(regmap, a),
+                    fmt_reg(regmap, b),
+                    lit
+                ),
+                2,
+            )
         }
         Format::Format22s => {
             // B:A | op, +CCCC  (A=dest, B=src, CCCC=signed 16-bit literal)
             let inst = u16_at(code, pc);
             let va = a4(inst);
             let vb = b4(inst);
-            let lit = s16(u16_at(code, pc+1));
-            (format!("{} {}, {}, {}", op.name, fmt_reg(regmap, va as u16), fmt_reg(regmap, vb as u16), lit), 2)
+            let lit = s16(u16_at(code, pc + 1));
+            (
+                format!(
+                    "{} {}, {}, {}",
+                    op.name,
+                    fmt_reg(regmap, va as u16),
+                    fmt_reg(regmap, vb as u16),
+                    lit
+                ),
+                2,
+            )
         }
         Format::Format23x => {
             // AA | op, C:B  (3 regs in 2 code units; BB=low byte of 2nd CU, CC=high byte)
             let inst0 = u16_at(code, pc);
             let inst1 = u16_at(code, pc + 1);
             let a = a8(inst0) as u16;
-            let b = inst1 & 0x00ff;  // low byte
-            let c = inst1 >> 8;      // high byte
+            let b = inst1 & 0x00ff; // low byte
+            let c = inst1 >> 8; // high byte
             (
                 format!(
                     "{} {}, {}, {}",
@@ -1170,27 +1513,36 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
             let inst = u16_at(code, pc);
             let off = s8(a8(inst)) as i32;
             let label = if let Some(tgt) = add_off_i32(pc, off, code.len()) {
-                labels.and_then(|m| m.get(&tgt)).cloned().unwrap_or_else(|| off.to_string())
+                labels
+                    .and_then(|m| m.get(&tgt))
+                    .cloned()
+                    .unwrap_or_else(|| off.to_string())
             } else {
                 off.to_string()
             };
             (format!("{} {}", op.name, label), 1)
         }
         Format::Format20t => {
-            let off  = s16(u16_at(code, pc+1)) as i32;
+            let off = s16(u16_at(code, pc + 1)) as i32;
             let label = if let Some(tgt) = add_off_i32(pc, off, code.len()) {
-                labels.and_then(|m| m.get(&tgt)).cloned().unwrap_or_else(|| off.to_string())
+                labels
+                    .and_then(|m| m.get(&tgt))
+                    .cloned()
+                    .unwrap_or_else(|| off.to_string())
             } else {
                 off.to_string()
             };
             (format!("{} {}", op.name, label), 2)
         }
         Format::Format30t => {
-            let lo = u16_at(code, pc+1) as u32;
-            let hi = u16_at(code, pc+2) as u32;
+            let lo = u16_at(code, pc + 1) as u32;
+            let hi = u16_at(code, pc + 2) as u32;
             let off32 = ((hi << 16) | lo) as i32;
             let label = if let Some(tgt) = add_off_i32(pc, off32, code.len()) {
-                labels.and_then(|m| m.get(&tgt)).cloned().unwrap_or_else(|| off32.to_string())
+                labels
+                    .and_then(|m| m.get(&tgt))
+                    .cloned()
+                    .unwrap_or_else(|| off32.to_string())
             } else {
                 off32.to_string()
             };
@@ -1202,11 +1554,17 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
             let inst0 = u16_at(code, pc);
             let a = a4(inst0);
             let b = b4(inst0);
-            let idx = u16_at(code, pc+1) as u32;
+            let idx = u16_at(code, pc + 1) as u32;
             let target = match op.reference_type {
-                ReferenceType::Field  => { let (cl, nm, ds) = res.field_ref(idx); format!("{}->{}:{}", cl, nm, ds) }
-                ReferenceType::Type   => res.type_desc(idx),
-                ReferenceType::Method => { let (cl, nm, pr) = res.method_ref(idx); format!("{}->{}{}", cl, nm, pr) }
+                ReferenceType::Field => {
+                    let (cl, nm, ds) = res.field_ref(idx);
+                    format!("{}->{}:{}", cl, nm, ds)
+                }
+                ReferenceType::Type => res.type_desc(idx),
+                ReferenceType::Method => {
+                    let (cl, nm, pr) = res.method_ref(idx);
+                    format!("{}->{}{}", cl, nm, pr)
+                }
                 _ => format!("ref@{}", idx),
             };
             (
@@ -1225,62 +1583,87 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
             let inst0 = u16_at(code, pc);
             let a = a4(inst0) as u16; // dest (iget*) or src (iput*)
             let b = b4(inst0) as u16; // object register
-            let idx = u16_at(code, pc+1) as u32; // quick field index/offset
+            let idx = u16_at(code, pc + 1) as u32; // quick field index/offset
             let desc = quick_field_desc_from_name(op.name);
             let field = format!("Lquick;->field@{}:{}", idx, desc);
             let opname = normalize_quick_field_name(op.name);
-            (format!("{} {}, {}, {}", opname, fmt_reg(regmap, a), fmt_reg(regmap, b), field), 2)
+            (
+                format!(
+                    "{} {}, {}, {}",
+                    opname,
+                    fmt_reg(regmap, a),
+                    fmt_reg(regmap, b),
+                    field
+                ),
+                2,
+            )
         }
         // Size = 3
         Format::Format31i => {
             // AA | op, lit32:BBBBBBBB (signed 32-bit literal across the next 2 code units)
             let inst0 = u16_at(code, pc);
-            let lo = u16_at(code, pc+1) as u32;
-            let hi = u16_at(code, pc+2) as u32;
+            let lo = u16_at(code, pc + 1) as u32;
+            let hi = u16_at(code, pc + 2) as u32;
             let lit = ((hi << 16) | lo) as i32;
             let lit_txt = fmt_lit32_for(op.name, lit);
-            (format!("{} {}, {}", op.name, fmt_reg(regmap, a8(inst0) as u16), lit_txt), 3)
+            (
+                format!(
+                    "{} {}, {}",
+                    op.name,
+                    fmt_reg(regmap, a8(inst0) as u16),
+                    lit_txt
+                ),
+                3,
+            )
         }
         Format::Format31c => {
             // AA | op, kind:BBBBBBBB (32-bit index)
             let inst0 = u16_at(code, pc);
-            let lo = u16_at(code, pc+1) as u32;
-            let hi = u16_at(code, pc+2) as u32;
+            let lo = u16_at(code, pc + 1) as u32;
+            let hi = u16_at(code, pc + 2) as u32;
             let idx = (hi << 16) | lo;
-            let aa  = a8(inst0) as u16;
+            let aa = a8(inst0) as u16;
             let arg = match op.reference_type {
-                ReferenceType::String      => res.string(idx),
-                ReferenceType::Type        => res.type_desc(idx),
-                ReferenceType::Field       => { let (c,n,d)=res.field_ref(idx); format!("{}->{}:{}", c,n,d) }
-                ReferenceType::Method      => { let (c,n,p)=res.method_ref(idx); format!("{}->{}{}", c,n,p) }
+                ReferenceType::String => res.string(idx),
+                ReferenceType::Type => res.type_desc(idx),
+                ReferenceType::Field => {
+                    let (c, n, d) = res.field_ref(idx);
+                    format!("{}->{}:{}", c, n, d)
+                }
+                ReferenceType::Method => {
+                    let (c, n, p) = res.method_ref(idx);
+                    format!("{}->{}{}", c, n, p)
+                }
                 ReferenceType::MethodProto => res.proto(idx),
-                ReferenceType::MethodHandle=> res.method_handle(idx),
-                ReferenceType::CallSite    => res.call_site(idx),
-                ReferenceType::None        => format!("ref@{}", idx),
+                ReferenceType::MethodHandle => res.method_handle(idx),
+                ReferenceType::CallSite => res.call_site(idx),
+                ReferenceType::None => format!("ref@{}", idx),
             };
             (format!("{} {}, {}", op.name, fmt_reg(regmap, aa), arg), 3)
         }
         Format::Format45cc => {
             // G|A | op, BBBB, F|E|D|C, HHHH  (A args, C..G regs, BBBB=method/callsite, HHHH=proto)
             let inst0 = u16_at(code, pc);
-            let inst1 = u16_at(code, pc+1);
-            let inst2 = u16_at(code, pc+2);
-            let inst3 = u16_at(code, pc+3);
+            let inst1 = u16_at(code, pc + 1);
+            let inst2 = u16_at(code, pc + 2);
+            let inst3 = u16_at(code, pc + 3);
             let a = ((inst0 >> 12) & 0x0f) as u8;
-            let g = ((inst0 >> 8)  & 0x0f) as u8;
-            let c = ( inst2        & 0x000f) as u8;
-            let d = ((inst2 >> 4)  & 0x0f) as u8;
-            let e = ((inst2 >> 8)  & 0x0f) as u8;
+            let g = ((inst0 >> 8) & 0x0f) as u8;
+            let c = (inst2 & 0x000f) as u8;
+            let d = ((inst2 >> 4) & 0x0f) as u8;
+            let e = ((inst2 >> 8) & 0x0f) as u8;
             let f = ((inst2 >> 12) & 0x0f) as u8;
-            let idx = inst1 as u32;      // method or call site
+            let idx = inst1 as u32; // method or call site
             let proto_idx = inst3 as u32; // proto or method handle depending on op
             let mut regs = Vec::new();
-            for r in [c,d,e,f,g].into_iter().take(a as usize) { regs.push(fmt_reg(regmap, r as u16)); }
+            for r in [c, d, e, f, g].into_iter().take(a as usize) {
+                regs.push(fmt_reg(regmap, r as u16));
+            }
             let (target, extra) = match op.reference_type {
                 ReferenceType::Method => {
-                    let (c,n,p) = res.method_ref(idx);
+                    let (c, n, p) = res.method_ref(idx);
                     let proto = res.proto(proto_idx);
-                    (format!("{}->{}{}", c,n,p), proto)
+                    (format!("{}->{}{}", c, n, p), proto)
                 }
                 ReferenceType::CallSite => {
                     let cs = res.call_site(idx);
@@ -1289,23 +1672,32 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
                 }
                 _ => (format!("ref@{}", idx), format!("proto@{}", proto_idx)),
             };
-            (format!("{} {{{}}}, {}, {}", op.name, regs.join(", "), target, extra), 4)
+            (
+                format!("{} {{{}}}, {}, {}", op.name, regs.join(", "), target, extra),
+                4,
+            )
         }
         Format::Format4rcc => {
             // AA | op, BBBB, CCCC, HHHH  (range invoke with 2 refs)
             let inst0 = u16_at(code, pc);
-            let idx   = u16_at(code, pc+1) as u32; // method/callsite
-            let first = u16_at(code, pc+2);
-            let proto_idx = u16_at(code, pc+3) as u32; // proto/methodhandle
+            let idx = u16_at(code, pc + 1) as u32; // method/callsite
+            let first = u16_at(code, pc + 2);
+            let proto_idx = u16_at(code, pc + 3) as u32; // proto/methodhandle
             let count = a8(inst0) as u16;
-            let range = if count==0 { String::from("{}") } else {
-                format!("{{{} .. {}}}", fmt_reg(regmap, first), fmt_reg(regmap, first + count - 1))
+            let range = if count == 0 {
+                String::from("{}")
+            } else {
+                format!(
+                    "{{{} .. {}}}",
+                    fmt_reg(regmap, first),
+                    fmt_reg(regmap, first + count - 1)
+                )
             };
             let (target, extra) = match op.reference_type {
                 ReferenceType::Method => {
-                    let (c,n,p) = res.method_ref(idx);
+                    let (c, n, p) = res.method_ref(idx);
                     let proto = res.proto(proto_idx);
-                    (format!("{}->{}{}", c,n,p), proto)
+                    (format!("{}->{}{}", c, n, p), proto)
                 }
                 ReferenceType::CallSite => {
                     let cs = res.call_site(idx);
@@ -1319,71 +1711,102 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
         Format::Format31t => {
             // AA | op, +BBBBBBBB (signed 32-bit code-unit offset)
             let inst0 = u16_at(code, pc);
-            let lo = u16_at(code, pc+1) as u32;
-            let hi = u16_at(code, pc+2) as u32;
+            let lo = u16_at(code, pc + 1) as u32;
+            let hi = u16_at(code, pc + 2) as u32;
             let off32 = ((hi << 16) | lo) as i32;
             let label = if let Some(tgt) = add_off_i32(pc, off32, code.len()) {
-                labels.and_then(|m| m.get(&tgt)).cloned().unwrap_or_else(|| off32.to_string())
+                labels
+                    .and_then(|m| m.get(&tgt))
+                    .cloned()
+                    .unwrap_or_else(|| off32.to_string())
             } else {
                 off32.to_string()
             };
-            (format!("{} {}, {}", op.name, fmt_reg(regmap, a8(inst0) as u16), label), 3)
+            (
+                format!(
+                    "{} {}, {}",
+                    op.name,
+                    fmt_reg(regmap, a8(inst0) as u16),
+                    label
+                ),
+                3,
+            )
         }
         Format::Format32x => {
             // op | 00, AAAA, BBBB  (two 16-bit registers: dest=AAAA, src=BBBB)
-            let a = u16_at(code, pc+1);
-            let b = u16_at(code, pc+2);
-            (format!("{} {}, {}", op.name, fmt_reg(regmap, a), fmt_reg(regmap, b)), 3)
+            let a = u16_at(code, pc + 1);
+            let b = u16_at(code, pc + 2);
+            (
+                format!("{} {}, {}", op.name, fmt_reg(regmap, a), fmt_reg(regmap, b)),
+                3,
+            )
         }
         Format::Format51l => {
             // AA | op, lit64:BBBBBBBBBBBBBBBB (signed 64-bit across next 4 code units)
             let inst0 = u16_at(code, pc);
-            let b1 = u16_at(code, pc+1) as u64;
-            let b2 = u16_at(code, pc+2) as u64;
-            let b3 = u16_at(code, pc+3) as u64;
-            let b4 = u16_at(code, pc+4) as u64;
+            let b1 = u16_at(code, pc + 1) as u64;
+            let b2 = u16_at(code, pc + 2) as u64;
+            let b3 = u16_at(code, pc + 3) as u64;
+            let b4 = u16_at(code, pc + 4) as u64;
             let lit_u = (b4 << 48) | (b3 << 32) | (b2 << 16) | b1;
             let lit = lit_u as i64; // interpret as signed
-            (format!("{} {}, {}", op.name, fmt_reg(regmap, a8(inst0) as u16), fmt_wide_lit64(lit)), 5)
+            (
+                format!(
+                    "{} {}, {}",
+                    op.name,
+                    fmt_reg(regmap, a8(inst0) as u16),
+                    fmt_wide_lit64(lit)
+                ),
+                5,
+            )
         }
         Format::Format35c => {
             // G|A | op, BBBB, F|E|D|C  (A=arg count, C..G=regs, kind BBBB)
             let inst0 = u16_at(code, pc);
-            let inst1 = u16_at(code, pc+1);
-            let inst2 = u16_at(code, pc+2);
+            let inst1 = u16_at(code, pc + 1);
+            let inst2 = u16_at(code, pc + 2);
             let a = ((inst0 >> 12) & 0x0f) as u8; // arg count
-            let g = ((inst0 >> 8)  & 0x0f) as u8;
-            let c = ( inst2        & 0x000f) as u8;
-            let d = ((inst2 >> 4)  & 0x0f) as u8;
-            let e = ((inst2 >> 8)  & 0x0f) as u8;
+            let g = ((inst0 >> 8) & 0x0f) as u8;
+            let c = (inst2 & 0x000f) as u8;
+            let d = ((inst2 >> 4) & 0x0f) as u8;
+            let e = ((inst2 >> 8) & 0x0f) as u8;
             let f = ((inst2 >> 12) & 0x0f) as u8;
             let idx = inst1 as u32;
             let target = match op.reference_type {
-                ReferenceType::Method => { let (cl, nm, pr) = res.method_ref(idx); format!("{}->{}{}", cl, nm, pr) }
-                ReferenceType::Type   => res.type_desc(idx),
-                ReferenceType::Field  => { let (cl, nm, ds) = res.field_ref(idx); format!("{}->{}:{}", cl, nm, ds) }
+                ReferenceType::Method => {
+                    let (cl, nm, pr) = res.method_ref(idx);
+                    format!("{}->{}{}", cl, nm, pr)
+                }
+                ReferenceType::Type => res.type_desc(idx),
+                ReferenceType::Field => {
+                    let (cl, nm, ds) = res.field_ref(idx);
+                    format!("{}->{}:{}", cl, nm, ds)
+                }
                 _ => format!("ref@{}", idx),
             };
             let mut regs = Vec::new();
-            for (_, r) in [c,d,e,f,g].into_iter().take(a as usize).enumerate() {
+            for (_, r) in [c, d, e, f, g].into_iter().take(a as usize).enumerate() {
                 regs.push(fmt_reg(regmap, r as u16));
             }
-            (format!("{} {{{}}}, {}", op.name, regs.join(", "), target), 3)
+            (
+                format!("{} {{{}}}, {}", op.name, regs.join(", "), target),
+                3,
+            )
         }
         Format::Format35mi => {
             // G|A | op, BBBB, F|E|D|C  (A=arg count, C..G=regs, BBBB is vtable index / quick index)
             let inst0 = u16_at(code, pc);
-            let inst1 = u16_at(code, pc+1);
-            let inst2 = u16_at(code, pc+2);
+            let inst1 = u16_at(code, pc + 1);
+            let inst2 = u16_at(code, pc + 2);
             let a = ((inst0 >> 12) & 0x0f) as u8; // arg count
-            let g = ((inst0 >> 8)  & 0x0f) as u8;
-            let c = ( inst2        & 0x000f) as u8;
-            let d = ((inst2 >> 4)  & 0x0f) as u8;
-            let e = ((inst2 >> 8)  & 0x0f) as u8;
+            let g = ((inst0 >> 8) & 0x0f) as u8;
+            let c = (inst2 & 0x000f) as u8;
+            let d = ((inst2 >> 4) & 0x0f) as u8;
+            let e = ((inst2 >> 8) & 0x0f) as u8;
             let f = ((inst2 >> 12) & 0x0f) as u8;
             let idx = inst1 as u32; // quick/vtable index
             let mut regs = Vec::new();
-            for r in [c,d,e,f,g].into_iter().take(a as usize) {
+            for r in [c, d, e, f, g].into_iter().take(a as usize) {
                 regs.push(fmt_reg(regmap, r as u16));
             }
             let target = quick_method_placeholder(op.name, idx);
@@ -1393,16 +1816,28 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
         Format::Format3rc => {
             // AA | op, BBBB, CCCC (range: first=C, count=AA), kind BBBB
             let inst0 = u16_at(code, pc);
-            let idx   = u16_at(code, pc+1) as u32;
-            let first = u16_at(code, pc+2);
+            let idx = u16_at(code, pc + 1) as u32;
+            let first = u16_at(code, pc + 2);
             let count = a8(inst0) as u16;
-            let range = if count==0 { String::from("{}") } else {
-                format!("{{{} .. {}}}", fmt_reg(regmap, first), fmt_reg(regmap, first + count - 1))
+            let range = if count == 0 {
+                String::from("{}")
+            } else {
+                format!(
+                    "{{{} .. {}}}",
+                    fmt_reg(regmap, first),
+                    fmt_reg(regmap, first + count - 1)
+                )
             };
             let target = match op.reference_type {
-                ReferenceType::Method => { let (cl, nm, pr) = res.method_ref(idx); format!("{}->{}{}", cl, nm, pr) }
-                ReferenceType::Type   => res.type_desc(idx),
-                ReferenceType::Field  => { let (cl, nm, ds) = res.field_ref(idx); format!("{}->{}:{}", cl, nm, ds) }
+                ReferenceType::Method => {
+                    let (cl, nm, pr) = res.method_ref(idx);
+                    format!("{}->{}{}", cl, nm, pr)
+                }
+                ReferenceType::Type => res.type_desc(idx),
+                ReferenceType::Field => {
+                    let (cl, nm, ds) = res.field_ref(idx);
+                    format!("{}->{}:{}", cl, nm, ds)
+                }
                 _ => format!("ref@{}", idx),
             };
             (format!("{} {}, {}", op.name, range, target), 3)
@@ -1410,11 +1845,17 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
         Format::Format3rmi => {
             // AA | op, BBBB, CCCC  (range: first=C, count=AA, BBBB = vtable/quick index)
             let inst0 = u16_at(code, pc);
-            let idx   = u16_at(code, pc+1) as u32;
-            let first = u16_at(code, pc+2);
+            let idx = u16_at(code, pc + 1) as u32;
+            let first = u16_at(code, pc + 2);
             let count = a8(inst0) as u16;
-            let range = if count==0 { String::from("{}") } else {
-                format!("{{{} .. {}}}", fmt_reg(regmap, first), fmt_reg(regmap, first + count - 1))
+            let range = if count == 0 {
+                String::from("{}")
+            } else {
+                format!(
+                    "{{{} .. {}}}",
+                    fmt_reg(regmap, first),
+                    fmt_reg(regmap, first + count - 1)
+                )
             };
             let target = quick_method_placeholder(op.name, idx);
             let opname = normalize_quick_invoke_name(op.name);
@@ -1425,7 +1866,10 @@ fn format_instruction_line(op: &Opcode, code: &[u16], pc: usize, res: &impl RefR
         fmt => {
             {
                 // Unknown/unimplemented format — return empty so caller can abort safely
-                eprintln!("[smali][decode] ERROR: unimplemented format {:?} for {} at pc {}", fmt, op.name, pc);
+                eprintln!(
+                    "[smali][decode] ERROR: unimplemented format {:?} for {} at pc {}",
+                    fmt, op.name, pc
+                );
                 (String::new(), 0)
             }
         }
@@ -1492,7 +1936,7 @@ pub fn decode_with_ctx(
             }
         }
         let inst = u16_at(&code, pc);
-        let opc  = op(inst) as u16;
+        let opc = op(inst) as u16;
         let Some(opdef) = opcode_cache.get(&opc) else {
             // Dump a small window of code units to help diagnose misalignment
             let start = pc.saturating_sub(4);
@@ -1507,7 +1951,7 @@ pub fn decode_with_ctx(
                 if pc >= back {
                     let gpc = pc - back;
                     let ginst = u16_at(&code, gpc);
-                    let gopc  = op(ginst) as u16;
+                    let gopc = op(ginst) as u16;
                     if let Some(gop) = opcode_cache.get(&gopc) {
                         let sz = format_size_cu(gop.format);
                         guesses.push_str(&format!(
@@ -1515,10 +1959,15 @@ pub fn decode_with_ctx(
                             back, gop.name, gopc, gop.format, sz
                         ));
                         let gend = (gpc + sz).min(code.len());
-                        for j in gpc..gend { guesses.push_str(&format!(" {:04x}", code[j])); }
+                        for j in gpc..gend {
+                            guesses.push_str(&format!(" {:04x}", code[j]));
+                        }
                         guesses.push_str(" | ");
                     } else {
-                        guesses.push_str(&format!("guess pc-{}: opcode 0x{:02x} unknown | ", back, gopc));
+                        guesses.push_str(&format!(
+                            "guess pc-{}: opcode 0x{:02x} unknown | ",
+                            back, gopc
+                        ));
                     }
                 }
             }
@@ -1541,10 +1990,14 @@ pub fn decode_with_ctx(
 
         // Ensure we have enough code units for this instruction before any further reads
         let mut need_cu = format_size_cu(opdef.format);
-        if need_cu <= 0 { need_cu = 1; }
+        if need_cu <= 0 {
+            need_cu = 1;
+        }
         // Quick-invoke fallback may read 3 code units even if format metadata disagrees
         let opname_for_need = opdef.name;
-        if need_cu < 3 && (opname_for_need.ends_with("-quick") || opname_for_need.ends_with("-quick/range")) {
+        if need_cu < 3
+            && (opname_for_need.ends_with("-quick") || opname_for_need.ends_with("-quick/range"))
+        {
             need_cu = 3;
         }
         if let Err(_e) = require_cu(&code, pc, need_cu, opname_for_need) {
@@ -1564,7 +2017,7 @@ pub fn decode_with_ctx(
                 Format::Format22x => {
                     // AA | op, BBBB
                     let a = a8(inst) as u16;
-                    let b = u16_at(&code, pc+1);
+                    let b = u16_at(&code, pc + 1);
                     if !reg_valid(Some(m), a) || !reg_valid(Some(m), b) {
                         eprintln!(
                             "[smali][decode] ERROR: unlikely 22x regs at pc {} (A={}, B={}) vs registers_size={} — aborting decode",
@@ -1576,7 +2029,11 @@ pub fn decode_with_ctx(
                 Format::Format23x => {
                     // AA | op, C:B
                     let a = a8(inst) as u16;
-                    let w1 = if pc + 1 < code.len() { u16_at(&code, pc + 1) } else { 0 };
+                    let w1 = if pc + 1 < code.len() {
+                        u16_at(&code, pc + 1)
+                    } else {
+                        0
+                    };
                     let b = w1 & 0x00ff;
                     let c = w1 >> 8;
                     if !reg_valid(Some(m), a) || !reg_valid(Some(m), b) || !reg_valid(Some(m), c) {
@@ -1591,8 +2048,8 @@ pub fn decode_with_ctx(
                 }
                 Format::Format32x => {
                     // op, AAAA, BBBB
-                    let a = u16_at(&code, pc+1);
-                    let b = u16_at(&code, pc+2);
+                    let a = u16_at(&code, pc + 1);
+                    let b = u16_at(&code, pc + 2);
                     if !reg_valid(Some(m), a) || !reg_valid(Some(m), b) {
                         eprintln!(
                             "[smali][decode] ERROR: unlikely 32x regs at pc {} (A={}, B={}) vs registers_size={} — aborting decode",
@@ -1608,35 +2065,45 @@ pub fn decode_with_ctx(
         // Backfill a missing label on-the-fly if this is a branch and the first pass somehow missed it.
         match opdef.format {
             Format::Format21t => {
-                let off  = s16(u16_at(&code, pc+1)) as i32;
+                let off = s16(u16_at(&code, pc + 1)) as i32;
                 if let Some(tgt) = add_off_i32(pc, off, code.len()) {
-                    labels.entry(tgt).or_insert_with(|| format!(":addr_{:x}", tgt));
+                    labels
+                        .entry(tgt)
+                        .or_insert_with(|| format!(":addr_{:x}", tgt));
                 }
             }
             Format::Format22t => {
-                let off  = s16(u16_at(&code, pc+1)) as i32;
+                let off = s16(u16_at(&code, pc + 1)) as i32;
                 if let Some(tgt) = add_off_i32(pc, off, code.len()) {
-                    labels.entry(tgt).or_insert_with(|| format!(":addr_{:x}", tgt));
+                    labels
+                        .entry(tgt)
+                        .or_insert_with(|| format!(":addr_{:x}", tgt));
                 }
             }
             Format::Format10t => {
                 let off = s8(a8(inst)) as i32;
                 if let Some(tgt) = add_off_i32(pc, off, code.len()) {
-                    labels.entry(tgt).or_insert_with(|| format!(":addr_{:x}", tgt));
+                    labels
+                        .entry(tgt)
+                        .or_insert_with(|| format!(":addr_{:x}", tgt));
                 }
             }
             Format::Format20t => {
-                let off  = s16(u16_at(&code, pc+1)) as i32;
+                let off = s16(u16_at(&code, pc + 1)) as i32;
                 if let Some(tgt) = add_off_i32(pc, off, code.len()) {
-                    labels.entry(tgt).or_insert_with(|| format!(":addr_{:x}", tgt));
+                    labels
+                        .entry(tgt)
+                        .or_insert_with(|| format!(":addr_{:x}", tgt));
                 }
             }
             Format::Format30t => {
-                let lo = u16_at(&code, pc+1) as u32;
-                let hi = u16_at(&code, pc+2) as u32;
+                let lo = u16_at(&code, pc + 1) as u32;
+                let hi = u16_at(&code, pc + 2) as u32;
                 let off32 = ((hi << 16) | lo) as i32;
                 if let Some(tgt) = add_off_i32(pc, off32, code.len()) {
-                    labels.entry(tgt).or_insert_with(|| format!(":addr_{:x}", tgt));
+                    labels
+                        .entry(tgt)
+                        .or_insert_with(|| format!(":addr_{:x}", tgt));
                 }
             }
             _ => {}
@@ -1653,7 +2120,8 @@ pub fn decode_with_ctx(
             }
         }
 
-        let (mut line, size_cu) = format_instruction_line(opdef, &code, pc, res, regmap, Some(&labels));
+        let (mut line, size_cu) =
+            format_instruction_line(opdef, &code, pc, res, regmap, Some(&labels));
         if size_cu == 0 || line.is_empty() {
             eprintln!(
                 "[smali][decode] ERROR: aborting at pc {} due to unimplemented/missing formatter for {}",
@@ -1682,7 +2150,7 @@ pub fn decode_with_resolver(
     decode_with_ctx(bytecode, api, art_version, res, None)
 }
 
-pub fn decode(bytecode: &[u8], api:i32, art_version: i32) -> Result<Vec<SmaliOp>, DexError> {
+pub fn decode(bytecode: &[u8], api: i32, art_version: i32) -> Result<Vec<SmaliOp>, DexError> {
     let resolver = PlaceholderResolver;
     decode_with_resolver(bytecode, api, art_version, &resolver)
 }
@@ -1692,18 +2160,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_decode_bytecode_1()
-    {
-        let bc: Vec<u8> = vec![84, 32, 63, 26, 51, 3, 4, 0, 18, 0, 17, 0, 84, 32, 63, 26, 56, 0, 16, 0, 84, 33, 61, 26, 56, 1, 5, 0, 114, 32, 152, 2, 16, 0, 84, 33, 65, 26, 56, 1, 5, 0, 114, 32, 153, 2, 16, 0, 91, 35, 63, 26, 56, 3, 31, 0, 84, 33, 61, 26, 56, 1, 5, 0, 114, 32, 149, 2, 19, 0, 84, 33, 65, 26, 56, 1, 5, 0, 114, 32, 150, 2, 19, 0, 26, 1, 145, 30, 114, 32, 137, 2, 19, 0, 10, 1, 89, 33, 68, 26, 18, 17, 92, 33, 66, 26, 110, 16, 218, 47, 2, 0, 40, 10, 18, 241, 89, 33, 68, 26, 18, 1, 92, 33, 66, 26, 110, 16, 219, 47, 2, 0, 17, 0];
+    fn test_decode_bytecode_1() {
+        let bc: Vec<u8> = vec![
+            84, 32, 63, 26, 51, 3, 4, 0, 18, 0, 17, 0, 84, 32, 63, 26, 56, 0, 16, 0, 84, 33, 61,
+            26, 56, 1, 5, 0, 114, 32, 152, 2, 16, 0, 84, 33, 65, 26, 56, 1, 5, 0, 114, 32, 153, 2,
+            16, 0, 91, 35, 63, 26, 56, 3, 31, 0, 84, 33, 61, 26, 56, 1, 5, 0, 114, 32, 149, 2, 19,
+            0, 84, 33, 65, 26, 56, 1, 5, 0, 114, 32, 150, 2, 19, 0, 26, 1, 145, 30, 114, 32, 137,
+            2, 19, 0, 10, 1, 89, 33, 68, 26, 18, 17, 92, 33, 66, 26, 110, 16, 218, 47, 2, 0, 40,
+            10, 18, 241, 89, 33, 68, 26, 18, 1, 92, 33, 66, 26, 110, 16, 219, 47, 2, 0, 17, 0,
+        ];
         let ops = decode(bc.as_slice(), 33, 0).unwrap();
-        
+
         println!("{:?}", ops);
     }
 
     #[test]
-    fn test_decode_bytecode_2()
-    {
-        let bc: Vec<u8> = vec![84, 16, 75, 26, 112, 48, 253, 47, 33, 0, 111, 32, 245, 47, 33, 0, 12, 0, 17, 0];
+    fn test_decode_bytecode_2() {
+        let bc: Vec<u8> = vec![
+            84, 16, 75, 26, 112, 48, 253, 47, 33, 0, 111, 32, 245, 47, 33, 0, 12, 0, 17, 0,
+        ];
         let ops = decode(bc.as_slice(), 33, 0).unwrap();
 
         println!("{:?}", ops);

@@ -34,8 +34,11 @@ pub fn parse_label(input: &str) -> IResult<&str, Label> {
 impl fmt::Display for Label {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Prepend a colon when printing
-        if self.0.starts_with(':') { write!(f, "{}", self.0) } 
-        else { write!(f, ":{}", self.0) }
+        if self.0.starts_with(':') {
+            write!(f, "{}", self.0)
+        } else {
+            write!(f, ":{}", self.0)
+        }
     }
 }
 
@@ -1725,7 +1728,7 @@ fn parse_register_list(input: &str) -> IResult<&str, Vec<SmaliRegister>> {
         separated_list0(delimited(space0, char(','), space0), parse_register),
         char('}'),
     )
-        .parse(input)
+    .parse(input)
 }
 
 /// Parses a string literal that may be empty.
@@ -1739,7 +1742,7 @@ fn parse_string_literal(input: &str) -> IResult<&str, String> {
         esc_or_empty,
         pair(char('"'), multispace0),
     )
-        .parse(input)?;
+    .parse(input)?;
 
     IResult::Ok((i, s.to_string()))
 }
@@ -1750,12 +1753,12 @@ where
     <T as TryFrom<i64>>::Error: core::fmt::Debug,
 {
     use nom::{
+        Parser,
         branch::alt,
         bytes::complete::{tag, take_while1},
         character::complete::{char, digit1},
         combinator::opt,
         error::{Error, ErrorKind},
-        Parser,
     };
 
     // Optional leading '-'
@@ -1780,8 +1783,8 @@ where
             } else {
                 -(value_u128 as i64)
             };
-            let out =
-                T::try_from(value_i64).map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Digit)))?;
+            let out = T::try_from(value_i64)
+                .map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Digit)))?;
             return Ok((input, out));
         } else {
             // Unsigned hex: interpret as two's complement for the width of T.
@@ -1805,8 +1808,8 @@ where
                 return Err(nom::Err::Failure(Error::new(input, ErrorKind::Digit)));
             }
             let value_i64 = signed_i128 as i64;
-            let out =
-                T::try_from(value_i64).map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Digit)))?;
+            let out = T::try_from(value_i64)
+                .map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Digit)))?;
             return Ok((input, out));
         }
     }
@@ -1820,10 +1823,10 @@ where
     if sign.is_some() {
         value_i64 = -value_i64;
     }
-    let out = T::try_from(value_i64).map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Digit)))?;
+    let out = T::try_from(value_i64)
+        .map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Digit)))?;
     Ok((input, out))
 }
-
 
 /// Parse a method reference of the form:
 ///    L<class>;-><method>(<args>)<ret>

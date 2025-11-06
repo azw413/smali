@@ -1,19 +1,28 @@
 /* Dex file format structures */
 
+use crate::dex::annotations::{
+    AnnotationItem, AnnotationSetItem, AnnotationSetRefList, AnnotationsDirectoryItem,
+};
+use crate::dex::encoded_values::{EncodedValue, read_encoded_array};
 use crate::dex::error::DexError;
-use crate::dex::annotations::{AnnotationsDirectoryItem, AnnotationItem, AnnotationSetItem, AnnotationSetRefList};
-use crate::dex::{read_sleb128, read_u1, read_u2, read_u4, read_uleb128, read_uleb128p1, read_x, write_sleb128, write_u1, write_u2, write_u4, write_uleb128, write_uleb128p1, write_x};
+use crate::dex::{
+    read_sleb128, read_u1, read_u2, read_u4, read_uleb128, read_uleb128p1, read_x, write_sleb128,
+    write_u1, write_u2, write_u4, write_uleb128, write_uleb128p1, write_x,
+};
+use crate::types::{
+    AnnotationElement as SmaliAnnElement, AnnotationValue as SmaliAnnValue,
+    AnnotationVisibility as SmaliAnnVis, MethodSignature, Modifiers, ObjectIdentifier,
+    SmaliAnnotation, SmaliClass, SmaliField, SmaliMethod, SmaliParam, TypeSignature,
+};
 use cesu8::to_java_cesu8;
 use log::{error, info, warn};
-use crate::dex::encoded_values::{read_encoded_array, EncodedValue};
-use crate::types::{Modifiers, ObjectIdentifier, SmaliClass, SmaliField, SmaliMethod, SmaliParam, SmaliAnnotation, AnnotationElement as SmaliAnnElement, AnnotationValue as SmaliAnnValue, AnnotationVisibility as SmaliAnnVis, TypeSignature, MethodSignature};
 
+use crate::dex::opcode_format::{RefResolver, RegMapper, decode_with_ctx};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use crate::dex::opcode_format::{decode_with_ctx, RefResolver, RegMapper};
 /* Constants */
-pub const DEX_FILE_MAGIC: [u8; 8] = [ 0x64, 0x65, 0x78, 0x0a, 0x30, 0x33, 0x39, 0x00 ];
+pub const DEX_FILE_MAGIC: [u8; 8] = [0x64, 0x65, 0x78, 0x0a, 0x30, 0x33, 0x39, 0x00];
 pub const ENDIAN_CONSTANT: u32 = 0x12345678;
 pub const REVERSE_ENDIAN_CONSTANT: u32 = 0x78563412;
 pub const NO_INDEX: usize = 0xffffffff;
@@ -39,10 +48,6 @@ pub const ACC_ENUM: u32 = 0x4000;
 pub const ACC_CONSTRUCTOR: u32 = 0x10000;
 pub const ACC_DECLARED_SYNCHRONIZED: u32 = 0x20000;
 
-
-
-
-
 type StringId = usize;
 type TypeId = StringId;
 type ProtoId = usize;
@@ -51,54 +56,60 @@ type MethodId = usize;
 
 #[derive(Debug)]
 pub struct TypeList(Vec<TypeId>);
-impl TypeList
-{
-    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<crate::dex::dex_file::TypeList, DexError>
-    {
+impl TypeList {
+    pub fn from_type_ids(ids: Vec<TypeId>) -> Self {
+        TypeList(ids)
+    }
+
+    pub fn items(&self) -> &[TypeId] {
+        &self.0
+    }
+
+    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<crate::dex::dex_file::TypeList, DexError> {
         let mut v = vec![];
         let size = read_u4(bytes, ix)?;
-        for _ in 0..size { v.push(read_u2(bytes, ix)? as TypeId); }
+        for _ in 0..size {
+            v.push(read_u2(bytes, ix)? as TypeId);
+        }
         Ok(TypeList(v))
     }
 
-    pub fn write(&self, bytes: &mut Vec<u8>) -> usize
-    {
+    pub fn write(&self, bytes: &mut Vec<u8>) -> usize {
         let mut c = 0;
         c += write_u4(bytes, self.0.len() as u32);
-        for i in &self.0 { c += write_u2(bytes, *i as u16); }
+        for i in &self.0 {
+            c += write_u2(bytes, *i as u16);
+        }
         if (self.0.len() & 1) != 0 {
             c += write_u2(bytes, 0); // 4-byte alignment padding per spec
         }
         c
     }
-
 }
-
 
 #[derive(Debug)]
 pub struct PrototypeItem {
     // The proto_id_item struct
     pub shorty_idx: StringId,
     pub return_type_idx: TypeId,
-    pub parameters: TypeList
+    pub parameters: TypeList,
 }
 
-impl PrototypeItem
-{
-    pub fn to_string(&self, dex_file: &DexFile) -> Result<String, DexError>
-    {
+impl PrototypeItem {
+    pub fn to_string(&self, dex_file: &DexFile) -> Result<String, DexError> {
         let mut s = dex_file.strings[self.shorty_idx].to_string()?;
         s.push_str(" (");
-        for t in &self.parameters.0 { s.push_str(&dex_file.strings[dex_file.types[*t]].to_string()?) ; }
+        for t in self.parameters.items() {
+            s.push_str(&dex_file.strings[dex_file.types[*t]].to_string()?);
+        }
         s.push(')');
-        s.push_str(&dex_file.strings[dex_file.types[self.return_type_idx]].to_string()?) ;
+        s.push_str(&dex_file.strings[dex_file.types[self.return_type_idx]].to_string()?);
         Ok(s)
     }
 
     /// Write the `proto_id_item` entry. `parameters_off` must be the file-absolute offset to the
     /// associated `type_list` in the data section (or 0 if the prototype has no parameters).
-    pub fn write(&self, bytes: &mut Vec<u8>, parameters_off: u32) -> usize
-    {
+    pub fn write(&self, bytes: &mut Vec<u8>, parameters_off: u32) -> usize {
         let mut c = 0;
         c += write_u4(bytes, self.shorty_idx as u32);
         c += write_u4(bytes, self.return_type_idx as u32);
@@ -107,19 +118,16 @@ impl PrototypeItem
     }
 }
 
-
 #[derive(Debug, PartialEq, Eq)]
 pub struct FieldItem {
     // The field_id_item struct
     pub class_idx: TypeId,
     pub type_idx: TypeId,
-    pub name_idx: StringId
+    pub name_idx: StringId,
 }
 
-impl FieldItem
-{
-    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<crate::dex::dex_file::FieldItem, DexError>
-    {
+impl FieldItem {
+    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<crate::dex::dex_file::FieldItem, DexError> {
         Ok(FieldItem {
             class_idx: read_u2(bytes, ix)? as TypeId,
             type_idx: read_u2(bytes, ix)? as TypeId,
@@ -127,8 +135,7 @@ impl FieldItem
         })
     }
 
-    pub fn write(&self, bytes: &mut Vec<u8>) -> usize
-    {
+    pub fn write(&self, bytes: &mut Vec<u8>) -> usize {
         let mut c = 0;
         c += write_u2(bytes, self.class_idx as u16);
         c += write_u2(bytes, self.type_idx as u16);
@@ -142,13 +149,14 @@ pub struct MethodItem {
     // The field_id_item struct
     pub class_idx: TypeId,
     pub proto_idx: ProtoId,
-    pub name_idx: StringId
+    pub name_idx: StringId,
 }
 
-impl crate::dex::dex_file::MethodItem
-{
-    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<crate::dex::dex_file::MethodItem, DexError>
-    {
+impl crate::dex::dex_file::MethodItem {
+    pub fn read(
+        bytes: &[u8],
+        ix: &mut usize,
+    ) -> Result<crate::dex::dex_file::MethodItem, DexError> {
         Ok(crate::dex::dex_file::MethodItem {
             class_idx: read_u2(bytes, ix)? as TypeId,
             proto_idx: read_u2(bytes, ix)? as ProtoId,
@@ -156,8 +164,7 @@ impl crate::dex::dex_file::MethodItem
         })
     }
 
-    pub fn write(&self, bytes: &mut Vec<u8>) -> usize
-    {
+    pub fn write(&self, bytes: &mut Vec<u8>) -> usize {
         let mut c = 0;
         c += write_u2(bytes, self.class_idx as u16);
         c += write_u2(bytes, self.proto_idx as u16);
@@ -167,12 +174,10 @@ impl crate::dex::dex_file::MethodItem
 }
 
 #[derive(Debug)]
-pub struct EncodedField
-{
+pub struct EncodedField {
     pub field_idx: FieldId,
-    pub access_flags: u32
+    pub access_flags: u32,
 }
-
 
 impl EncodedField {
     /// Write this encoded field, updating `last_index` per DEX diff encoding rules.
@@ -186,37 +191,36 @@ impl EncodedField {
     }
 }
 
-
 pub const DBG_END_SEQUENCE: u8 = 0x00;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DebugInfo
-{
+pub struct DebugInfo {
     pub line_start: u32,
     pub parameter_names: Vec<Option<u32>>,
     pub debug_opcodes: Vec<u8>,
 }
 
-impl crate::dex::dex_file::DebugInfo
-{
-    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<crate::dex::dex_file::DebugInfo, DexError>
-    {
+impl crate::dex::dex_file::DebugInfo {
+    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<crate::dex::dex_file::DebugInfo, DexError> {
         let line_start = read_uleb128(bytes, ix)?;
 
         let parameters_size = read_uleb128(bytes, ix)?;
         let mut parameter_names = Vec::with_capacity(parameters_size as usize);
 
         for _ in 0..parameters_size {
-            let idx = read_uleb128p1(bytes, ix)?;   // -1 => NO_INDEX
+            let idx = read_uleb128p1(bytes, ix)?; // -1 => NO_INDEX
             parameter_names.push(if idx < 0 { None } else { Some(idx as u32) });
         }
 
         // todo: read byte code
-        Ok(DebugInfo { line_start, parameter_names, debug_opcodes: vec![] })
+        Ok(DebugInfo {
+            line_start,
+            parameter_names,
+            debug_opcodes: vec![],
+        })
     }
 
-    pub fn write(&self, bytes: &mut Vec<u8>) -> usize
-    {
+    pub fn write(&self, bytes: &mut Vec<u8>) -> usize {
         let mut c = 0;
         c += write_uleb128(bytes, self.line_start);
         c += write_uleb128(bytes, self.parameter_names.len() as u32);
@@ -235,8 +239,6 @@ impl crate::dex::dex_file::DebugInfo
         c
     }
 }
-
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedTypeAddrPair {
@@ -292,30 +294,49 @@ pub struct EncodedCatchHandler {
     pub catch_all_addr: Option<u32>,
 }
 
-
 impl EncodedCatchHandler {
     pub fn read(bytes: &[u8], ix: &mut usize) -> Result<EncodedCatchHandler, DexError> {
         let size = read_sleb128(bytes, ix)?;
-        let count = if size >= 0 { size as usize } else { (-size) as usize };
+        let count = if size >= 0 {
+            size as usize
+        } else {
+            (-size) as usize
+        };
         let mut pairs = Vec::with_capacity(count);
-        for _ in 0..count { pairs.push(EncodedTypeAddrPair::read(bytes, ix)?); }
-        let catch_all_addr = if size < 0 { Some(read_uleb128(bytes, ix)? as u32) } else { None };
-        Ok(EncodedCatchHandler { handlers: pairs, catch_all_addr })
+        for _ in 0..count {
+            pairs.push(EncodedTypeAddrPair::read(bytes, ix)?);
+        }
+        let catch_all_addr = if size < 0 {
+            Some(read_uleb128(bytes, ix)? as u32)
+        } else {
+            None
+        };
+        Ok(EncodedCatchHandler {
+            handlers: pairs,
+            catch_all_addr,
+        })
     }
 
     pub fn write(&self, bytes: &mut Vec<u8>) -> usize {
         let mut c = 0;
-        let size: i32 = if self.catch_all_addr.is_some() { -(self.handlers.len() as i32) } else { self.handlers.len() as i32 };
+        let size: i32 = if self.catch_all_addr.is_some() {
+            -(self.handlers.len() as i32)
+        } else {
+            self.handlers.len() as i32
+        };
         c += write_sleb128(bytes, size);
-        for p in &self.handlers { c += p.write(bytes); }
-        if let Some(addr) = self.catch_all_addr { c += write_uleb128(bytes, addr); }
+        for p in &self.handlers {
+            c += p.write(bytes);
+        }
+        if let Some(addr) = self.catch_all_addr {
+            c += write_uleb128(bytes, addr);
+        }
         c
     }
 }
 
 #[derive(Debug)]
-pub struct CodeItem
-{
+pub struct CodeItem {
     registers_size: u16,
     args_in_size: u16,
     args_out_size: u16,
@@ -328,10 +349,8 @@ pub struct CodeItem
     handlers: Vec<EncodedCatchHandler>,
 }
 
-impl crate::dex::dex_file::CodeItem
-{
-    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<crate::dex::dex_file::CodeItem, DexError>
-    {
+impl crate::dex::dex_file::CodeItem {
+    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<crate::dex::dex_file::CodeItem, DexError> {
         let code_item_start = *ix;
         let registers_size = read_u2(bytes, ix)?;
         let args_in_size = read_u2(bytes, ix)?;
@@ -339,30 +358,44 @@ impl crate::dex::dex_file::CodeItem
         let tries_size = read_u2(bytes, ix)?;
 
         let mut debug_offset = read_u4(bytes, ix)? as usize;
-        let debug_info = if debug_offset > 0 { Some(DebugInfo::read(bytes, &mut debug_offset)?) } else { None };
+        let debug_info = if debug_offset > 0 {
+            Some(DebugInfo::read(bytes, &mut debug_offset)?)
+        } else {
+            None
+        };
 
         let instructions_size = read_u4(bytes, ix)?;
         let mut instructions = vec![];
-        for _ in 0..instructions_size { instructions.push(read_u2(bytes, ix)?); }
+        for _ in 0..instructions_size {
+            instructions.push(read_u2(bytes, ix)?);
+        }
 
         // Optional 2-byte padding if there are tries and insns_size is odd
         let mut padding: u16 = 0;
         let mut tries: Vec<TryItem> = vec![];
         let mut handlers: Vec<EncodedCatchHandler> = vec![];
-        
+
         if tries_size > 0 {
-            if (instructions_size & 1) != 0 { padding = read_u2(bytes, ix)?; }
+            if (instructions_size & 1) != 0 {
+                padding = read_u2(bytes, ix)?;
+            }
             if (instructions_size & 1) != 0 && padding != 0 {
                 warn!(
                     "[codeitem] non-zero padding 0x{:04x} at 0x{:x} (code_item_start=0x{:x})",
-                    padding, *ix as usize - 2, code_item_start
+                    padding,
+                    *ix as usize - 2,
+                    code_item_start
                 );
             }
-            for _ in 0..tries_size { tries.push(TryItem::read(bytes, ix)?); }
+            for _ in 0..tries_size {
+                tries.push(TryItem::read(bytes, ix)?);
+            }
             // encoded_catch_handler_list starts here
             let handlers_size = read_uleb128(bytes, ix)? as usize;
             if handlers_size > 1_000_000 {
-                return Err(DexError::new("encoded_catch_handler_list size is implausibly large"));
+                return Err(DexError::new(
+                    "encoded_catch_handler_list size is implausibly large",
+                ));
             }
             let handlers_base = *ix; // first handler entry will start here
 
@@ -372,7 +405,11 @@ impl crate::dex::dex_file::CodeItem
                 if abs >= bytes.len() {
                     warn!(
                         "[codeitem] TryItem#{} handler_off {} -> OOB abs=0x{:x} (base=0x{:x}, file_size=0x{:x})",
-                        ti, t.handler_off, abs, handlers_base, bytes.len()
+                        ti,
+                        t.handler_off,
+                        abs,
+                        handlers_base,
+                        bytes.len()
                     );
                 }
             }
@@ -387,13 +424,21 @@ impl crate::dex::dex_file::CodeItem
                     Err(e) => {
                         let ctx = format!(
                             "while reading EncodedCatchHandler #{}/{} at 0x{:x} (base=0x{:x}, code_item_start=0x{:x}, tries_size={}, insns_size={})",
-                            i + 1, handlers_size, entry_off, handlers_base, code_item_start, tries_size, instructions_size
+                            i + 1,
+                            handlers_size,
+                            entry_off,
+                            handlers_base,
+                            code_item_start,
+                            tries_size,
+                            instructions_size
                         );
                         return Err(DexError::with_context(e, ctx));
                     }
                 }
                 if scan <= entry_off {
-                    return Err(DexError::new("EncodedCatchHandler did not advance cursor (corrupt data)"));
+                    return Err(DexError::new(
+                        "EncodedCatchHandler did not advance cursor (corrupt data)",
+                    ));
                 }
                 handler_offsets.push((entry_off - handlers_base) as u32);
             }
@@ -411,18 +456,29 @@ impl crate::dex::dex_file::CodeItem
                 } else {
                     warn!(
                         "[codeitem] could not resolve handler offset {} for try #{} (handlers_size={})",
-                        abs_off, ti, handler_offsets.len()
+                        abs_off,
+                        ti,
+                        handler_offsets.len()
                     );
                 }
             }
         }
 
-        Ok(CodeItem { registers_size, args_in_size, args_out_size, tries_size, debug_info, instructions, padding, tries, handlers })
+        Ok(CodeItem {
+            registers_size,
+            args_in_size,
+            args_out_size,
+            tries_size,
+            debug_info,
+            instructions,
+            padding,
+            tries,
+            handlers,
+        })
     }
 
     // Written to the data section
-    pub fn write(&self, bytes: &mut Vec<u8>, code_item_base: u32) -> Result<usize, DexError>
-    {
+    pub fn write(&self, bytes: &mut Vec<u8>, code_item_base: u32) -> Result<usize, DexError> {
         let mut c = 0;
         let start = bytes.len();
         c += write_u2(bytes, self.registers_size);
@@ -436,7 +492,9 @@ impl crate::dex::dex_file::CodeItem
         c += write_u4(bytes, 0);
 
         c += write_u4(bytes, self.instructions.len() as u32);
-        for i in &self.instructions { c += write_u2(bytes, *i); }
+        for i in &self.instructions {
+            c += write_u2(bytes, *i);
+        }
 
         if !self.tries.is_empty() && (self.instructions.len() & 1) != 0 {
             // single 16-bit 0 padding to make tries start on a 4-byte boundary
@@ -457,7 +515,9 @@ impl crate::dex::dex_file::CodeItem
             let mut running = prefix_buf.len();
             for entry in &handler_entries {
                 if running > u16::MAX as usize {
-                    return Err(DexError::new("encoded_catch_handler_list exceeds u16 offset range"));
+                    return Err(DexError::new(
+                        "encoded_catch_handler_list exceeds u16 offset range",
+                    ));
                 }
                 handler_offsets.push(running as u16);
                 running += entry.len();
@@ -476,7 +536,9 @@ impl crate::dex::dex_file::CodeItem
                 } else if self.handlers.is_empty() {
                     t.handler_off
                 } else {
-                    return Err(DexError::new("TryItem missing handler_idx while handlers present"));
+                    return Err(DexError::new(
+                        "TryItem missing handler_idx while handlers present",
+                    ));
                 };
                 let mut try_record = t.clone();
                 try_record.handler_off = resolved;
@@ -499,7 +561,7 @@ impl crate::dex::dex_file::CodeItem
                 .ok_or_else(|| DexError::new("debug_info offset overflow"))?;
             let mut tmp = Vec::with_capacity(4);
             write_u4(&mut tmp, absolute);
-            bytes[debug_off_pos..debug_off_pos+4].copy_from_slice(&tmp);
+            bytes[debug_off_pos..debug_off_pos + 4].copy_from_slice(&tmp);
             c += di.write(bytes);
         }
 
@@ -508,12 +570,11 @@ impl crate::dex::dex_file::CodeItem
 }
 
 #[derive(Debug)]
-pub struct EncodedMethod
-{
+pub struct EncodedMethod {
     pub method_idx: MethodId,
     pub access_flags: u32,
     pub code_off: u32,
-    pub code: Option<CodeItem>
+    pub code: Option<CodeItem>,
 }
 
 impl EncodedMethod {
@@ -528,7 +589,6 @@ impl EncodedMethod {
     }
 }
 
-
 #[derive(Debug)]
 pub struct ClassDataItem {
     // The class_def_item struct
@@ -538,10 +598,11 @@ pub struct ClassDataItem {
     pub virtual_methods: Vec<EncodedMethod>,
 }
 
-impl ClassDataItem
-{
-    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<crate::dex::dex_file::ClassDataItem, DexError>
-    {
+impl ClassDataItem {
+    pub fn read(
+        bytes: &[u8],
+        ix: &mut usize,
+    ) -> Result<crate::dex::dex_file::ClassDataItem, DexError> {
         let static_field_size = read_uleb128(bytes, ix)?;
         let instance_field_size = read_uleb128(bytes, ix)?;
         let direct_method_size = read_uleb128(bytes, ix)?;
@@ -555,13 +616,19 @@ impl ClassDataItem
         let mut offset = 0;
         for _ in 0..static_field_size {
             offset += read_uleb128(bytes, ix)?;
-            static_fields.push( EncodedField { field_idx: offset as FieldId, access_flags: read_uleb128(bytes, ix)? } )
+            static_fields.push(EncodedField {
+                field_idx: offset as FieldId,
+                access_flags: read_uleb128(bytes, ix)?,
+            })
         }
 
         offset = 0;
         for _ in 0..instance_field_size {
             offset += read_uleb128(bytes, ix)?;
-            instance_fields.push( EncodedField { field_idx: offset as FieldId, access_flags: read_uleb128(bytes, ix)? } )
+            instance_fields.push(EncodedField {
+                field_idx: offset as FieldId,
+                access_flags: read_uleb128(bytes, ix)?,
+            })
         }
 
         offset = 0;
@@ -570,9 +637,17 @@ impl ClassDataItem
             let access_flags = read_uleb128(bytes, ix)?;
             let code_off = read_uleb128(bytes, ix)?;
             let mut code_cursor = code_off as usize;
-            let code = if code_off > 0 { Some(CodeItem::read(bytes, &mut code_cursor)?) }
-                else { None };
-            direct_methods.push( EncodedMethod { method_idx: offset as MethodId, access_flags, code_off, code } );
+            let code = if code_off > 0 {
+                Some(CodeItem::read(bytes, &mut code_cursor)?)
+            } else {
+                None
+            };
+            direct_methods.push(EncodedMethod {
+                method_idx: offset as MethodId,
+                access_flags,
+                code_off,
+                code,
+            });
         }
 
         offset = 0;
@@ -581,16 +656,28 @@ impl ClassDataItem
             let access_flags = read_uleb128(bytes, ix)?;
             let code_off = read_uleb128(bytes, ix)?;
             let mut code_cursor = code_off as usize;
-            let code = if code_off > 0 { Some(CodeItem::read(bytes, &mut code_cursor)?) }
-                else { None };
-            virtual_methods.push( EncodedMethod { method_idx: offset as MethodId, access_flags, code_off, code } );
+            let code = if code_off > 0 {
+                Some(CodeItem::read(bytes, &mut code_cursor)?)
+            } else {
+                None
+            };
+            virtual_methods.push(EncodedMethod {
+                method_idx: offset as MethodId,
+                access_flags,
+                code_off,
+                code,
+            });
         }
 
-        Ok(ClassDataItem { static_fields, instance_fields, direct_methods, virtual_methods })
+        Ok(ClassDataItem {
+            static_fields,
+            instance_fields,
+            direct_methods,
+            virtual_methods,
+        })
     }
 
-    pub fn write(&self, bytes: &mut Vec<u8>) -> usize
-    {
+    pub fn write(&self, bytes: &mut Vec<u8>) -> usize {
         let mut c = 0;
         c += write_uleb128(bytes, self.static_fields.len() as u32);
         c += write_uleb128(bytes, self.instance_fields.len() as u32);
@@ -621,8 +708,6 @@ impl ClassDataItem
     }
 }
 
-
-
 #[derive(Debug)]
 pub struct ClassDefItem {
     // The class_def_item struct
@@ -633,37 +718,49 @@ pub struct ClassDefItem {
     pub source_file_idx: StringId,
     pub annotations: Option<AnnotationsDirectoryItem>,
     pub class_data: Option<ClassDataItem>,
-    pub static_values: Option<Vec<EncodedValue>>
+    pub static_values: Option<Vec<EncodedValue>>,
 }
 
-impl ClassDefItem
-{
-    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<ClassDefItem, DexError>
-    {
+impl ClassDefItem {
+    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<ClassDefItem, DexError> {
         let class_idx = read_u4(bytes, ix)? as TypeId;
         let access_flags = read_u4(bytes, ix)?;
         let superclass_idx = read_u4(bytes, ix)? as TypeId;
         let mut interface_offset = read_u4(bytes, ix)? as usize;
-        let interfaces = if interface_offset > 0  { Some(TypeList::read(bytes, &mut interface_offset)?) }
-            else { None };
+        let interfaces = if interface_offset > 0 {
+            Some(TypeList::read(bytes, &mut interface_offset)?)
+        } else {
+            None
+        };
         let source_file_idx = read_u4(bytes, ix)? as StringId;
         let mut annotations_offset = read_u4(bytes, ix)? as usize;
         let annotations = if annotations_offset > 0 {
-            Some(AnnotationsDirectoryItem::read(bytes, &mut annotations_offset)?)
-        } else { None };
+            Some(AnnotationsDirectoryItem::read(
+                bytes,
+                &mut annotations_offset,
+            )?)
+        } else {
+            None
+        };
         let mut class_data_offset = read_u4(bytes, ix)? as usize;
         let class_data = if class_data_offset > 0 {
             let cd = ClassDataItem::read(bytes, &mut class_data_offset);
             match cd {
                 Ok(cd) => Some(cd),
-                Err(e) => { 
-                    error!("Error reading ClassDataItem: {:?}", e); None }
+                Err(e) => {
+                    error!("Error reading ClassDataItem: {:?}", e);
+                    None
+                }
             }
-        }
-            else { None };
+        } else {
+            None
+        };
         let mut static_values_offset = read_u4(bytes, ix)? as usize;
-        let static_values = if static_values_offset > 0 { Some(read_encoded_array(bytes, &mut static_values_offset)?) }
-            else { None };
+        let static_values = if static_values_offset > 0 {
+            Some(read_encoded_array(bytes, &mut static_values_offset)?)
+        } else {
+            None
+        };
 
         Ok(ClassDefItem {
             class_idx,
@@ -699,14 +796,12 @@ impl ClassDefItem
         c
     }
 
-    pub fn write(&self, _bytes: &mut Vec<u8>) -> usize
-    {
+    pub fn write(&self, _bytes: &mut Vec<u8>) -> usize {
         // ClassDefItem participates in a sectioned layout; a higher-level builder should
         // compute and supply the offsets. Use `write_with_offsets` instead of this method.
         0
     }
 }
-
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct CallSiteId {
@@ -734,9 +829,7 @@ pub struct DexFile {
 }
 
 impl DexFile {
-
-    fn read(bytes: &[u8], ix: &mut usize) -> Result<DexFile, DexError> 
-    {
+    fn read(bytes: &[u8], ix: &mut usize) -> Result<DexFile, DexError> {
         let header = Header::read(bytes, ix)?;
 
         let mut dex = DexFile {
@@ -752,11 +845,10 @@ impl DexFile {
             data: bytes.to_vec(),
             link_data: vec![],
         };
-        
+
         // Read the strings
         *ix = dex.header.string_ids_off as usize;
-        for _ in 0..dex.header.string_ids_size
-        {
+        for _ in 0..dex.header.string_ids_size {
             let mut string_id = read_u4(bytes, ix)? as usize;
             let ds = DexString::read(bytes, &mut string_id)?;
             dex.strings.push(ds);
@@ -764,70 +856,65 @@ impl DexFile {
 
         // Read the type_ids
         *ix = dex.header.type_ids_off as usize;
-        for _ in 0..dex.header.type_ids_size
-        {
+        for _ in 0..dex.header.type_ids_size {
             let type_id: TypeId = read_u4(bytes, ix)? as usize;
-            if let DexString::Decoded(_s) = &dex.strings[type_id]
-            {
+            if let DexString::Decoded(_s) = &dex.strings[type_id] {
                 dex.types.push(type_id);
+            } else {
+                fail!("Invalid type description: {:?}", &dex.strings[type_id]);
             }
-            else { fail!("Invalid type description: {:?}", &dex.strings[type_id]); }
         }
 
         // Read the prototypes
         *ix = dex.header.proto_ids_off as usize;
-        for _ in 0..dex.header.proto_ids_size
-        {
+        for _ in 0..dex.header.proto_ids_size {
             let shorty_idx = read_u4(bytes, ix)? as crate::dex::dex_file::StringId;
             let return_type_idx = read_u4(bytes, ix)? as crate::dex::dex_file::TypeId;
             let mut parameter_offset = read_u4(bytes, ix)? as usize;
             let p = PrototypeItem {
-                shorty_idx, return_type_idx,
-                parameters: if parameter_offset == 0 { TypeList(vec![]) }
-                else { TypeList::read(bytes, &mut parameter_offset)? },
+                shorty_idx,
+                return_type_idx,
+                parameters: if parameter_offset == 0 {
+                    TypeList(vec![])
+                } else {
+                    TypeList::read(bytes, &mut parameter_offset)?
+                },
             };
             dex.prototypes.push(p);
         }
 
         // Read the Field ids
         *ix = dex.header.field_ids_off as usize;
-        for _ in 0..dex.header.field_ids_size
-        {
+        for _ in 0..dex.header.field_ids_size {
             dex.fields.push(FieldItem::read(bytes, ix)?);
         }
 
         // Read the Methods ids
         *ix = dex.header.method_ids_off as usize;
-        for _ in 0..dex.header.method_ids_size
-        {
+        for _ in 0..dex.header.method_ids_size {
             dex.methods.push(MethodItem::read(bytes, ix)?);
         }
 
         // Read the Class Defs
         *ix = dex.header.class_defs_off as usize;
-        for _ in 0..dex.header.class_defs_size
-        {
+        for _ in 0..dex.header.class_defs_size {
             dex.class_defs.push(ClassDefItem::read(bytes, ix)?);
         }
-
 
         Ok(dex)
     }
 
-    fn get_string(&self, id: StringId) -> Result<String, DexError>
-    {
+    fn get_string(&self, id: StringId) -> Result<String, DexError> {
         let name_string = &self.strings[id];
-        let name = match name_string
-        {
+        let name = match name_string {
             DexString::Decoded(s) => s.to_string(),
-            DexString::Raw(_, _) => return Err(DexError::new("Invalid string in class name."))
+            DexString::Raw(_, _) => return Err(DexError::new("Invalid string in class name.")),
         };
 
         Ok(name)
     }
 
-    fn get_type(&self, id: TypeId) -> Result<ObjectIdentifier, DexError>
-    {
+    fn get_type(&self, id: TypeId) -> Result<ObjectIdentifier, DexError> {
         let type_str = self.get_string(self.types[id])?;
         Ok(ObjectIdentifier::from_jni_type(&type_str))
     }
@@ -839,12 +926,16 @@ impl DexFile {
 
     // Helper: read all AnnotationItem at a set offset
     fn read_annotation_set_items(&self, off: u32) -> Result<Vec<AnnotationItem>, DexError> {
-        if off == 0 { return Ok(vec![]); }
+        if off == 0 {
+            return Ok(vec![]);
+        }
         let mut ix = off as usize;
         let set = AnnotationSetItem::read(&self.data, &mut ix)?;
         let mut items = Vec::with_capacity(set.entries.len());
         for entry_off in set.entries {
-            if entry_off == 0 { continue; }
+            if entry_off == 0 {
+                continue;
+            }
             let mut j = entry_off as usize;
             let item = AnnotationItem::read(&self.data, &mut j)?;
             items.push(item);
@@ -933,18 +1024,24 @@ impl DexFile {
                     // (Visibility of nested annotation values isn’t printed; using Runtime is safe.)
                     let sub_type_desc = self.type_desc(sub.type_idx as usize)?;
                     let sub_type = TypeSignature::from_jni(&sub_type_desc);
-                    let mut sub_elems: Vec<SmaliAnnElement> = Vec::with_capacity(sub.elements.len());
+                    let mut sub_elems: Vec<SmaliAnnElement> =
+                        Vec::with_capacity(sub.elements.len());
                     for se in &sub.elements {
                         let sname = self.strings[se.name_idx as usize].to_string()?;
                         let sval = match &se.value {
                             EV::Array(vals) => {
                                 let mut arr = Vec::with_capacity(vals.len());
-                                for v in vals { arr.push(self.encoded_value_atom_to_smali(v)?); }
+                                for v in vals {
+                                    arr.push(self.encoded_value_atom_to_smali(v)?);
+                                }
                                 SmaliAnnValue::Array(arr)
                             }
                             EV::Annotation(_) => {
                                 // Nested-nested: recurse by building a pseudo AnnotationItem
-                                let pseudo = AnnotationItem { visibility: 0x01, annotation: se.value.as_annotation().unwrap().clone() };
+                                let pseudo = AnnotationItem {
+                                    visibility: 0x01,
+                                    annotation: se.value.as_annotation().unwrap().clone(),
+                                };
                                 SmaliAnnValue::SubAnnotation(self.convert_annotation(&pseudo)?)
                             }
                             EV::Enum(field_idx) => {
@@ -953,15 +1050,26 @@ impl DexFile {
                                     let ename = self.get_string(fi.name_idx)?;
                                     SmaliAnnValue::Enum(class_id, ename)
                                 } else {
-                                    SmaliAnnValue::Single(self.encoded_value_atom_to_smali(&se.value)?)
+                                    SmaliAnnValue::Single(
+                                        self.encoded_value_atom_to_smali(&se.value)?,
+                                    )
                                 }
                             }
                             // Strings and Types (and other primitives) → Single textual atom
-                            _ => SmaliAnnValue::Single(self.encoded_value_atom_to_smali(&se.value)?),
+                            _ => {
+                                SmaliAnnValue::Single(self.encoded_value_atom_to_smali(&se.value)?)
+                            }
                         };
-                        sub_elems.push(SmaliAnnElement { name: sname, value: sval });
+                        sub_elems.push(SmaliAnnElement {
+                            name: sname,
+                            value: sval,
+                        });
                     }
-                    let sub_ann = SmaliAnnotation { visibility: SmaliAnnVis::Runtime, annotation_type: sub_type, elements: sub_elems };
+                    let sub_ann = SmaliAnnotation {
+                        visibility: SmaliAnnVis::Runtime,
+                        annotation_type: sub_type,
+                        elements: sub_elems,
+                    };
                     SmaliAnnValue::SubAnnotation(sub_ann)
                 }
 
@@ -986,31 +1094,38 @@ impl DexFile {
                 _ => SmaliAnnValue::Single(self.encoded_value_atom_to_smali(&e.value)?),
             };
 
-            elements.push(SmaliAnnElement { name, value: value_av });
+            elements.push(SmaliAnnElement {
+                name,
+                value: value_av,
+            });
         }
 
-        Ok(SmaliAnnotation { visibility: vis, annotation_type: ann_type, elements })
+        Ok(SmaliAnnotation {
+            visibility: vis,
+            annotation_type: ann_type,
+            elements,
+        })
     }
-    
-    
-    
-    
 
-    pub fn to_smali(&self) -> Result<Vec<SmaliClass>, DexError>
-    {
+    pub fn to_smali(&self) -> Result<Vec<SmaliClass>, DexError> {
         let mut smali_classes = vec![];
         // Derive API/ART from this DEX once, reuse for all method decodes
         let (api_level, art_version) = self.detect_api_and_art();
 
-        for c in &self.class_defs
-        {
+        for c in &self.class_defs {
             let mut smali = SmaliClass {
                 name: self.get_type(c.class_idx)?,
                 modifiers: Modifiers::from_u32(c.access_flags),
-                source: if c.source_file_idx != NO_INDEX { Some(self.get_string(c.source_file_idx)?) }
-                        else { None },
-                super_class: if c.superclass_idx != NO_INDEX { self.get_type(c.superclass_idx)? }
-                             else { ObjectIdentifier::from_jni_type("Ljava/lang/Object;") },
+                source: if c.source_file_idx != NO_INDEX {
+                    Some(self.get_string(c.source_file_idx)?)
+                } else {
+                    None
+                },
+                super_class: if c.superclass_idx != NO_INDEX {
+                    self.get_type(c.superclass_idx)?
+                } else {
+                    ObjectIdentifier::from_jni_type("Ljava/lang/Object;")
+                },
                 implements: vec![],
                 annotations: vec![],
                 fields: vec![],
@@ -1019,24 +1134,26 @@ impl DexFile {
             };
 
             // Any interfaces?
-            if let Some(tl) = &c.interfaces
-            {
-                for t in &tl.0 { smali.implements.push(self.get_type(*t)?); }
+            if let Some(tl) = &c.interfaces {
+                for t in &tl.0 {
+                    smali.implements.push(self.get_type(*t)?);
+                }
             }
 
             // Class annotations
             if let Some(dir) = &c.annotations {
                 if dir.class_annotations_off != 0 {
                     let items = self.read_annotation_set_items(dir.class_annotations_off)?;
-                    smali.annotations = items.iter().map(|it| self.convert_annotation(it)).collect::<Result<_,_>>()?;
+                    smali.annotations = items
+                        .iter()
+                        .map(|it| self.convert_annotation(it))
+                        .collect::<Result<_, _>>()?;
                 }
             }
 
-            if let Some(class_data) = &c.class_data
-            {
+            if let Some(class_data) = &c.class_data {
                 // Static fields
-                for (i, f) in class_data.static_fields.iter().enumerate()
-                {
+                for (i, f) in class_data.static_fields.iter().enumerate() {
                     let dex_field = &self.fields[f.field_idx];
 
                     let mut field_annotations = vec![];
@@ -1044,7 +1161,10 @@ impl DexFile {
                         for fa in &dir.field_annotations {
                             if fa.field_idx as usize == f.field_idx {
                                 let items = self.read_annotation_set_items(fa.annotations_off)?;
-                                field_annotations = items.iter().map(|it| self.convert_annotation(it)).collect::<Result<_,_>>()?;
+                                field_annotations = items
+                                    .iter()
+                                    .map(|it| self.convert_annotation(it))
+                                    .collect::<Result<_, _>>()?;
                                 break;
                             }
                         }
@@ -1053,29 +1173,34 @@ impl DexFile {
                     smali.fields.push(SmaliField {
                         name: self.get_string(dex_field.name_idx)?,
                         modifiers: Modifiers::from_u32(f.access_flags),
-                        signature: TypeSignature::from_jni(&self.get_string(self.types[dex_field.type_idx])?),
+                        signature: TypeSignature::from_jni(
+                            &self.get_string(self.types[dex_field.type_idx])?,
+                        ),
                         initial_value: if let Some(s) = &c.static_values {
                             if i < s.len() {
-                                match s[i]
-                                {
+                                match s[i] {
                                     EncodedValue::Null => None,
                                     EncodedValue::String(sid) => {
                                         let raw = self.get_string(sid as usize)?;
-                                        Some(format!("\"{}\"", DexRefResolver::escape_smali_string(&raw)))
+                                        Some(format!(
+                                            "\"{}\"",
+                                            DexRefResolver::escape_smali_string(&raw)
+                                        ))
                                     }
-                                    _ => Some(s[i].to_string(&self.strings))
+                                    _ => Some(s[i].to_string(&self.strings)),
                                 }
+                            } else {
+                                None
                             }
-                            else { None }
-                        }
-                        else { None },
+                        } else {
+                            None
+                        },
                         annotations: field_annotations,
                     });
                 }
 
                 // Instance fields
-                for (_i, f) in class_data.instance_fields.iter().enumerate()
-                {
+                for (_i, f) in class_data.instance_fields.iter().enumerate() {
                     let dex_field = &self.fields[f.field_idx];
 
                     let mut field_annotations = vec![];
@@ -1083,7 +1208,10 @@ impl DexFile {
                         for fa in &dir.field_annotations {
                             if fa.field_idx as usize == f.field_idx {
                                 let items = self.read_annotation_set_items(fa.annotations_off)?;
-                                field_annotations = items.iter().map(|it| self.convert_annotation(it)).collect::<Result<_,_>>()?;
+                                field_annotations = items
+                                    .iter()
+                                    .map(|it| self.convert_annotation(it))
+                                    .collect::<Result<_, _>>()?;
                                 break;
                             }
                         }
@@ -1092,7 +1220,9 @@ impl DexFile {
                     smali.fields.push(SmaliField {
                         name: self.get_string(dex_field.name_idx)?,
                         modifiers: Modifiers::from_u32(f.access_flags),
-                        signature: TypeSignature::from_jni(&self.get_string(self.types[dex_field.type_idx])?),
+                        signature: TypeSignature::from_jni(
+                            &self.get_string(self.types[dex_field.type_idx])?,
+                        ),
                         initial_value: None,
                         annotations: field_annotations,
                     });
@@ -1102,8 +1232,12 @@ impl DexFile {
             // Methods (direct + virtual), no disassembly yet
             let mut all_methods: Vec<&EncodedMethod> = vec![];
             if let Some(class_data) = &c.class_data {
-                for m in &class_data.direct_methods { all_methods.push(m); }
-                for m in &class_data.virtual_methods { all_methods.push(m); }
+                for m in &class_data.direct_methods {
+                    all_methods.push(m);
+                }
+                for m in &class_data.virtual_methods {
+                    all_methods.push(m);
+                }
             }
 
             // Build quick lookup maps for method and parameter annotations for this class
@@ -1113,7 +1247,10 @@ impl DexFile {
                 // Method annotations
                 for ma in &dir.method_annotations {
                     let items = self.read_annotation_set_items(ma.annotations_off)?;
-                    let converted = items.iter().map(|it| self.convert_annotation(it)).collect::<Result<Vec<_>,_>>()?;
+                    let converted = items
+                        .iter()
+                        .map(|it| self.convert_annotation(it))
+                        .collect::<Result<Vec<_>, _>>()?;
                     method_ann_map.insert(ma.method_idx as usize, converted);
                 }
                 // Parameter annotations
@@ -1121,11 +1258,18 @@ impl DexFile {
                     if pa.annotations_off != 0 {
                         let mut ixp = pa.annotations_off as usize;
                         let ref_list = AnnotationSetRefList::read(&self.data, &mut ixp)?;
-                        let mut per_param: Vec<Vec<SmaliAnnotation>> = Vec::with_capacity(ref_list.list.len());
+                        let mut per_param: Vec<Vec<SmaliAnnotation>> =
+                            Vec::with_capacity(ref_list.list.len());
                         for &set_off in &ref_list.list {
-                            if set_off == 0 { per_param.push(vec![]); continue; }
+                            if set_off == 0 {
+                                per_param.push(vec![]);
+                                continue;
+                            }
                             let items = self.read_annotation_set_items(set_off)?;
-                            let converted = items.iter().map(|it| self.convert_annotation(it)).collect::<Result<Vec<_>,_>>()?;
+                            let converted = items
+                                .iter()
+                                .map(|it| self.convert_annotation(it))
+                                .collect::<Result<Vec<_>, _>>()?;
                             per_param.push(converted);
                         }
                         param_ann_map.insert(pa.method_idx as usize, per_param);
@@ -1141,7 +1285,9 @@ impl DexFile {
                 // Build JNI method signature string
                 let mut sig = String::new();
                 sig.push('(');
-                for &t in &proto.parameters.0 { sig.push_str(&self.get_string(self.types[t])?); }
+                for &t in &proto.parameters.0 {
+                    sig.push_str(&self.get_string(self.types[t])?);
+                }
                 sig.push(')');
                 sig.push_str(&self.get_string(self.types[proto.return_type_idx])?);
                 let signature = MethodSignature::from_jni(&sig);
@@ -1150,7 +1296,11 @@ impl DexFile {
                 let mut params: Vec<SmaliParam> = Vec::with_capacity(proto.parameters.0.len());
                 for (i, _t) in proto.parameters.0.iter().enumerate() {
                     let reg_name = format!("p{}", if is_static { i } else { i + 1 });
-                    params.push(SmaliParam { name: None, register: reg_name, annotations: vec![] });
+                    params.push(SmaliParam {
+                        name: None,
+                        register: reg_name,
+                        annotations: vec![],
+                    });
                 }
 
                 // Attach method annotations
@@ -1159,7 +1309,9 @@ impl DexFile {
                 // Attach parameter annotations where available
                 if let Some(per_param) = param_ann_map.remove(&m.method_idx) {
                     for (i, annos) in per_param.into_iter().enumerate() {
-                        if i < params.len() { params[i].annotations = annos; }
+                        if i < params.len() {
+                            params[i].annotations = annos;
+                        }
                     }
                 }
 
@@ -1180,13 +1332,19 @@ impl DexFile {
                         registers_size: ci.registers_size,
                         ins_size: ci.args_in_size,
                     };
-                    
-                    let decoded = decode_with_ctx(&bc, api_level, art_version, &resolver, Some(&regmap))
-                        .map_err(|e| DexError::with_context(e, format!(
-                            "while decoding {}->{}{}", class_desc, name, sig
-                        )))?;
+
+                    let decoded =
+                        decode_with_ctx(&bc, api_level, art_version, &resolver, Some(&regmap))
+                            .map_err(|e| {
+                                DexError::with_context(
+                                    e,
+                                    format!("while decoding {}->{}{}", class_desc, name, sig),
+                                )
+                            })?;
                     (locals_calc, decoded)
-                } else { (0, Vec::new()) };
+                } else {
+                    (0, Vec::new())
+                };
 
                 smali.methods.push(SmaliMethod {
                     name,
@@ -1212,7 +1370,6 @@ impl DexFile {
         let d1 = self.header.magic[5];
         let d2 = self.header.magic[6];
         if d0.is_ascii_digit() && d1.is_ascii_digit() && d2.is_ascii_digit() {
-            
             ((d0 - b'0') as u32) * 100 + ((d1 - b'0') as u32) * 10 + ((d2 - b'0') as u32)
         } else {
             35
@@ -1232,7 +1389,7 @@ impl DexFile {
             39 => 26, // Oreo
             40 => 28, // Pie
             41 => 29, // Android 10
-            _  => 33, // default to recent
+            _ => 33,  // default to recent
         };
 
         // Heuristic quick/odex detection: look for known quick opcodes in low byte
@@ -1258,26 +1415,23 @@ impl DexFile {
         let art_version = if has_quick { 1 } else { 0 };
         (api, art_version)
     }
-    
-    pub fn from_bytes(bytes: &[u8]) -> Result<DexFile, DexError> 
-    {
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<DexFile, DexError> {
         let mut ix = 0;
         DexFile::read(bytes, &mut ix)
     }
 
-    pub fn from_file(path: &Path) -> Result<DexFile, DexError>
-    {
+    pub fn from_file(path: &Path) -> Result<DexFile, DexError> {
         let bytes = fs::read(path).map_err(|e| DexError::new(&format!("io Error: {}", e)))?;
         DexFile::from_bytes(&bytes)
     }
-    
 }
 
+struct DexRefResolver<'a> {
+    dex: &'a DexFile,
+}
 
-struct DexRefResolver<'a> { dex: &'a DexFile }
-
-impl DexRefResolver<'_> 
-{
+impl DexRefResolver<'_> {
     fn escape_smali_string(s: &str) -> String {
         let mut out = String::with_capacity(s.len() + 8);
         for ch in s.chars() {
@@ -1290,7 +1444,9 @@ impl DexRefResolver<'_>
                 // ASCII control chars (C0)
                 c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
                 // C1 control block 0x7F..0x9F
-                c if (0x7F..=0x9F).contains(&(c as u32)) => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c if (0x7F..=0x9F).contains(&(c as u32)) => {
+                    out.push_str(&format!("\\u{:04x}", c as u32))
+                }
                 // Any Unicode whitespace other than regular ASCII space should be escaped
                 c if c.is_whitespace() && c != ' ' => out.push_str(&format!("\\u{:04x}", c as u32)),
                 // Safe to emit directly
@@ -1301,13 +1457,17 @@ impl DexRefResolver<'_>
     }
 
     fn string_idx(&self, sid: usize) -> String {
-        self.dex.strings.get(sid)
+        self.dex
+            .strings
+            .get(sid)
             .and_then(|ds| ds.to_string().ok())
             .unwrap_or_else(|| format!("string@{}", sid))
     }
 
     fn type_desc_idx(&self, tid: usize) -> String {
-        self.dex.types.get(tid)
+        self.dex
+            .types
+            .get(tid)
             .and_then(|sid| self.dex.strings.get(*sid))
             .and_then(|ds| ds.to_string().ok())
             .unwrap_or_else(|| format!("Ltype@{};", tid))
@@ -1316,7 +1476,9 @@ impl DexRefResolver<'_>
     fn proto_desc(&self, pid: usize) -> String {
         if let Some(p) = self.dex.prototypes.get(pid) {
             let mut s = String::from("(");
-            for &t in &p.parameters.0 { s.push_str(&self.type_desc_idx(t)); }
+            for &t in &p.parameters.0 {
+                s.push_str(&self.type_desc_idx(t));
+            }
             s.push(')');
             s.push_str(&self.type_desc_idx(p.return_type_idx));
             s
@@ -1342,7 +1504,9 @@ impl RefResolver for DexRefResolver<'_> {
             } else {
                 warn!(
                     "[resolver] field_ref {}: class_idx {} OOB (types.len={})",
-                    idx, f.class_idx, self.dex.types.len()
+                    idx,
+                    f.class_idx,
+                    self.dex.types.len()
                 );
                 format!("Ltype@{};", f.class_idx)
             };
@@ -1351,7 +1515,9 @@ impl RefResolver for DexRefResolver<'_> {
             } else {
                 warn!(
                     "[resolver] field_ref {}: name_idx {} OOB (strings.len={})",
-                    idx, f.name_idx, self.dex.strings.len()
+                    idx,
+                    f.name_idx,
+                    self.dex.strings.len()
                 );
                 format!("field@{}", f.name_idx)
             };
@@ -1360,7 +1526,9 @@ impl RefResolver for DexRefResolver<'_> {
             } else {
                 warn!(
                     "[resolver] field_ref {}: type_idx {} OOB (types.len={})",
-                    idx, f.type_idx, self.dex.types.len()
+                    idx,
+                    f.type_idx,
+                    self.dex.types.len()
                 );
                 format!("Ltype@{};", f.type_idx)
             };
@@ -1368,7 +1536,8 @@ impl RefResolver for DexRefResolver<'_> {
         } else {
             warn!(
                 "[resolver] field_ref {} OOB (fields.len={})",
-                idx, self.dex.fields.len()
+                idx,
+                self.dex.fields.len()
             );
             (
                 format!("Lclass@{};", idx),
@@ -1385,7 +1554,9 @@ impl RefResolver for DexRefResolver<'_> {
             } else {
                 warn!(
                     "[resolver] method_ref {}: class_idx {} OOB (types.len={})",
-                    idx, m.class_idx, self.dex.types.len()
+                    idx,
+                    m.class_idx,
+                    self.dex.types.len()
                 );
                 format!("Ltype@{};", m.class_idx)
             };
@@ -1394,7 +1565,9 @@ impl RefResolver for DexRefResolver<'_> {
             } else {
                 warn!(
                     "[resolver] method_ref {}: name_idx {} OOB (strings.len={})",
-                    idx, m.name_idx, self.dex.strings.len()
+                    idx,
+                    m.name_idx,
+                    self.dex.strings.len()
                 );
                 format!("method@{}", m.name_idx)
             };
@@ -1403,7 +1576,9 @@ impl RefResolver for DexRefResolver<'_> {
             } else {
                 warn!(
                     "[resolver] method_ref {}: proto_idx {} OOB (protos.len={})",
-                    idx, m.proto_idx, self.dex.prototypes.len()
+                    idx,
+                    m.proto_idx,
+                    self.dex.prototypes.len()
                 );
                 String::from("()V")
             };
@@ -1411,7 +1586,8 @@ impl RefResolver for DexRefResolver<'_> {
         } else {
             warn!(
                 "[resolver] method_ref {} OOB (methods.len={})",
-                idx, self.dex.methods.len()
+                idx,
+                self.dex.methods.len()
             );
             (
                 format!("Lclass@{};", idx),
@@ -1458,17 +1634,16 @@ pub struct Header {
     pub data_off: u32,
 }
 
-impl Header
-{
-
-    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<Header, DexError>
-    {
+impl Header {
+    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<Header, DexError> {
         if bytes.len() < 0x70 {
             return Err(DexError::new("Not enough bytes for header"));
         }
 
         let magic = <[u8; 8]>::try_from(read_x(bytes, ix, 8)?).unwrap();
-        if magic[0] != 0x64 || magic[1] != 0x65 || magic[2] != 0x78 { return Err(DexError::new("Invalid magic value")); }
+        if magic[0] != 0x64 || magic[1] != 0x65 || magic[2] != 0x78 {
+            return Err(DexError::new("Invalid magic value"));
+        }
 
         Ok(Header {
             magic,
@@ -1497,8 +1672,7 @@ impl Header
         })
     }
 
-    pub fn write(&self, bytes: &mut Vec<u8>) -> usize
-    {
+    pub fn write(&self, bytes: &mut Vec<u8>) -> usize {
         let mut c = 0;
         c += write_x(bytes, &self.magic);
         c += write_u4(bytes, self.checksum);
@@ -1527,62 +1701,52 @@ impl Header
     }
 }
 
-
 #[derive(Debug, Eq, PartialEq, Clone)]
-pub enum DexString
-{
+pub enum DexString {
     Decoded(String),
     Raw(u32, Vec<u8>),
 }
 
-impl DexString
-{
-    pub fn from_string(s: &str) -> DexString
-    {
+impl DexString {
+    pub fn from_string(s: &str) -> DexString {
         DexString::Decoded(s.to_string())
     }
 
-    pub fn to_string(&self) -> Result<String, DexError>
-    {
-        match &self
-        {
+    pub fn to_string(&self) -> Result<String, DexError> {
+        match &self {
             DexString::Decoded(s) => Ok(s.to_string()),
-            DexString::Raw(_,_) => Err(DexError::new(
-                "DexString failed conversion",
-            )),
+            DexString::Raw(_, _) => Err(DexError::new("DexString failed conversion")),
         }
     }
 
-    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<DexString, DexError>
-    {
+    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<DexString, DexError> {
         let utf16_size = read_uleb128(bytes, ix)?;
         let mut v = vec![];
 
-        loop
-        {
+        loop {
             let u = read_u1(bytes, ix)?;
-            if u != 0 { v.push(u); }
-            else { break; }
+            if u != 0 {
+                v.push(u);
+            } else {
+                break;
+            }
         }
 
-        Ok(match cesu8::from_java_cesu8(v.as_slice())
-        {
+        Ok(match cesu8::from_java_cesu8(v.as_slice()) {
             Ok(converted_str) => DexString::Decoded(converted_str.to_string()),
-            _ => DexString::Raw(utf16_size, v)
+            _ => DexString::Raw(utf16_size, v),
         })
     }
 
-    pub fn write(&self, bytes: &mut Vec<u8>) -> usize
-    {
+    pub fn write(&self, bytes: &mut Vec<u8>) -> usize {
         let mut c = 0;
 
-        match self
-        {
+        match self {
             DexString::Raw(utf16_size, v) => {
                 c += write_uleb128(bytes, *utf16_size);
                 c += write_x(bytes, v);
                 c += write_u1(bytes, 0);
-            },
+            }
 
             DexString::Decoded(s) => {
                 let encoded = to_java_cesu8(s).to_vec();
@@ -1595,12 +1759,10 @@ impl DexString
         c
     }
 
-    pub fn is_decoded(&self) -> bool
-    {
+    pub fn is_decoded(&self) -> bool {
         matches!(self, DexString::Decoded(_))
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1608,8 +1770,7 @@ mod tests {
     use std::fs::read;
 
     #[test]
-    fn test_header_from_bytes()
-    {
+    fn test_header_from_bytes() {
         let dex_path = "tests/classes.dex";
         let dex_bytes = read(dex_path).expect("Failed to read DEX file");
         let mut ix = 0;
@@ -1626,25 +1787,52 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_dexfile()
-    {
+    fn test_decode_dexfile() {
         let dex_path = "tests/classes.dex";
         let dex_bytes = read(dex_path).expect("Failed to read DEX file");
         let mut ix = 0;
         let dex = DexFile::read(dex_bytes.as_slice(), &mut ix).expect("Failed read");
-        println!("Strings: {:} [header: {:}]", dex.strings.len(), dex.header.string_ids_size);
-        println!("Types: {:} [header: {:}]", dex.types.len(), dex.header.type_ids_size);
-        println!("Prototypes: {:} [header: {:}]", dex.prototypes.len(), dex.header.proto_ids_size);
-        println!("Fields: {:} [header: {:}]", dex.fields.len(), dex.header.field_ids_size);
-        println!("Methods: {:} [header: {:}]", dex.methods.len(), dex.header.method_ids_size);
-        println!("Classes: {:} [header: {:}]", dex.class_defs.len(), dex.header.class_defs_size);
+        println!(
+            "Strings: {:} [header: {:}]",
+            dex.strings.len(),
+            dex.header.string_ids_size
+        );
+        println!(
+            "Types: {:} [header: {:}]",
+            dex.types.len(),
+            dex.header.type_ids_size
+        );
+        println!(
+            "Prototypes: {:} [header: {:}]",
+            dex.prototypes.len(),
+            dex.header.proto_ids_size
+        );
+        println!(
+            "Fields: {:} [header: {:}]",
+            dex.fields.len(),
+            dex.header.field_ids_size
+        );
+        println!(
+            "Methods: {:} [header: {:}]",
+            dex.methods.len(),
+            dex.header.method_ids_size
+        );
+        println!(
+            "Classes: {:} [header: {:}]",
+            dex.class_defs.len(),
+            dex.header.class_defs_size
+        );
 
         let smali = dex.to_smali().expect("Failed to generate smali");
-        
     }
     #[test]
     fn test_try_item_roundtrip() {
-        let t = TryItem { start_addr: 0x12345678, insn_count: 0x0102, handler_off: 0x2030, handler_idx: None };
+        let t = TryItem {
+            start_addr: 0x12345678,
+            insn_count: 0x0102,
+            handler_off: 0x2030,
+            handler_idx: None,
+        };
         let mut bytes = vec![];
         let written = t.write(&mut bytes);
         assert_eq!(written, 8); // 4 + 2 + 2
@@ -1659,8 +1847,14 @@ mod tests {
     fn test_encoded_catch_handler_roundtrip_no_catch_all() {
         let h = EncodedCatchHandler {
             handlers: vec![
-                EncodedTypeAddrPair { type_idx: 3, addr: 0x00000100 },
-                EncodedTypeAddrPair { type_idx: 7, addr: 0x00002222 },
+                EncodedTypeAddrPair {
+                    type_idx: 3,
+                    addr: 0x00000100,
+                },
+                EncodedTypeAddrPair {
+                    type_idx: 7,
+                    addr: 0x00002222,
+                },
             ],
             catch_all_addr: None,
         };
@@ -1669,7 +1863,8 @@ mod tests {
         let _ = h.write(&mut bytes);
 
         let mut ix = 0;
-        let h2 = EncodedCatchHandler::read(&bytes, &mut ix).expect("EncodedCatchHandler read failed");
+        let h2 =
+            EncodedCatchHandler::read(&bytes, &mut ix).expect("EncodedCatchHandler read failed");
         assert_eq!(ix, bytes.len());
         assert_eq!(h, h2);
     }
@@ -1677,7 +1872,10 @@ mod tests {
     #[test]
     fn test_encoded_catch_handler_roundtrip_with_catch_all() {
         let h = EncodedCatchHandler {
-            handlers: vec![ EncodedTypeAddrPair { type_idx: 42, addr: 0x0000ABCD } ],
+            handlers: vec![EncodedTypeAddrPair {
+                type_idx: 42,
+                addr: 0x0000ABCD,
+            }],
             catch_all_addr: Some(0x00001234),
         };
 
@@ -1687,12 +1885,16 @@ mod tests {
         // First varint should encode a negative count since catch_all is present
         // Decode with the crate's SLEB128 to ensure sign is negative
         let (size_signed, used0) = crate::dex::leb::decode_sleb128(&bytes);
-        assert!(size_signed < 0, "first SLEB128 should be negative when catch_all present");
+        assert!(
+            size_signed < 0,
+            "first SLEB128 should be negative when catch_all present"
+        );
         assert_eq!((-size_signed) as usize, h.handlers.len());
         assert!((1..=5).contains(&used0));
 
         let mut ix = 0;
-        let h2 = EncodedCatchHandler::read(&bytes, &mut ix).expect("EncodedCatchHandler read failed");
+        let h2 =
+            EncodedCatchHandler::read(&bytes, &mut ix).expect("EncodedCatchHandler read failed");
         assert_eq!(ix, bytes.len());
         assert_eq!(h, h2);
     }
@@ -1752,8 +1954,14 @@ mod tests {
 
     #[test]
     fn test_encoded_field_write_differential_encoding() {
-        let f1 = EncodedField { field_idx: 2, access_flags: 0x1 };
-        let f2 = EncodedField { field_idx: 5, access_flags: 0x2 };
+        let f1 = EncodedField {
+            field_idx: 2,
+            access_flags: 0x1,
+        };
+        let f2 = EncodedField {
+            field_idx: 5,
+            access_flags: 0x2,
+        };
         let mut last: FieldId = 0;
         let mut buf = Vec::new();
         f1.write(&mut buf, &mut last);
@@ -1768,8 +1976,18 @@ mod tests {
 
     #[test]
     fn test_encoded_method_write_differential_encoding() {
-        let m1 = EncodedMethod { method_idx: 4, access_flags: 0x100, code_off: 0x30, code: None };
-        let m2 = EncodedMethod { method_idx: 7, access_flags: 0x200, code_off: 0, code: None };
+        let m1 = EncodedMethod {
+            method_idx: 4,
+            access_flags: 0x100,
+            code_off: 0x30,
+            code: None,
+        };
+        let m2 = EncodedMethod {
+            method_idx: 7,
+            access_flags: 0x200,
+            code_off: 0,
+            code: None,
+        };
         let mut last: MethodId = 0;
         let mut buf = Vec::new();
         m1.write(&mut buf, &mut last);
@@ -1805,7 +2023,10 @@ mod tests {
                 handler_idx: Some(0),
             }],
             handlers: vec![EncodedCatchHandler {
-                handlers: vec![EncodedTypeAddrPair { type_idx: 1, addr: 0x10 }],
+                handlers: vec![EncodedTypeAddrPair {
+                    type_idx: 1,
+                    addr: 0x10,
+                }],
                 catch_all_addr: None,
             }],
         };
@@ -1833,7 +2054,10 @@ mod tests {
         assert_eq!(read_u4(&buf, &mut ix).unwrap(), 0);
         assert_eq!(read_u2(&buf, &mut ix).unwrap(), 1);
         let handler_off = read_u2(&buf, &mut ix).unwrap();
-        assert_eq!(handler_off, 1, "expected handler offset after handlers_size prefix");
+        assert_eq!(
+            handler_off, 1,
+            "expected handler offset after handlers_size prefix"
+        );
 
         let handler_count = read_uleb128(&buf, &mut ix).unwrap();
         assert_eq!(handler_count, 1);
@@ -1852,8 +2076,14 @@ mod tests {
     #[test]
     fn test_class_data_item_write_encodes_fields_and_methods() {
         let class_data = ClassDataItem {
-            static_fields: vec![EncodedField { field_idx: 2, access_flags: 0x1 }],
-            instance_fields: vec![EncodedField { field_idx: 4, access_flags: 0x2 }],
+            static_fields: vec![EncodedField {
+                field_idx: 2,
+                access_flags: 0x1,
+            }],
+            instance_fields: vec![EncodedField {
+                field_idx: 4,
+                access_flags: 0x2,
+            }],
             direct_methods: vec![EncodedMethod {
                 method_idx: 5,
                 access_flags: 0x0101,

@@ -2,14 +2,14 @@
 //!
 //! A library for reading and writing Android smali files
 //!
-use std::path::PathBuf;
 use crate::types::{SmaliClass, SmaliError};
+use std::path::PathBuf;
 
-pub mod types;
-mod smali_parse;
-mod smali_write;
 pub mod dex;
 pub mod smali_ops;
+mod smali_parse;
+mod smali_write;
+pub mod types;
 
 /// Recurses a base path, typically a 'smali' folder from apktool returning a Vector of all found smali classes
 ///
@@ -24,17 +24,13 @@ pub mod smali_ops;
 ///  let mut classes = find_smali_files(&p).unwrap();
 ///  println!("{:} smali classes loaded.", classes.len());
 /// ```
-pub fn find_smali_files(dir: &PathBuf) -> Result<Vec<SmaliClass>, SmaliError>
-{
+pub fn find_smali_files(dir: &PathBuf) -> Result<Vec<SmaliClass>, SmaliError> {
     let mut results = vec![];
 
-    for p in dir.read_dir().unwrap()
-    {
-        if let Ok(p) = p
-        {
+    for p in dir.read_dir().unwrap() {
+        if let Ok(p) = p {
             // Directory: recurse sub-directory
-            if let Ok(f) = p.file_type()
-            {
+            if let Ok(f) = p.file_type() {
                 if f.is_dir() {
                     let mut new_dir = dir.clone();
                     new_dir.push(p.file_name());
@@ -42,8 +38,7 @@ pub fn find_smali_files(dir: &PathBuf) -> Result<Vec<SmaliClass>, SmaliError>
                     results.extend(dir_hs);
                 } else {
                     // It's a smali file
-                    if p.file_name().to_str().unwrap().ends_with(".smali")
-                    {
+                    if p.file_name().to_str().unwrap().ends_with(".smali") {
                         let dex_file = SmaliClass::read_from_file(&p.path())?;
                         results.push(dex_file);
                     }
@@ -55,11 +50,10 @@ pub fn find_smali_files(dir: &PathBuf) -> Result<Vec<SmaliClass>, SmaliError>
     Ok(results)
 }
 
-
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use crate::types::{MethodSignature, ObjectIdentifier, SmaliClass, TypeSignature};
+    use std::path::Path;
 
     #[test]
     fn object_identifier_to_jni() {

@@ -11,6 +11,8 @@ The crate can currently decode DEX files into `Vec<SmaliClass>` and exposes a nu
 - `DebugInfo`, `CodeItem`, and `ClassDataItem` writers respect DEX encoding rules: parameter indices use `uleb128p1`, opcode streams honour caller-provided sequences, code items recompute handler offsets / debug-info pointers, and class data emits differential field/method indices alongside code offsets.
 - `src/dex/annotations.rs` & `src/dex/encoded_values.rs`: Annotation directory structures and encoded value writers cover the full set of value tags, with round-trip tests.
 - `Header::write` mirrors the layout of the 0x70-byte header, enabling patch-up once real sizes, checksum, and signature are available.
+- `src/dex/builder.rs`: `DexIndexPools` converts `Vec<SmaliClass>` inputs into canonical string/type/proto/field/method tables with deterministic ordering, crawls method bodies to register literal/Invoke metadata, and can now emit `DexIdTables` plus index-lookup helpers so future layout code can translate descriptors into concrete ID rows.
+- `DexLayoutPlan` (new in `src/dex/builder.rs`) consumes the pools and ID tables to assign section offsets, encode string/type-list payloads into a data-section plan, precompute `ClassDefItem` records (w/ deterministic ordering), emit encoded-array payloads for simple static-value initializers, and drives `build_dex_file_bytes`, which now writes header/ID/data sections, map list, and checksum/signature so we can materialize a skeletal (code-free) DEX file.
 
 ### Partially Implemented / Requires Fixes
 - `CodeItem::write` still assumes 16-bit handler offsets; very large handler tables require defensive checks during layout.
@@ -18,12 +20,11 @@ The crate can currently decode DEX files into `Vec<SmaliClass>` and exposes a nu
 - `Header::write` depends on pre-populated sizes, offsets, Adler-32 checksum, and SHA-1 signature—no code computes these yet.
 
 ### Missing Functionality
-- `ClassDefItem::write` remains a thin helper that expects precomputed offsets; no top-level layout orchestrator exists yet.
-- No machinery to build the string/type/proto/field/method ID pools from Smali structures or to assign indices consistently.
-- No builder stitches together class annotations/static value arrays with the offsets that `ClassDataItem`/`ClassDefItem` expect.
-- No map-list writer, call-site/method-handle section support, or link-section emission.
-- No layout/orchestration layer to place each section, manage padding/alignment, or gather the data-area payloads (type lists, code items, debug info, annotations, static values, etc.).
-- No checksum/signature calculation utilities, and no top-level file assembly (`DexBuilder`, `DexFile::from_smali`, or `write_to_file`).
+- `ClassDefItem::write` remains a thin helper that expects precomputed offsets; the layout plan now emits offsets for interfaces/static values and the new writer drains the planned buffers, but annotation directories, class data, and actual code/static-value blobs still need to be hooked up.
+- Index pools exist (`DexIndexPools`) and can output ID-table payloads, but literal harvesting currently only covers strings/booleans; numeric/static-object literals from encoded arrays still need parser coverage, and the layout plan only handles string data + type lists + encoded static strings/nulls (no annotations, static numeric arrays, or code yet).
+- No builder stitches together class annotations/static value arrays with the offsets that `ClassDataItem`/`ClassDefItem` expect; the new writer emits empty placeholders for those offsets until real payloads exist.
+- Call-site/method-handle section support and link-section emission are still missing.
+- No Smali → bytecode lowering: register allocation, instruction encoding, debug info construction, static initializer emission, or annotation translation onto the DEX structures.
 - No Smali → bytecode lowering: register allocation, instruction encoding, debug info construction, static initializer emission, or annotation translation onto the DEX structures.
 
 ## Key Technical Gaps
@@ -46,18 +47,17 @@ The foundational writers now emit canonical encodings:
 Remaining writer work before layout: integrate static values/annotation offsets when class defs are assembled.
 
 ### Phase 1 – Build Index Pools
-1. Design a `DexIndexPools` (or `DexBuilderContext`) struct that gathers strings, type descriptors, prototypes, fields, and methods across all `SmaliClass` inputs.
-2. Normalise and deduplicate descriptors, ensuring canonical ordering (UTF-16 lexicographic for strings, class order for types, etc.).
-3. Emit mapping tables (`HashMap` or `IndexSet`) for fast lookup when constructing ID sections and other references.
-4. Capture auxiliary data needed for protos (shorty strings), field/method owner type IDs, and annotation type references.
+1. ✅ `DexIndexPools` gathers strings, type descriptors, prototypes, fields, and methods from `SmaliClass` inputs, producing sorted tables that map descriptors to their eventual indices.
+2. 🔄 Pools now also scan `DexOp` bodies for const-string/class usage plus field/method references (including invoke-polymorphic/custom prototypes) and normalize string literal harvesting from field initializers; literal collection still needs to hook into encoded arrays/static values/annotation lowering for numeric/object cases, but the builder now exposes helpers to do so without reindexing.
+3. 🔄 `DexLayoutPlan` allocates deterministic offsets for the ID sections, encodes string/type-list payloads into a planned data section, prepares `ClassDefItem` stubs (including encoded-array blobs for simple static string initializers), and now feeds `build_dex_file_bytes`. Next steps: add annotation directories/class data/static values for other literal types and plug in code/debug info emission.
 
 ### Phase 2 – Layout & Serialization Pipeline
-1. Define section models for each on-disk table (string_ids, type_ids, proto_ids, field_ids, method_ids, class_defs, call_site_ids, method_handles, data section payloads).
-2. Compute sizes and alignment requirements, then assign file offsets in canonical DEX order.
-3. Serialize each section into a single contiguous buffer, recording offsets for later references (e.g., `class_data_off`, `code_off`, `debug_info_off`).
-4. Generate the map list covering every emitted section and append it to the data area.
-5. Finalize the header: populate sizes/offsets, then compute Adler-32 (excluding the first 12 bytes) and SHA-1 (bytes 32..end) checksums and patch them into the header.
-6. Add optional link-data and API-26+ sections when inputs require them.
+1. ✅ Define section models for the core ID tables plus class_defs, and stage data payload builders for string data + TypeList-backed structures (now also covering encoded-array static values for strings/nulls).
+2. ✅ Compute sizes and alignment requirements, then assign file offsets in canonical DEX order (captured in `SectionOffsets`).
+3. ✅ Serialize each section into a single contiguous buffer, recording offsets for later references. `build_dex_file_bytes` now emits header + ID sections + data, appends map list entries for string/type/encoded-array chunks, and patches checksum/signature so the bytes can be parsed as a real (code-less) DEX file.
+4. ✅ Generate the map list covering every emitted section and append it to the data area.
+5. ✅ Finalize the header: populate sizes/offsets, then compute Adler-32 (excluding the first 12 bytes) and SHA-1 (bytes 32..end) checksums and patch them into the header.
+6. 🔜 Add optional link-data and API-26+ sections when inputs require them.
 
 ### Phase 3 – Smali Lowering
 1. Convert `SmaliClass` metadata into DEX class_def/class_data/annotation/static_value structures using the index pools.

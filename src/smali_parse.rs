@@ -39,7 +39,7 @@ pub fn comment(i: &str) -> IResult<&str, ()> {
         (), // Output is thrown away.
         pair(char('#'), is_not("\n\r")),
     )
-        .parse(i)?;
+    .parse(i)?;
     let (o, _) = newline(v)?;
     IResult::Ok((o, ()))
 }
@@ -69,7 +69,7 @@ fn parse_modifiers(smali: &str) -> IResult<&str, Vec<Modifier>> {
         ws(tag("bridge ")),
         ws(tag("constructor ")),
     )))
-        .parse(smali)?;
+    .parse(smali)?;
     let mut v = vec![];
     for m in mods {
         v.push(Modifier::from_str(m.trim()).unwrap());
@@ -362,7 +362,7 @@ fn parse_array_element_with_width(input: &str, width: i32) -> IResult<&str, Arra
         space0,
         preceded(char('#'), take_while1(|c: char| c != '\n')),
     ))
-        .parse(input)?;
+    .parse(input)?;
 
     let element = if let Some(suffix) = opt_suffix {
         match suffix {
@@ -401,11 +401,10 @@ pub fn parse_array_data(input: &str) -> IResult<&str, ArrayDataDirective> {
     let (input, _) = multispace0.parse(input)?;
 
     // Elements separated by any whitespace (spaces/newlines)
-    let (input, elements) = separated_list0(
-        multispace1,
-        |i| parse_array_element_with_width(i, element_width),
-    )
-        .parse(input)?;
+    let (input, elements) = separated_list0(multispace1, |i| {
+        parse_array_element_with_width(i, element_width)
+    })
+    .parse(input)?;
 
     // Trailing whitespace before the end directive
     let (input, _) = multispace0.parse(input)?;
@@ -633,7 +632,7 @@ pub fn parse_method(smali: &str) -> IResult<&str, SmaliMethod> {
             ws(tag::<&str, &str, Error<&str>>(".local")),
             ws(tag::<&str, &str, Error<&str>>(".restart local")),
         ))
-            .parse(input)
+        .parse(input)
         {
             // Skip the rest of the line
             let (o, _) = take_until_eol(o)?;
@@ -856,7 +855,7 @@ mod tests {
             ".annotation build Landroid/annotation/TargetApi;\nvalue = 0x13\n.end annotation",
             false,
         )
-            .unwrap();
+        .unwrap();
         assert!(matches!(a.visibility, AnnotationVisibility::Build));
         assert!(
             matches!(a.annotation_type, TypeSignature::Object(t) if t == ObjectIdentifier::from_java_type("android.annotation.TargetApi"))
@@ -971,7 +970,6 @@ mod tests {
         let (_, ps) = parse_packed_switch(input).unwrap();
         println!("{}", ps.to_string());
     }
-
 
     #[test]
     fn test_parse_param_block_with_annotation() {

@@ -1,9 +1,15 @@
 /* Struct to represent a java object type identifer e.g. java.lang.Object */
 /* They are stored in the smali native (also JNI) format e.g. Ljava/lang/Object; */
 
+use crate::dex::dex_file::{
+    ACC_ABSTRACT, ACC_ANNOTATION, ACC_BRIDGE, ACC_CONSTRUCTOR, ACC_DECLARED_SYNCHRONIZED, ACC_ENUM,
+    ACC_FINAL, ACC_INTERFACE, ACC_NATIVE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
+    ACC_STRICT, ACC_SYNCHRONIZED, ACC_SYNTHETIC, ACC_TRANSIENT, ACC_VARARGS, ACC_VOLATILE,
+};
 pub(crate) use crate::smali_ops::{DexOp, Label};
 use crate::smali_parse::parse_class;
 use crate::smali_write::write_class;
+use crate::smali_write::{write_field, write_method};
 use nom::Err::Failure;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_while};
@@ -18,8 +24,6 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fmt, fs};
-use crate::dex::dex_file::{ACC_ABSTRACT, ACC_ANNOTATION, ACC_BRIDGE, ACC_CONSTRUCTOR, ACC_DECLARED_SYNCHRONIZED, ACC_ENUM, ACC_FINAL, ACC_INTERFACE, ACC_NATIVE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_STRICT, ACC_SYNCHRONIZED, ACC_SYNTHETIC, ACC_TRANSIENT, ACC_VARARGS, ACC_VOLATILE};
-use crate::smali_write::{write_method, write_field};
 
 /* Custom error for our command helper */
 #[derive(Debug)]
@@ -383,7 +387,7 @@ pub(crate) fn parse_typesignature(smali: &str) -> IResult<&str, TypeSignature> {
         tag("+"),
         tag("-"),
     ))
-        .parse(smali);
+    .parse(smali);
     if let Ok((o, t)) = p {
         let ts = match t {
             "Z" => TypeSignature::Bool,
@@ -528,34 +532,69 @@ impl Modifier {
 
 pub struct Modifiers;
 
-impl Modifiers
-{
-    pub fn from_u32(u: u32) -> Vec<Modifier>
-    {
+impl Modifiers {
+    pub fn from_u32(u: u32) -> Vec<Modifier> {
         let mut m = vec![];
-        if u & ACC_PUBLIC > 0 { m.push(Modifier::Public)};
-        if u & ACC_PRIVATE > 0 { m.push(Modifier::Private)};
-        if u & ACC_PROTECTED > 0 { m.push(Modifier::Protected)};
-        if u & ACC_STATIC > 0 { m.push(Modifier::Static)};
-        if u & ACC_FINAL > 0 { m.push(Modifier::Final)};
-        if u & ACC_SYNCHRONIZED > 0 { m.push(Modifier::Synchronized)};
-        if u & ACC_VOLATILE > 0 { m.push(Modifier::Volatile)};
-        if u & ACC_BRIDGE > 0 { m.push(Modifier::Bridge)};
-        if u & ACC_TRANSIENT > 0 { m.push(Modifier::Transient)};
-        if u & ACC_VARARGS > 0 { m.push(Modifier::Varargs)};
-        if u & ACC_NATIVE > 0 { m.push(Modifier::Native)};
-        if u & ACC_INTERFACE > 0 { m.push(Modifier::Interface)};
-        if u & ACC_ABSTRACT > 0 { m.push(Modifier::Abstract)};
-        if u & ACC_STRICT > 0 { m.push(Modifier::Strict)};
-        if u & ACC_SYNTHETIC > 0 { m.push(Modifier::Synthetic)};
-        if u & ACC_ANNOTATION > 0 { m.push(Modifier::Annotation)};
-        if u & ACC_ENUM > 0 { m.push(Modifier::Enum)};
-        if u & ACC_CONSTRUCTOR > 0 { m.push(Modifier::Constructor)};
-        if u & ACC_DECLARED_SYNCHRONIZED > 0 { m.push(Modifier::DeclaredSynchronized)};
+        if u & ACC_PUBLIC > 0 {
+            m.push(Modifier::Public)
+        };
+        if u & ACC_PRIVATE > 0 {
+            m.push(Modifier::Private)
+        };
+        if u & ACC_PROTECTED > 0 {
+            m.push(Modifier::Protected)
+        };
+        if u & ACC_STATIC > 0 {
+            m.push(Modifier::Static)
+        };
+        if u & ACC_FINAL > 0 {
+            m.push(Modifier::Final)
+        };
+        if u & ACC_SYNCHRONIZED > 0 {
+            m.push(Modifier::Synchronized)
+        };
+        if u & ACC_VOLATILE > 0 {
+            m.push(Modifier::Volatile)
+        };
+        if u & ACC_BRIDGE > 0 {
+            m.push(Modifier::Bridge)
+        };
+        if u & ACC_TRANSIENT > 0 {
+            m.push(Modifier::Transient)
+        };
+        if u & ACC_VARARGS > 0 {
+            m.push(Modifier::Varargs)
+        };
+        if u & ACC_NATIVE > 0 {
+            m.push(Modifier::Native)
+        };
+        if u & ACC_INTERFACE > 0 {
+            m.push(Modifier::Interface)
+        };
+        if u & ACC_ABSTRACT > 0 {
+            m.push(Modifier::Abstract)
+        };
+        if u & ACC_STRICT > 0 {
+            m.push(Modifier::Strict)
+        };
+        if u & ACC_SYNTHETIC > 0 {
+            m.push(Modifier::Synthetic)
+        };
+        if u & ACC_ANNOTATION > 0 {
+            m.push(Modifier::Annotation)
+        };
+        if u & ACC_ENUM > 0 {
+            m.push(Modifier::Enum)
+        };
+        if u & ACC_CONSTRUCTOR > 0 {
+            m.push(Modifier::Constructor)
+        };
+        if u & ACC_DECLARED_SYNCHRONIZED > 0 {
+            m.push(Modifier::DeclaredSynchronized)
+        };
         m
     }
 }
-
 
 /// Simple enum to represent annotation visibility: build, runtime, system.
 ///

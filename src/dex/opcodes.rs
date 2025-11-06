@@ -1,6 +1,5 @@
-use once_cell::sync::Lazy;
 use crate::dex::opcode_format::{Format, Opcode, OpcodeFlags, ReferenceType};
-
+use once_cell::sync::Lazy;
 
 pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
     vec![
@@ -47,7 +46,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // MOVE_WIDE_FROM16
         Opcode::new(
@@ -56,7 +57,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format22x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // MOVE_WIDE_16
         Opcode::new(
@@ -65,7 +68,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format32x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // MOVE_OBJECT
         Opcode::new(
@@ -110,7 +115,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format11x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // MOVE_RESULT_OBJECT
         Opcode::new(
@@ -201,7 +208,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format21s,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // CONST_WIDE_32
         Opcode::new(
@@ -210,7 +219,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format31i,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // CONST_WIDE
         Opcode::new(
@@ -219,7 +230,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format51l,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // CONST_WIDE_HIGH16
         Opcode::new(
@@ -228,7 +241,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format21lh,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // CONST_STRING
         Opcode::new(
@@ -422,7 +437,6 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             Format::Format23x,
             OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER,
         ),
-
         // CMPG_DOUBLE
         Opcode::new(
             Opcode::all_versions(0x30),
@@ -565,7 +579,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // AGET_OBJECT
         Opcode::new(
@@ -691,7 +708,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format22c,
-            OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // IGET_OBJECT
         Opcode::new(
@@ -808,7 +828,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format21c,
-            OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::STATIC_FIELD_ACCESSOR,
+            OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::STATIC_FIELD_ACCESSOR,
         ),
         // SGET_WIDE
         Opcode::new(
@@ -817,7 +840,11 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format21c,
-            OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER | OpcodeFlags::STATIC_FIELD_ACCESSOR,
+            OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER
+                | OpcodeFlags::STATIC_FIELD_ACCESSOR,
         ),
         // SGET_OBJECT
         Opcode::new(
@@ -826,7 +853,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format21c,
-            OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::STATIC_FIELD_ACCESSOR,
+            OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::STATIC_FIELD_ACCESSOR,
         ),
         // SGET_BOOLEAN
         Opcode::new(
@@ -835,7 +865,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format21c,
-            OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::STATIC_FIELD_ACCESSOR,
+            OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::STATIC_FIELD_ACCESSOR,
         ),
         // SGET_BYTE
         Opcode::new(
@@ -844,7 +877,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format21c,
-            OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::STATIC_FIELD_ACCESSOR,
+            OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::STATIC_FIELD_ACCESSOR,
         ),
         // SGET_CHAR
         Opcode::new(
@@ -853,7 +889,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format21c,
-            OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::STATIC_FIELD_ACCESSOR,
+            OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::STATIC_FIELD_ACCESSOR,
         ),
         // SGET_SHORT
         Opcode::new(
@@ -862,7 +901,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format21c,
-            OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::STATIC_FIELD_ACCESSOR,
+            OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::STATIC_FIELD_ACCESSOR,
         ),
         // SPUT
         Opcode::new(
@@ -952,7 +994,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Method,
             None,
             Format::Format35c,
-            OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_RESULT | OpcodeFlags::CAN_INITIALIZE_REFERENCE,
+            OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_RESULT
+                | OpcodeFlags::CAN_INITIALIZE_REFERENCE,
         ),
         // INVOKE_STATIC
         Opcode::new(
@@ -997,7 +1042,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Method,
             None,
             Format::Format3rc,
-            OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_RESULT | OpcodeFlags::CAN_INITIALIZE_REFERENCE,
+            OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_RESULT
+                | OpcodeFlags::CAN_INITIALIZE_REFERENCE,
         ),
         // INVOKE_STATIC_RANGE
         Opcode::new(
@@ -1042,7 +1090,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // NOT_LONG
         Opcode::new(
@@ -1051,7 +1101,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // NEG_FLOAT
         Opcode::new(
@@ -1069,7 +1121,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // INT_TO_LONG
         Opcode::new(
@@ -1078,7 +1132,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // INT_TO_FLOAT
         Opcode::new(
@@ -1096,7 +1152,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // LONG_TO_INT
         Opcode::new(
@@ -1123,7 +1181,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // FLOAT_TO_INT
         Opcode::new(
@@ -1141,7 +1201,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // FLOAT_TO_DOUBLE
         Opcode::new(
@@ -1150,7 +1212,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // DOUBLE_TO_INT
         Opcode::new(
@@ -1168,7 +1232,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // DOUBLE_TO_FLOAT
         Opcode::new(
@@ -1312,7 +1378,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // SUB_LONG
         Opcode::new(
@@ -1321,7 +1389,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // MUL_LONG
         Opcode::new(
@@ -1330,7 +1400,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // DIV_LONG
         Opcode::new(
@@ -1339,7 +1411,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // REM_LONG
         Opcode::new(
@@ -1348,7 +1423,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // AND_LONG
         Opcode::new(
@@ -1357,7 +1435,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // OR_LONG
         Opcode::new(
@@ -1366,7 +1446,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // XOR_LONG
         Opcode::new(
@@ -1375,7 +1457,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // SHL_LONG
         Opcode::new(
@@ -1384,7 +1468,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // SHR_LONG
         Opcode::new(
@@ -1393,7 +1479,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // USHR_LONG
         Opcode::new(
@@ -1402,7 +1490,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // ADD_FLOAT
         Opcode::new(
@@ -1456,7 +1546,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // SUB_DOUBLE
         Opcode::new(
@@ -1465,7 +1557,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // MUL_DOUBLE
         Opcode::new(
@@ -1474,7 +1568,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // DIV_DOUBLE
         Opcode::new(
@@ -1483,7 +1579,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // REM_DOUBLE
         Opcode::new(
@@ -1492,7 +1590,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format23x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // ADD_INT_2ADDR
         Opcode::new(
@@ -1600,7 +1700,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // SUB_LONG_2ADDR
         Opcode::new(
@@ -1609,7 +1711,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // MUL_LONG_2ADDR
         Opcode::new(
@@ -1618,7 +1722,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // DIV_LONG_2ADDR
         Opcode::new(
@@ -1627,7 +1733,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // REM_LONG_2ADDR
         Opcode::new(
@@ -1636,7 +1745,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // AND_LONG_2ADDR
         Opcode::new(
@@ -1645,7 +1757,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // OR_LONG_2ADDR
         Opcode::new(
@@ -1654,7 +1768,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // XOR_LONG_2ADDR
         Opcode::new(
@@ -1663,7 +1779,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // SHL_LONG_2ADDR
         Opcode::new(
@@ -1672,7 +1790,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // SHR_LONG_2ADDR
         Opcode::new(
@@ -1681,7 +1801,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // USHR_LONG_2ADDR
         Opcode::new(
@@ -1690,7 +1812,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // ADD_FLOAT_2ADDR
         Opcode::new(
@@ -1744,7 +1868,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // SUB_DOUBLE_2ADDR
         Opcode::new(
@@ -1753,7 +1879,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // MUL_DOUBLE_2ADDR
         Opcode::new(
@@ -1762,7 +1890,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // DIV_DOUBLE_2ADDR
         Opcode::new(
@@ -1771,7 +1901,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // REM_DOUBLE_2ADDR
         Opcode::new(
@@ -1780,7 +1912,9 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format12x,
-            OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // ADD_INT_LIT16
         Opcode::new(
@@ -1960,7 +2094,11 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format22c,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::VOLATILE_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::VOLATILE_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER,
         ),
         // IPUT_VOLATILE
         Opcode::new(
@@ -1969,7 +2107,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format22c,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::VOLATILE_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::VOLATILE_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE,
         ),
         // SGET_VOLATILE
         Opcode::new(
@@ -1978,7 +2119,12 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format21c,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::VOLATILE_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::STATIC_FIELD_ACCESSOR,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::VOLATILE_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::STATIC_FIELD_ACCESSOR,
         ),
         // SPUT_VOLATILE
         Opcode::new(
@@ -1987,7 +2133,11 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format21c,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::VOLATILE_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::STATIC_FIELD_ACCESSOR,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::VOLATILE_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::STATIC_FIELD_ACCESSOR,
         ),
         // IGET_OBJECT_VOLATILE
         Opcode::new(
@@ -1996,7 +2146,11 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format22c,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::VOLATILE_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::VOLATILE_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER,
         ),
         // IGET_WIDE_VOLATILE
         Opcode::new(
@@ -2005,7 +2159,12 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format22c,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::VOLATILE_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::VOLATILE_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // IPUT_WIDE_VOLATILE
         Opcode::new(
@@ -2014,7 +2173,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format22c,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::VOLATILE_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::VOLATILE_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE,
         ),
         // SGET_WIDE_VOLATILE
         Opcode::new(
@@ -2023,7 +2185,13 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format21c,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::VOLATILE_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER | OpcodeFlags::STATIC_FIELD_ACCESSOR,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::VOLATILE_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER
+                | OpcodeFlags::STATIC_FIELD_ACCESSOR,
         ),
         // SPUT_WIDE_VOLATILE
         Opcode::new(
@@ -2032,7 +2200,11 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format21c,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::VOLATILE_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::STATIC_FIELD_ACCESSOR,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::VOLATILE_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::STATIC_FIELD_ACCESSOR,
         ),
         // THROW_VERIFICATION_ERROR
         Opcode::new(
@@ -2050,7 +2222,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format35mi,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_RESULT,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_RESULT,
         ),
         // EXECUTE_INLINE_RANGE
         Opcode::new(
@@ -2059,7 +2234,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format3rmi,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_RESULT,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_RESULT,
         ),
         // INVOKE_DIRECT_EMPTY
         Opcode::new(
@@ -2068,9 +2246,12 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Method,
             None,
             Format::Format35c,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_RESULT | OpcodeFlags::CAN_INITIALIZE_REFERENCE,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_RESULT
+                | OpcodeFlags::CAN_INITIALIZE_REFERENCE,
         ),
-
         // INVOKE_OBJECT_INIT_RANGE
         Opcode::new(
             Opcode::first_api(0xf0, 14),
@@ -2078,11 +2259,18 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Method,
             None,
             Format::Format3rc,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_RESULT | OpcodeFlags::CAN_INITIALIZE_REFERENCE,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_RESULT
+                | OpcodeFlags::CAN_INITIALIZE_REFERENCE,
         ),
         // RETURN_VOID_BARRIER
         Opcode::new(
-            Opcode::combine(Opcode::first_api(0xf1, 11), Opcode::last_art_version(0x73, 59)),
+            Opcode::combine(
+                Opcode::first_api(0xf1, 11),
+                Opcode::last_art_version(0x73, 59),
+            ),
             "return-void-barrier",
             ReferenceType::None,
             None,
@@ -2105,7 +2293,11 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format22cs,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::QUICK_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::QUICK_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER,
         ),
         // IGET_WIDE_QUICK
         Opcode::new(
@@ -2114,7 +2306,12 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format22cs,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::QUICK_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::SETS_WIDE_REGISTER,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::QUICK_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::SETS_WIDE_REGISTER,
         ),
         // IGET_OBJECT_QUICK
         Opcode::new(
@@ -2123,7 +2320,11 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format22cs,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::QUICK_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::QUICK_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER,
         ),
         // IPUT_QUICK
         Opcode::new(
@@ -2132,7 +2333,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format22cs,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::QUICK_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::QUICK_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE,
         ),
         // IPUT_WIDE_QUICK
         Opcode::new(
@@ -2141,7 +2345,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format22cs,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::QUICK_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::QUICK_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE,
         ),
         // IPUT_OBJECT_QUICK
         Opcode::new(
@@ -2150,7 +2357,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format22cs,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::QUICK_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::QUICK_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE,
         ),
         // IPUT_BOOLEAN_QUICK
         Opcode::new(
@@ -2159,7 +2369,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format22cs,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::QUICK_FIELD_ACCESSOR,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::QUICK_FIELD_ACCESSOR,
         ),
         // IPUT_BYTE_QUICK
         Opcode::new(
@@ -2168,7 +2381,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format22cs,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::QUICK_FIELD_ACCESSOR,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::QUICK_FIELD_ACCESSOR,
         ),
         // IPUT_CHAR_QUICK
         Opcode::new(
@@ -2177,7 +2393,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format22cs,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::QUICK_FIELD_ACCESSOR,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::QUICK_FIELD_ACCESSOR,
         ),
         // IPUT_SHORT_QUICK
         Opcode::new(
@@ -2186,7 +2405,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format22cs,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::QUICK_FIELD_ACCESSOR,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::QUICK_FIELD_ACCESSOR,
         ),
         // IGET_BOOLEAN_QUICK
         Opcode::new(
@@ -2195,7 +2417,11 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format22cs,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::QUICK_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::QUICK_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER,
         ),
         // IGET_BYTE_QUICK
         Opcode::new(
@@ -2204,7 +2430,11 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format22cs,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::QUICK_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::QUICK_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER,
         ),
         // IGET_CHAR_QUICK
         Opcode::new(
@@ -2213,7 +2443,11 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format22cs,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::QUICK_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::QUICK_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER,
         ),
         // IGET_SHORT_QUICK
         Opcode::new(
@@ -2222,7 +2456,11 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format22cs,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::QUICK_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::QUICK_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER,
         ),
         // INVOKE_VIRTUAL_QUICK
         Opcode::new(
@@ -2231,7 +2469,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format35ms,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_RESULT,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_RESULT,
         ),
         // INVOKE_VIRTUAL_QUICK_RANGE
         Opcode::new(
@@ -2240,7 +2481,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format3rms,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_RESULT,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_RESULT,
         ),
         // INVOKE_SUPER_QUICK
         Opcode::new(
@@ -2249,7 +2493,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format35ms,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_RESULT,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_RESULT,
         ),
         // INVOKE_SUPER_QUICK_RANGE
         Opcode::new(
@@ -2258,7 +2505,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::None,
             None,
             Format::Format3rms,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_RESULT,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_RESULT,
         ),
         // IPUT_OBJECT_VOLATILE
         Opcode::new(
@@ -2267,7 +2517,10 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format22c,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::VOLATILE_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::VOLATILE_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE,
         ),
         // SGET_OBJECT_VOLATILE
         Opcode::new(
@@ -2276,7 +2529,12 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format21c,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::VOLATILE_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER | OpcodeFlags::STATIC_FIELD_ACCESSOR,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::VOLATILE_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::SETS_REGISTER
+                | OpcodeFlags::STATIC_FIELD_ACCESSOR,
         ),
         // SPUT_OBJECT_VOLATILE
         Opcode::new(
@@ -2285,7 +2543,11 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             ReferenceType::Field,
             None,
             Format::Format21c,
-            OpcodeFlags::ODEX_ONLY | OpcodeFlags::VOLATILE_FIELD_ACCESSOR | OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::STATIC_FIELD_ACCESSOR,
+            OpcodeFlags::ODEX_ONLY
+                | OpcodeFlags::VOLATILE_FIELD_ACCESSOR
+                | OpcodeFlags::CAN_THROW
+                | OpcodeFlags::CAN_CONTINUE
+                | OpcodeFlags::STATIC_FIELD_ACCESSOR,
         ),
         // PACKED_SWITCH_PAYLOAD
         Opcode::new_no_flags(
@@ -2361,6 +2623,6 @@ pub static OPCODES: Lazy<Vec<Opcode>> = Lazy::new(|| {
             None,
             Format::Format21c,
             OpcodeFlags::CAN_THROW | OpcodeFlags::CAN_CONTINUE | OpcodeFlags::SETS_REGISTER,
-        )
+        ),
     ]
 });
