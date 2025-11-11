@@ -114,7 +114,7 @@ fn parse_source_line(smali: &str) -> IResult<&str, String> {
     Ok((input, class_type.trim().to_string()))
 }
 
-fn parse_java_array(smali: &str) -> IResult<&str, Vec<String>> {
+pub(crate) fn parse_java_array(smali: &str) -> IResult<&str, Vec<String>> {
     let (o, _) = ws(tag("{")).parse(smali)?;
     // Array of strings
     let mut v = vec![];

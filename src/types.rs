@@ -727,7 +727,7 @@ impl fmt::Display for CatchDirective {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ArrayDataElement {
     Byte(i8),
     Short(i16),
@@ -751,7 +751,7 @@ impl fmt::Display for ArrayDataElement {
 }
 
 /// Represents a .array-data directive.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ArrayDataDirective {
     /// The element width as specified in the header.
     pub element_width: i32,
@@ -775,7 +775,7 @@ impl fmt::Display for ArrayDataDirective {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PackedSwitchDirective {
     pub first_key: i32,
     pub targets: Vec<Label>,
@@ -795,7 +795,7 @@ impl fmt::Display for PackedSwitchDirective {
 }
 
 /// An entry in a sparse-switch directive: a key and its corresponding target label.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SparseSwitchEntry {
     pub key: i32,
     pub target: Label,
@@ -809,7 +809,7 @@ impl fmt::Display for SparseSwitchEntry {
 }
 
 /// The sparse-switch directive.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SparseSwitchDirective {
     pub entries: Vec<SparseSwitchEntry>,
 }

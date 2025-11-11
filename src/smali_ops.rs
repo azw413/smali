@@ -1898,13 +1898,17 @@ fn parse_register_range(input: &str) -> IResult<&str, RegisterRange> {
     Ok((input, RegisterRange { start, end }))
 }
 
+fn parse_proto_descriptor(input: &str) -> IResult<&str, String> {
+    parse_methodsignature(input).map(|(rest, sig)| (rest, sig.to_jni()))
+}
+
 fn parse_invoke_polymorphic(input: &str) -> IResult<&str, DexOp> {
     let (input, _) = space1(input)?;
     let (input, registers) = parse_register_list(input)?;
     let (input, _) = delimited(space0, char(','), space0).parse(input)?;
     let (input, method) = parse_method_ref(input)?;
     let (input, _) = delimited(space0, char(','), space0).parse(input)?;
-    let (input, proto) = alphanumeric1(input)?;
+    let (input, proto) = parse_proto_descriptor(input)?;
     Ok((
         input,
         DexOp::InvokePolymorphic {
@@ -1921,7 +1925,7 @@ fn parse_invoke_polymorphic_range(input: &str) -> IResult<&str, DexOp> {
     let (input, _) = delimited(space0, char(','), space0).parse(input)?;
     let (input, method) = parse_method_ref(input)?;
     let (input, _) = delimited(space0, char(','), space0).parse(input)?;
-    let (input, proto) = alphanumeric1(input)?;
+    let (input, proto) = parse_proto_descriptor(input)?;
     Ok((
         input,
         DexOp::InvokePolymorphicRange {
@@ -1936,12 +1940,12 @@ fn parse_invoke_custom(input: &str) -> IResult<&str, DexOp> {
     let (input, _) = space1(input)?;
     let (input, registers) = parse_register_list(input)?;
     let (input, _) = delimited(space0, char(','), space0).parse(input)?;
-    let (input, call_site) = alphanumeric1(input)?;
+    let (input, call_site) = parse_call_site_literal(input)?;
     Ok((
         input,
         DexOp::InvokeCustom {
             registers,
-            call_site: call_site.to_owned(),
+            call_site,
         },
     ))
 }
@@ -1950,14 +1954,19 @@ fn parse_invoke_custom_range(input: &str) -> IResult<&str, DexOp> {
     let (input, _) = space1(input)?;
     let (input, range) = parse_register_range(input)?;
     let (input, _) = delimited(space0, char(','), space0).parse(input)?;
-    let (input, call_site) = alphanumeric1(input)?;
-    Ok((
-        input,
-        DexOp::InvokeCustomRange {
-            range,
-            call_site: call_site.to_owned(),
-        },
-    ))
+    let (input, call_site) = parse_call_site_literal(input)?;
+    Ok((input, DexOp::InvokeCustomRange { range, call_site }))
+}
+
+fn parse_call_site_literal(input: &str) -> IResult<&str, String> {
+    let (input, _) = space0(input)?;
+    if input.starts_with('"') {
+        let (input, literal) = parse_string_literal(input)?;
+        return Ok((input, literal));
+    }
+
+    let (input, ident) = alphanumeric1(input)?;
+    Ok((input, ident.to_owned()))
 }
 
 fn parse_invoke<F>(constructor: F, input: &str) -> IResult<&str, DexOp>
@@ -2154,8 +2163,12 @@ where
     let (input, literal) = match r {
         IResult::Ok(_) => parse_string_literal(input)?,
         IResult::Err(_) => {
-            let (i, ts) = parse_typesignature(input)?;
-            (i, ts.to_jni())
+            if let Ok((i, sig)) = parse_methodsignature(input) {
+                (i, sig.to_jni())
+            } else {
+                let (i, ts) = parse_typesignature(input)?;
+                (i, ts.to_jni())
+            }
         }
     };
     Ok((input, constructor(reg, literal)))
@@ -2606,6 +2619,32 @@ mod tests {
         let (rest, mr) = parse_method_ref(input).unwrap();
         assert!(rest.trim().is_empty());
         assert_eq!(mr.to_string(), input);
+    }
+
+    #[test]
+    fn parse_invoke_polymorphic_reads_full_descriptor() {
+        let input = r#"invoke-polymorphic {v0, v1}, Ljava/lang/invoke/MethodHandle;->invokeExact(Ljava/lang/Object;)Ljava/lang/Object;, ([Ljava/lang/Object;)V"#;
+        let (rest, op) = parse_op(input).unwrap();
+        assert!(rest.trim().is_empty());
+        match op {
+            DexOp::InvokePolymorphic { proto, .. } => {
+                assert_eq!(proto, "([Ljava/lang/Object;)V");
+            }
+            other => panic!("unexpected op: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_invoke_polymorphic_range_reads_full_descriptor() {
+        let input = r#"invoke-polymorphic/range {v2 .. v4}, Ljava/lang/invoke/MethodHandle;->invoke(Ljava/lang/Object;)Ljava/lang/Object;, (II)I"#;
+        let (rest, op) = parse_op(input).unwrap();
+        assert!(rest.trim().is_empty());
+        match op {
+            DexOp::InvokePolymorphicRange { proto, .. } => {
+                assert_eq!(proto, "(II)I");
+            }
+            other => panic!("unexpected op: {other:?}"),
+        }
     }
 
     #[test]

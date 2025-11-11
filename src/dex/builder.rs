@@ -1,14 +1,19 @@
+use crate::dex::annotations::AnnotationItem;
 use crate::dex::dex_file::{
-    ClassDefItem, DEX_FILE_MAGIC, DexString, ENDIAN_CONSTANT, FieldItem, Header, MethodItem,
-    NO_INDEX, PrototypeItem, TypeList,
+    ClassDataItem, ClassDefItem, DEX_FILE_MAGIC, DexString, ENDIAN_CONSTANT, EncodedField,
+    EncodedMethod, FieldItem, Header, MethodItem, NO_INDEX, PrototypeItem, TypeList,
 };
-use crate::dex::encoded_values::{EncodedValue, write_encoded_array};
+use crate::dex::encoded_values::{
+    AnnotationElement as DexAnnotationElement, EncodedAnnotation, EncodedValue, write_encoded_array,
+};
 use crate::dex::error::DexError;
 use crate::dex::{write_u2, write_u4};
 use crate::smali_ops::{DexOp, FieldRef, MethodRef, parse_literal_int};
+use crate::smali_parse::parse_java_array;
 use crate::types::{
-    AnnotationValue, CatchDirective, MethodSignature, Modifier, ObjectIdentifier, SmaliAnnotation,
-    SmaliClass, SmaliField, SmaliMethod, SmaliOp, TypeSignature,
+    AnnotationValue, AnnotationVisibility, ArrayDataDirective, ArrayDataElement, CatchDirective,
+    MethodSignature, Modifier, ObjectIdentifier, SmaliAnnotation, SmaliClass, SmaliField,
+    SmaliMethod, SmaliOp, TypeSignature, parse_methodsignature, parse_typesignature,
 };
 
 use std::collections::{BTreeSet, HashMap};
@@ -24,10 +29,16 @@ const TYPE_PROTO_ID_ITEM: u16 = 0x0003;
 const TYPE_FIELD_ID_ITEM: u16 = 0x0004;
 const TYPE_METHOD_ID_ITEM: u16 = 0x0005;
 const TYPE_CLASS_DEF_ITEM: u16 = 0x0006;
+const TYPE_CLASS_DATA_ITEM: u16 = 0x2000;
 const TYPE_MAP_LIST: u16 = 0x1000;
 const TYPE_TYPE_LIST: u16 = 0x1001;
+const TYPE_ANNOTATION_SET_REF_LIST: u16 = 0x1002;
+const TYPE_ANNOTATION_SET_ITEM: u16 = 0x1003;
 const TYPE_STRING_DATA_ITEM: u16 = 0x2002;
+const TYPE_ANNOTATION_ITEM: u16 = 0x2003;
+const TYPE_ANNOTATIONS_DIRECTORY_ITEM: u16 = 0x2006;
 const TYPE_ENCODED_ARRAY_ITEM: u16 = 0x2005;
+const ARRAY_DATA_SIGNATURE: u16 = 0x0300;
 
 /// Canonicalized string/type/proto/field/method tables built from a set of `SmaliClass` items.
 ///
@@ -71,6 +82,7 @@ pub struct DexLayoutPlan {
     pub class_defs: Vec<ClassDefPlan>,
     pub string_data_offsets: Vec<u32>,
     pub proto_parameter_offsets: Vec<Option<u32>>,
+    pub array_data_offsets: HashMap<String, u32>,
 }
 
 /// Build a binary DEX file from the provided classes, returning the serialized bytes.
@@ -101,6 +113,7 @@ pub struct SectionOffsets {
 pub struct ClassDefPlan {
     pub class_idx: u32,
     pub item: ClassDefItem,
+    pub class_data: Option<ClassDataItem>,
     pub offsets: ClassDefOffsets,
 }
 
@@ -125,6 +138,19 @@ struct DataChunk {
     align: u32,
     offset: u32,
     bytes: Vec<u8>,
+    fixups: Vec<ChunkFixup>,
+}
+
+#[derive(Debug, Clone)]
+struct ChunkFixup {
+    position: usize,
+    target_chunk: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ArrayDataPlanEntry {
+    label: String,
+    chunk_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,14 +158,29 @@ enum DataChunkKind {
     StringData,
     TypeList,
     EncodedArray,
+    ClassData,
+    AnnotationItem,
+    AnnotationSet,
+    AnnotationSetRefList,
+    AnnotationsDirectory,
+    ArrayData,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum DataChunkOwner {
     StringData(usize),
     ProtoParameters(usize),
     ClassInterfaces(usize),
     ClassStaticValues(usize),
+    ClassData(usize),
+    AnnotationItem,
+    AnnotationSet,
+    AnnotationSetRefList,
+    ClassAnnotations {
+        class_idx: usize,
+        directory_rel_offset: u32,
+    },
+    ArrayData(String),
 }
 
 #[derive(Debug)]
@@ -352,6 +393,7 @@ impl ClassDefPlan {
         ClassDefPlan {
             class_idx,
             item,
+            class_data: None,
             offsets: ClassDefOffsets::default(),
         }
     }
@@ -398,6 +440,30 @@ impl DataSectionPlan {
         out
     }
 
+    fn collect_annotation_directory_offsets(&self, count: usize, base: u32) -> Vec<Option<u32>> {
+        let mut out = vec![None; count];
+        for chunk in &self.chunks {
+            if let DataChunkOwner::ClassAnnotations {
+                class_idx,
+                directory_rel_offset,
+            } = chunk.owner
+            {
+                out[class_idx] = Some(base + chunk.offset + directory_rel_offset);
+            }
+        }
+        out
+    }
+
+    fn collect_class_data_offsets(&self, count: usize, base: u32) -> Vec<Option<u32>> {
+        let mut out = vec![None; count];
+        for chunk in &self.chunks {
+            if let DataChunkOwner::ClassData(idx) = chunk.owner {
+                out[idx] = Some(base + chunk.offset);
+            }
+        }
+        out
+    }
+
     fn emit_bytes(&self) -> Vec<u8> {
         let mut chunks = self.chunks.clone();
         chunks.sort_by_key(|chunk| chunk.offset);
@@ -411,6 +477,21 @@ impl DataSectionPlan {
 
     fn chunks(&self) -> &[DataChunk] {
         &self.chunks
+    }
+
+    fn apply_fixups(&mut self, base: u32) {
+        let offsets: Vec<u32> = self.chunks.iter().map(|c| c.offset).collect();
+        for (_idx, chunk) in self.chunks.iter_mut().enumerate() {
+            for fixup in &chunk.fixups {
+                let absolute = base + offsets[fixup.target_chunk];
+                overwrite_u32(&mut chunk.bytes, fixup.position, absolute);
+            }
+            // Clear fixups after applying to avoid double application if called again.
+            // (Not strictly necessary but keeps future calls idempotent.)
+            if !chunk.fixups.is_empty() {
+                chunk.fixups.clear();
+            }
+        }
     }
 }
 
@@ -433,6 +514,7 @@ impl DataSectionBuilder {
                 align: 1,
                 offset: 0,
                 bytes,
+                fixups: Vec::new(),
             });
         }
     }
@@ -450,6 +532,7 @@ impl DataSectionBuilder {
                 align: 4,
                 offset: 0,
                 bytes,
+                fixups: Vec::new(),
             });
         }
     }
@@ -468,6 +551,7 @@ impl DataSectionBuilder {
                     align: 4,
                     offset: 0,
                     bytes,
+                    fixups: Vec::new(),
                 });
             }
         }
@@ -482,6 +566,20 @@ impl DataSectionBuilder {
             align: 1,
             offset: 0,
             bytes,
+            fixups: Vec::new(),
+        });
+    }
+
+    fn add_class_data(&mut self, class_idx: usize, class_data: &ClassDataItem) {
+        let mut bytes = Vec::new();
+        class_data.write(&mut bytes);
+        self.chunks.push(DataChunk {
+            owner: DataChunkOwner::ClassData(class_idx),
+            kind: DataChunkKind::ClassData,
+            align: 1,
+            offset: 0,
+            bytes,
+            fixups: Vec::new(),
         });
     }
 
@@ -496,6 +594,12 @@ impl DataSectionBuilder {
             chunks: self.chunks,
             size: cursor,
         }
+    }
+
+    fn push_chunk(&mut self, chunk: DataChunk) -> usize {
+        let idx = self.chunks.len();
+        self.chunks.push(chunk);
+        idx
     }
 }
 
@@ -513,6 +617,7 @@ impl DexLayoutPlan {
         let mut data_builder = DataSectionBuilder::new();
         data_builder.add_string_data(&ids.strings);
         data_builder.add_proto_parameter_lists(&ids.proto_ids);
+        let mut array_data_entries = Vec::new();
         for class in classes {
             let class_idx = pools
                 .type_index(&class.name.as_jni_type())
@@ -524,12 +629,30 @@ impl DexLayoutPlan {
                 data_builder.add_static_values(plan_idx, &values);
                 class_defs[plan_idx].item.static_values = Some(values);
             }
+            if let Some(class_data) = build_class_data_item(class, &pools)? {
+                class_defs[plan_idx].class_data = Some(class_data);
+                if let Some(data) = class_defs[plan_idx].class_data.as_ref() {
+                    data_builder.add_class_data(plan_idx, data);
+                }
+            }
+            build_class_annotations(class, plan_idx, &pools, &mut data_builder)?;
+            collect_array_data_chunks(class, &mut data_builder, &mut array_data_entries)?;
         }
         data_builder.add_class_interface_lists(&class_defs);
-        let data_section = data_builder.finish();
+        let mut data_section = data_builder.finish();
 
         let sections = SectionOffsets::new(&ids, class_defs.len() as u32, data_section.size);
         let data_base = sections.data_off;
+
+        data_section.apply_fixups(data_base);
+        let mut array_data_offsets = HashMap::new();
+        for entry in array_data_entries {
+            let chunk = data_section
+                .chunks()
+                .get(entry.chunk_index)
+                .ok_or_else(|| DexError::new("array data chunk missing"))?;
+            array_data_offsets.insert(entry.label, data_base + chunk.offset);
+        }
 
         let string_data_offsets = data_section.collect_string_offsets(ids.strings.len(), data_base);
         let proto_parameter_offsets =
@@ -549,6 +672,22 @@ impl DexLayoutPlan {
             }
         }
 
+        let class_data_offsets =
+            data_section.collect_class_data_offsets(class_defs.len(), data_base);
+        for (plan, offset) in class_defs.iter_mut().zip(class_data_offsets.into_iter()) {
+            if let Some(off) = offset {
+                plan.offsets.class_data_off = off;
+            }
+        }
+
+        let annotation_offsets =
+            data_section.collect_annotation_directory_offsets(class_defs.len(), data_base);
+        for (plan, offset) in class_defs.iter_mut().zip(annotation_offsets.into_iter()) {
+            if let Some(off) = offset {
+                plan.offsets.annotations_off = off;
+            }
+        }
+
         Ok(DexLayoutPlan {
             pools,
             ids,
@@ -557,6 +696,7 @@ impl DexLayoutPlan {
             class_defs,
             string_data_offsets,
             proto_parameter_offsets,
+            array_data_offsets,
         })
     }
 }
@@ -706,6 +846,55 @@ fn build_map_items(plan: &DexLayoutPlan, map_off: u32) -> Vec<MapItem> {
             TYPE_ENCODED_ARRAY_ITEM,
             encoded_count,
             encoded_offset.unwrap(),
+        ));
+    }
+
+    let (class_data_count, class_data_offset) =
+        chunk_stats_by_kind(&plan, DataChunkKind::ClassData);
+    if class_data_count > 0 {
+        items.push(MapItem::new(
+            TYPE_CLASS_DATA_ITEM,
+            class_data_count,
+            class_data_offset.unwrap(),
+        ));
+    }
+
+    let (set_ref_count, set_ref_offset) =
+        chunk_stats_by_kind(&plan, DataChunkKind::AnnotationSetRefList);
+    if set_ref_count > 0 {
+        items.push(MapItem::new(
+            TYPE_ANNOTATION_SET_REF_LIST,
+            set_ref_count,
+            set_ref_offset.unwrap(),
+        ));
+    }
+
+    let (set_count, set_offset) = chunk_stats_by_kind(&plan, DataChunkKind::AnnotationSet);
+    if set_count > 0 {
+        items.push(MapItem::new(
+            TYPE_ANNOTATION_SET_ITEM,
+            set_count,
+            set_offset.unwrap(),
+        ));
+    }
+
+    let (annotation_item_count, annotation_item_offset) =
+        chunk_stats_by_kind(&plan, DataChunkKind::AnnotationItem);
+    if annotation_item_count > 0 {
+        items.push(MapItem::new(
+            TYPE_ANNOTATION_ITEM,
+            annotation_item_count,
+            annotation_item_offset.unwrap(),
+        ));
+    }
+
+    let (directory_count, directory_offset) =
+        chunk_stats_by_kind(&plan, DataChunkKind::AnnotationsDirectory);
+    if directory_count > 0 {
+        items.push(MapItem::new(
+            TYPE_ANNOTATIONS_DIRECTORY_ITEM,
+            directory_count,
+            directory_offset.unwrap(),
         ));
     }
 
@@ -1015,11 +1204,7 @@ impl DexPoolBuilder {
     fn collect_field(&mut self, class_desc: &str, field: &SmaliField) {
         self.strings.insert(&field.name);
         if let Some(init) = &field.initial_value {
-            if let Some(parsed) = parse_smali_string_literal(init) {
-                self.strings.insert(parsed);
-            } else {
-                self.strings.insert(init);
-            }
+            self.collect_literal(init);
         }
         self.collect_annotations(&field.annotations);
 
@@ -1121,9 +1306,11 @@ impl DexPoolBuilder {
             }
             DexOp::InvokeCustom { call_site, .. } | DexOp::InvokeCustomRange { call_site, .. } => {
                 self.strings.insert(call_site);
+                self.collect_call_site_literal(call_site);
             }
             DexOp::ConstMethodHandle { method_handle, .. } => {
                 self.strings.insert(method_handle);
+                self.collect_method_handle_literal(method_handle);
             }
             DexOp::ConstMethodType { proto, .. } => {
                 self.collect_proto_descriptor(proto);
@@ -1187,10 +1374,26 @@ impl DexPoolBuilder {
 
     fn collect_annotation_value(&mut self, value: &AnnotationValue) {
         match value {
-            AnnotationValue::Single(v) => self.strings.insert(v),
+            AnnotationValue::Single(v) => {
+                if let Some(parsed) = parse_smali_string_literal(v) {
+                    self.strings.insert(parsed);
+                } else {
+                    self.strings.insert(v);
+                    if looks_like_type_descriptor(v.trim()) {
+                        self.insert_type_descriptor(v.trim());
+                    }
+                }
+            }
             AnnotationValue::Array(values) => {
                 for v in values {
-                    self.strings.insert(v);
+                    if let Some(parsed) = parse_smali_string_literal(v) {
+                        self.strings.insert(parsed);
+                    } else {
+                        self.strings.insert(v);
+                        if looks_like_type_descriptor(v.trim()) {
+                            self.insert_type_descriptor(v.trim());
+                        }
+                    }
                 }
             }
             AnnotationValue::SubAnnotation(sub) => self.collect_annotation(sub),
@@ -1198,8 +1401,51 @@ impl DexPoolBuilder {
                 let desc = canonical_object_descriptor(obj);
                 self.insert_type_descriptor(&desc);
                 self.strings.insert(name);
+                let key = FieldKey::new(desc.clone(), name.clone(), desc);
+                self.field_keys.insert(key);
             }
         }
+    }
+
+    fn collect_method_handle_literal(&mut self, literal: &str) {
+        if let Some(parsed) = parse_method_handle_descriptor(literal) {
+            match parsed {
+                ParsedMemberRef::Method(method) => self.collect_parsed_method(&method),
+                ParsedMemberRef::Field(field) => self.collect_parsed_field(&field),
+            }
+        }
+    }
+
+    fn collect_call_site_literal(&mut self, literal: &str) {
+        if let Some(descriptor) = parse_call_site_descriptor(literal) {
+            self.collect_parsed_method(&descriptor.bootstrap);
+            self.strings.insert(&descriptor.method_name);
+            let proto_key = PrototypeKey::from_signature(&descriptor.method_proto);
+            self.register_proto_components(&proto_key);
+            self.proto_keys.insert(proto_key);
+        }
+    }
+
+    fn collect_parsed_method(&mut self, method: &ParsedMethodRef) {
+        self.insert_type_descriptor(&method.class_desc);
+        self.strings.insert(&method.name);
+        let proto_key = PrototypeKey::from_signature(&method.proto);
+        self.register_proto_components(&proto_key);
+        self.proto_keys.insert(proto_key.clone());
+        let key = MethodKey::new(method.class_desc.clone(), method.name.clone(), proto_key);
+        self.method_keys.insert(key);
+    }
+
+    fn collect_parsed_field(&mut self, field: &ParsedFieldRef) {
+        self.insert_type_descriptor(&field.class_desc);
+        self.insert_type_descriptor(&field.type_desc);
+        self.strings.insert(&field.name);
+        let key = FieldKey::new(
+            field.class_desc.clone(),
+            field.name.clone(),
+            field.type_desc.clone(),
+        );
+        self.field_keys.insert(key);
     }
 
     fn insert_type_descriptor(&mut self, desc: &str) {
@@ -1208,6 +1454,27 @@ impl DexPoolBuilder {
         }
         self.strings.insert(desc);
         self.type_descriptors.insert(desc.to_string());
+    }
+
+    fn collect_literal(&mut self, literal: &str) {
+        let trimmed = literal.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if let Ok((_, entries)) = parse_java_array(trimmed) {
+            for entry in entries {
+                self.collect_literal(entry.trim());
+            }
+            return;
+        }
+        if let Some(parsed) = parse_smali_string_literal(trimmed) {
+            self.strings.insert(parsed);
+            return;
+        }
+        if looks_like_type_descriptor(trimmed) {
+            self.insert_type_descriptor(trimmed);
+        }
+        self.strings.insert(trimmed);
     }
 }
 
@@ -1478,6 +1745,104 @@ fn canonical_object_descriptor(obj: &ObjectIdentifier) -> String {
     s
 }
 
+#[derive(Debug)]
+struct ParsedMethodRef {
+    class_desc: String,
+    name: String,
+    proto: MethodSignature,
+}
+
+#[derive(Debug)]
+struct ParsedFieldRef {
+    class_desc: String,
+    name: String,
+    type_desc: String,
+}
+
+#[derive(Debug)]
+enum ParsedMemberRef {
+    Method(ParsedMethodRef),
+    Field(ParsedFieldRef),
+}
+
+#[derive(Debug)]
+struct CallSiteDescriptor {
+    bootstrap: ParsedMethodRef,
+    method_name: String,
+    method_proto: MethodSignature,
+}
+
+fn parse_method_handle_descriptor(literal: &str) -> Option<ParsedMemberRef> {
+    let trimmed = literal.trim_matches('"').trim();
+    if let Some(parsed) = parse_member_ref_literal(trimmed) {
+        return Some(parsed);
+    }
+    for (idx, ch) in trimmed.char_indices() {
+        if ch == 'L' {
+            if let Some(parsed) = parse_member_ref_literal(&trimmed[idx..]) {
+                return Some(parsed);
+            }
+        }
+    }
+    None
+}
+
+fn parse_call_site_descriptor(literal: &str) -> Option<CallSiteDescriptor> {
+    let trimmed = literal.trim_matches('"').trim();
+    let (bootstrap_part, target_part) = trimmed.split_once("::")?;
+    let bootstrap = match parse_member_ref_literal(bootstrap_part.trim())? {
+        ParsedMemberRef::Method(method) => method,
+        ParsedMemberRef::Field(_) => return None,
+    };
+    let (method_name, method_proto) = parse_method_name_and_proto(target_part.trim())?;
+    Some(CallSiteDescriptor {
+        bootstrap,
+        method_name,
+        method_proto,
+    })
+}
+
+fn parse_member_ref_literal(text: &str) -> Option<ParsedMemberRef> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('L') {
+        return None;
+    }
+    let arrow_idx = trimmed.find("->")?;
+    let class_desc = trimmed[..arrow_idx].trim().to_string();
+    let remainder = trimmed[arrow_idx + 2..].trim();
+    if let Some(paren_idx) = remainder.find('(') {
+        let name = remainder[..paren_idx].trim().to_string();
+        let descriptor_slice = &remainder[paren_idx..];
+        let (_, signature) = parse_methodsignature(descriptor_slice).ok()?;
+        return Some(ParsedMemberRef::Method(ParsedMethodRef {
+            class_desc,
+            name,
+            proto: signature,
+        }));
+    }
+    if let Some(colon_idx) = remainder.find(':') {
+        let name = remainder[..colon_idx].trim().to_string();
+        let descriptor_slice = &remainder[colon_idx + 1..];
+        let (_, type_sig) = parse_typesignature(descriptor_slice).ok()?;
+        let type_desc = canonical_type_descriptor(&type_sig);
+        return Some(ParsedMemberRef::Field(ParsedFieldRef {
+            class_desc,
+            name,
+            type_desc,
+        }));
+    }
+    None
+}
+
+fn parse_method_name_and_proto(text: &str) -> Option<(String, MethodSignature)> {
+    let trimmed = text.trim();
+    let paren_idx = trimmed.find('(')?;
+    let name = trimmed[..paren_idx].trim().to_string();
+    let descriptor_slice = &trimmed[paren_idx..];
+    let (_, signature) = parse_methodsignature(descriptor_slice).ok()?;
+    Some((name, signature))
+}
+
 fn align_to(value: u32, alignment: u32) -> u32 {
     if alignment <= 1 {
         return value;
@@ -1493,6 +1858,11 @@ fn ensure_len(buf: &mut Vec<u8>, target: usize) {
     if buf.len() < target {
         buf.resize(target, 0);
     }
+}
+
+fn overwrite_u32(buf: &mut [u8], position: usize, value: u32) {
+    let bytes = value.to_le_bytes();
+    buf[position..position + 4].copy_from_slice(&bytes);
 }
 
 fn build_static_value_array(
@@ -1526,12 +1896,615 @@ fn build_static_value_array(
     Ok(Some(entries.into_iter().map(|(_, value)| value).collect()))
 }
 
+fn build_class_data_item(
+    class: &SmaliClass,
+    pools: &DexIndexPools,
+) -> Result<Option<ClassDataItem>, DexError> {
+    let class_desc = class.name.as_jni_type();
+
+    let mut static_fields = Vec::new();
+    let mut instance_fields = Vec::new();
+    for field in &class.fields {
+        let field_type = canonical_type_descriptor(&field.signature);
+        let field_idx = pools
+            .field_index(&class_desc, &field.name, &field_type)
+            .ok_or_else(|| DexError::new("missing field index for class data"))?;
+        let field_idx = usize::try_from(field_idx)
+            .map_err(|_| DexError::new("field index does not fit in usize"))?;
+        let encoded = EncodedField {
+            field_idx,
+            access_flags: field_access_flags(&field.modifiers),
+        };
+        if field
+            .modifiers
+            .iter()
+            .any(|m| matches!(m, Modifier::Static))
+        {
+            static_fields.push(encoded);
+        } else {
+            instance_fields.push(encoded);
+        }
+    }
+    static_fields.sort_by_key(|f| f.field_idx);
+    instance_fields.sort_by_key(|f| f.field_idx);
+
+    let mut direct_methods = Vec::new();
+    let mut virtual_methods = Vec::new();
+    for method in &class.methods {
+        let needs_code = method_requires_code(method);
+        if needs_code {
+            return Err(DexError::new(&format!(
+                "method {}->{} requires code emission, which is not yet supported",
+                class_desc, method.name
+            )));
+        }
+
+        let method_idx = pools
+            .method_index(&class_desc, &method.name, &method.signature)
+            .ok_or_else(|| DexError::new("missing method index for class data"))?;
+        let method_idx = usize::try_from(method_idx)
+            .map_err(|_| DexError::new("method index does not fit in usize"))?;
+
+        let encoded = EncodedMethod {
+            method_idx,
+            access_flags: method_access_flags(method),
+            code_off: 0,
+            code: None,
+        };
+
+        if is_direct_method(method) {
+            direct_methods.push(encoded);
+        } else {
+            virtual_methods.push(encoded);
+        }
+    }
+    direct_methods.sort_by_key(|m| m.method_idx);
+    virtual_methods.sort_by_key(|m| m.method_idx);
+
+    if static_fields.is_empty()
+        && instance_fields.is_empty()
+        && direct_methods.is_empty()
+        && virtual_methods.is_empty()
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(ClassDataItem {
+        static_fields,
+        instance_fields,
+        direct_methods,
+        virtual_methods,
+    }))
+}
+
+fn build_class_annotations(
+    class: &SmaliClass,
+    class_plan_idx: usize,
+    pools: &DexIndexPools,
+    builder: &mut DataSectionBuilder,
+) -> Result<(), DexError> {
+    let class_desc = class.name.as_jni_type();
+    let class_annotations = write_annotation_set_chunk(&class.annotations, pools, builder)?;
+
+    let mut field_entries = Vec::new();
+    for field in &class.fields {
+        if field.annotations.is_empty() {
+            continue;
+        }
+        let field_type = canonical_type_descriptor(&field.signature);
+        let field_idx = pools
+            .field_index(&class_desc, &field.name, &field_type)
+            .ok_or_else(|| DexError::new("missing field index for annotated field"))?;
+        let set_idx = write_annotation_set_chunk(&field.annotations, pools, builder)?
+            .expect("annotation set created for non-empty annotations");
+        field_entries.push((field_idx, set_idx));
+    }
+
+    field_entries.sort_by_key(|(idx, _)| *idx);
+
+    let mut method_entries = Vec::new();
+    let mut parameter_entries = Vec::new();
+
+    for method in &class.methods {
+        let method_idx = pools
+            .method_index(&class_desc, &method.name, &method.signature)
+            .ok_or_else(|| DexError::new("missing method index for annotated method"))?;
+
+        if !method.annotations.is_empty() {
+            let set_idx = write_annotation_set_chunk(&method.annotations, pools, builder)?
+                .expect("annotation set created for non-empty method annotations");
+            method_entries.push((method_idx, set_idx));
+        }
+
+        let mut param_set_indices = Vec::with_capacity(method.params.len());
+        for param in &method.params {
+            if param.annotations.is_empty() {
+                param_set_indices.push(None);
+            } else {
+                let set_idx = write_annotation_set_chunk(&param.annotations, pools, builder)?
+                    .expect("annotation set created for parameter annotations");
+                param_set_indices.push(Some(set_idx));
+            }
+        }
+        if param_set_indices.iter().any(|entry| entry.is_some()) {
+            let list_idx = write_annotation_set_ref_list_chunk(&param_set_indices, builder);
+            parameter_entries.push((method_idx, list_idx));
+        }
+    }
+
+    method_entries.sort_by_key(|(idx, _)| *idx);
+    parameter_entries.sort_by_key(|(idx, _)| *idx);
+
+    if class_annotations.is_none()
+        && field_entries.is_empty()
+        && method_entries.is_empty()
+        && parameter_entries.is_empty()
+    {
+        return Ok(());
+    }
+
+    write_annotations_directory_chunk(
+        class_plan_idx,
+        class_annotations,
+        &field_entries,
+        &method_entries,
+        &parameter_entries,
+        builder,
+    );
+
+    Ok(())
+}
+
+fn collect_array_data_chunks(
+    class: &SmaliClass,
+    builder: &mut DataSectionBuilder,
+    plans: &mut Vec<ArrayDataPlanEntry>,
+) -> Result<(), DexError> {
+    for method in &class.methods {
+        let mut current_label: Option<String> = None;
+        for op in &method.ops {
+            match op {
+                SmaliOp::Label(label) => current_label = Some(label.0.clone()),
+                SmaliOp::ArrayData(array) => {
+                    let label = current_label
+                        .clone()
+                        .ok_or_else(|| DexError::new(".array-data directive missing label"))?;
+                    let bytes = encode_array_data_payload(array)?;
+                    let chunk_idx = builder.push_chunk(DataChunk {
+                        owner: DataChunkOwner::ArrayData(label.clone()),
+                        kind: DataChunkKind::ArrayData,
+                        align: 4,
+                        offset: 0,
+                        bytes,
+                        fixups: Vec::new(),
+                    });
+                    plans.push(ArrayDataPlanEntry {
+                        label,
+                        chunk_index: chunk_idx,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_annotation_set_chunk(
+    annotations: &[SmaliAnnotation],
+    pools: &DexIndexPools,
+    builder: &mut DataSectionBuilder,
+) -> Result<Option<usize>, DexError> {
+    if annotations.is_empty() {
+        return Ok(None);
+    }
+
+    let mut item_entries = Vec::with_capacity(annotations.len());
+    for ann in annotations {
+        let item = encode_annotation_item(ann, pools)?;
+        let type_idx = item.annotation.type_idx;
+        let mut bytes = Vec::new();
+        item.write(&mut bytes);
+        let chunk_idx = builder.push_chunk(DataChunk {
+            owner: DataChunkOwner::AnnotationItem,
+            kind: DataChunkKind::AnnotationItem,
+            align: 1,
+            offset: 0,
+            bytes,
+            fixups: Vec::new(),
+        });
+        item_entries.push((type_idx, chunk_idx));
+    }
+
+    item_entries.sort_by_key(|(type_idx, _)| *type_idx);
+
+    let mut set_bytes = Vec::new();
+    write_u4(&mut set_bytes, item_entries.len() as u32);
+    let mut fixups = Vec::new();
+    for (_, idx) in item_entries {
+        let pos = set_bytes.len();
+        write_u4(&mut set_bytes, 0);
+        fixups.push(ChunkFixup {
+            position: pos,
+            target_chunk: idx,
+        });
+    }
+
+    let chunk_idx = builder.push_chunk(DataChunk {
+        owner: DataChunkOwner::AnnotationSet,
+        kind: DataChunkKind::AnnotationSet,
+        align: 4,
+        offset: 0,
+        bytes: set_bytes,
+        fixups,
+    });
+
+    Ok(Some(chunk_idx))
+}
+
+fn encode_annotation_item(
+    annotation: &SmaliAnnotation,
+    pools: &DexIndexPools,
+) -> Result<AnnotationItem, DexError> {
+    let annotation_payload = encode_annotation_payload(annotation, pools)?;
+    let visibility = encode_annotation_visibility(&annotation.visibility);
+    Ok(AnnotationItem {
+        visibility,
+        annotation: annotation_payload,
+    })
+}
+
+fn encode_array_data_payload(array: &ArrayDataDirective) -> Result<Vec<u8>, DexError> {
+    if array.element_width <= 0 {
+        return Err(DexError::new("array-data element width must be positive"));
+    }
+    let width = array.element_width as usize;
+    let mut bytes = Vec::new();
+    write_u2(&mut bytes, ARRAY_DATA_SIGNATURE);
+    write_u2(&mut bytes, width as u32 as u16);
+    write_u4(&mut bytes, array.elements.len() as u32);
+
+    for element in &array.elements {
+        match (width, element) {
+            (1, ArrayDataElement::Byte(v)) => bytes.push(*v as u8),
+            (2, ArrayDataElement::Short(v)) => bytes.extend_from_slice(&v.to_le_bytes()),
+            (4, ArrayDataElement::Int(v)) => bytes.extend_from_slice(&v.to_le_bytes()),
+            (4, ArrayDataElement::Float(v)) => bytes.extend_from_slice(&v.to_bits().to_le_bytes()),
+            (8, ArrayDataElement::Long(v)) => bytes.extend_from_slice(&v.to_le_bytes()),
+            (8, ArrayDataElement::Double(v)) => bytes.extend_from_slice(&v.to_bits().to_le_bytes()),
+            _ => {
+                return Err(DexError::new(
+                    "array-data element width does not match element type",
+                ));
+            }
+        }
+    }
+
+    Ok(bytes)
+}
+
+fn encode_annotation_payload(
+    annotation: &SmaliAnnotation,
+    pools: &DexIndexPools,
+) -> Result<EncodedAnnotation, DexError> {
+    let type_desc = canonical_type_descriptor(&annotation.annotation_type);
+    let type_idx = pools
+        .type_index(&type_desc)
+        .ok_or_else(|| DexError::new("missing type index for annotation"))?;
+    let mut elements = Vec::with_capacity(annotation.elements.len());
+    for element in &annotation.elements {
+        let name_idx = pools
+            .string_index(&element.name)
+            .ok_or_else(|| DexError::new("missing string index for annotation element"))?;
+        let value = encode_annotation_value(&element.value, pools)?;
+        elements.push(DexAnnotationElement { name_idx, value });
+    }
+    Ok(EncodedAnnotation { type_idx, elements })
+}
+
+fn encode_annotation_visibility(vis: &AnnotationVisibility) -> u8 {
+    match vis {
+        AnnotationVisibility::Build => 0x00,
+        AnnotationVisibility::Runtime => 0x01,
+        AnnotationVisibility::System => 0x02,
+    }
+}
+
+fn encode_annotation_value(
+    value: &AnnotationValue,
+    pools: &DexIndexPools,
+) -> Result<EncodedValue, DexError> {
+    match value {
+        AnnotationValue::Single(literal) => encode_annotation_literal(literal, pools),
+        AnnotationValue::Array(entries) => {
+            let mut values = Vec::with_capacity(entries.len());
+            for entry in entries {
+                values.push(encode_annotation_literal(entry, pools)?);
+            }
+            Ok(EncodedValue::Array(values))
+        }
+        AnnotationValue::SubAnnotation(sub) => {
+            let payload = encode_annotation_payload(sub, pools)?;
+            Ok(EncodedValue::Annotation(payload))
+        }
+        AnnotationValue::Enum(obj, name) => {
+            let class_desc = canonical_object_descriptor(obj);
+            let field_type = class_desc.clone();
+            let field_idx = pools
+                .field_index(&class_desc, name, &field_type)
+                .ok_or_else(|| DexError::new("missing enum field index"))?;
+            Ok(EncodedValue::Enum(field_idx))
+        }
+    }
+}
+
+fn encode_annotation_literal(
+    literal: &str,
+    pools: &DexIndexPools,
+) -> Result<EncodedValue, DexError> {
+    let trimmed = literal.trim();
+    if trimmed.is_empty() {
+        return Err(DexError::new("empty annotation literal"));
+    }
+
+    if let Some(ch) = parse_char_literal(trimmed) {
+        return Ok(EncodedValue::Char(ch as u16));
+    }
+
+    if trimmed.eq_ignore_ascii_case("true") {
+        return Ok(EncodedValue::Boolean(true));
+    }
+    if trimmed.eq_ignore_ascii_case("false") {
+        return Ok(EncodedValue::Boolean(false));
+    }
+    if trimmed.eq_ignore_ascii_case("null") {
+        return Ok(EncodedValue::Null);
+    }
+
+    if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+        if let Some(parsed) = parse_smali_string_literal(trimmed) {
+            let idx = pools
+                .string_index(&parsed)
+                .ok_or_else(|| DexError::new("missing string literal in pool"))?;
+            return Ok(EncodedValue::String(idx));
+        }
+    }
+
+    if looks_like_type_descriptor(trimmed) {
+        if let Some(idx) = pools.type_index(trimmed) {
+            return Ok(EncodedValue::Type(idx));
+        }
+    }
+
+    if let Some(value) = parse_float_literal(trimmed) {
+        return Ok(EncodedValue::Float(value));
+    }
+    if let Some(value) = parse_double_literal(trimmed) {
+        return Ok(EncodedValue::Double(value));
+    }
+
+    if let Ok((_, value)) = parse_literal_int::<i32>(trim_numeric_literal_suffix(trimmed)) {
+        return Ok(EncodedValue::Int(value));
+    }
+    if let Ok((_, value)) = parse_literal_int::<i64>(trim_numeric_literal_suffix(trimmed)) {
+        return Ok(EncodedValue::Long(value));
+    }
+
+    if let Some(parsed) = parse_smali_string_literal(trimmed) {
+        let idx = pools
+            .string_index(&parsed)
+            .ok_or_else(|| DexError::new("missing string literal in pool"))?;
+        return Ok(EncodedValue::String(idx));
+    }
+
+    Err(DexError::new("unsupported annotation literal"))
+}
+
+fn looks_like_type_descriptor(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    if value.starts_with('L') && value.ends_with(';') {
+        return true;
+    }
+    if value.starts_with('[') {
+        return true;
+    }
+    matches!(
+        value.chars().next().unwrap(),
+        'V' | 'Z' | 'B' | 'S' | 'C' | 'I' | 'J' | 'F' | 'D'
+    )
+}
+
+fn write_annotation_set_ref_list_chunk(
+    sets: &[Option<usize>],
+    builder: &mut DataSectionBuilder,
+) -> usize {
+    let mut bytes = Vec::new();
+    write_u4(&mut bytes, sets.len() as u32);
+    let mut fixups = Vec::new();
+    for set in sets {
+        let pos = bytes.len();
+        if let Some(idx) = set {
+            write_u4(&mut bytes, 0);
+            fixups.push(ChunkFixup {
+                position: pos,
+                target_chunk: *idx,
+            });
+        } else {
+            write_u4(&mut bytes, 0);
+        }
+    }
+    builder.push_chunk(DataChunk {
+        owner: DataChunkOwner::AnnotationSetRefList,
+        kind: DataChunkKind::AnnotationSetRefList,
+        align: 4,
+        offset: 0,
+        bytes,
+        fixups,
+    })
+}
+
+fn write_annotations_directory_chunk(
+    class_plan_idx: usize,
+    class_annotations: Option<usize>,
+    field_entries: &[(u32, usize)],
+    method_entries: &[(u32, usize)],
+    parameter_entries: &[(u32, usize)],
+    builder: &mut DataSectionBuilder,
+) {
+    let mut bytes = Vec::new();
+    let mut fixups = Vec::new();
+
+    // class_annotations_off
+    if let Some(idx) = class_annotations {
+        let pos = bytes.len();
+        write_u4(&mut bytes, 0);
+        fixups.push(ChunkFixup {
+            position: pos,
+            target_chunk: idx,
+        });
+    } else {
+        write_u4(&mut bytes, 0);
+    }
+
+    write_u4(&mut bytes, field_entries.len() as u32);
+    write_u4(&mut bytes, method_entries.len() as u32);
+    write_u4(&mut bytes, parameter_entries.len() as u32);
+
+    for (field_idx, set_idx) in field_entries {
+        write_u4(&mut bytes, *field_idx);
+        let pos = bytes.len();
+        write_u4(&mut bytes, 0);
+        fixups.push(ChunkFixup {
+            position: pos,
+            target_chunk: *set_idx,
+        });
+    }
+
+    for (method_idx, set_idx) in method_entries {
+        write_u4(&mut bytes, *method_idx);
+        let pos = bytes.len();
+        write_u4(&mut bytes, 0);
+        fixups.push(ChunkFixup {
+            position: pos,
+            target_chunk: *set_idx,
+        });
+    }
+
+    for (method_idx, list_idx) in parameter_entries {
+        write_u4(&mut bytes, *method_idx);
+        let pos = bytes.len();
+        write_u4(&mut bytes, 0);
+        fixups.push(ChunkFixup {
+            position: pos,
+            target_chunk: *list_idx,
+        });
+    }
+
+    builder.push_chunk(DataChunk {
+        owner: DataChunkOwner::ClassAnnotations {
+            class_idx: class_plan_idx,
+            directory_rel_offset: 0,
+        },
+        kind: DataChunkKind::AnnotationsDirectory,
+        align: 4,
+        offset: 0,
+        bytes,
+        fixups,
+    });
+}
+
+fn field_access_flags(modifiers: &[Modifier]) -> u32 {
+    let mut flags = 0u32;
+    for modifier in modifiers {
+        match modifier {
+            Modifier::Public => flags |= crate::dex::dex_file::ACC_PUBLIC,
+            Modifier::Private => flags |= crate::dex::dex_file::ACC_PRIVATE,
+            Modifier::Protected => flags |= crate::dex::dex_file::ACC_PROTECTED,
+            Modifier::Static => flags |= crate::dex::dex_file::ACC_STATIC,
+            Modifier::Final => flags |= crate::dex::dex_file::ACC_FINAL,
+            Modifier::Volatile => flags |= crate::dex::dex_file::ACC_VOLATILE,
+            Modifier::Transient => flags |= crate::dex::dex_file::ACC_TRANSIENT,
+            Modifier::Synthetic => flags |= crate::dex::dex_file::ACC_SYNTHETIC,
+            Modifier::Enum => flags |= crate::dex::dex_file::ACC_ENUM,
+            _ => {}
+        }
+    }
+    flags
+}
+
+fn method_access_flags(method: &SmaliMethod) -> u32 {
+    let mut flags = 0u32;
+    for modifier in &method.modifiers {
+        match modifier {
+            Modifier::Public => flags |= crate::dex::dex_file::ACC_PUBLIC,
+            Modifier::Private => flags |= crate::dex::dex_file::ACC_PRIVATE,
+            Modifier::Protected => flags |= crate::dex::dex_file::ACC_PROTECTED,
+            Modifier::Static => flags |= crate::dex::dex_file::ACC_STATIC,
+            Modifier::Final => flags |= crate::dex::dex_file::ACC_FINAL,
+            Modifier::Synchronized => flags |= crate::dex::dex_file::ACC_SYNCHRONIZED,
+            Modifier::Bridge => flags |= crate::dex::dex_file::ACC_BRIDGE,
+            Modifier::Varargs => flags |= crate::dex::dex_file::ACC_VARARGS,
+            Modifier::Native => flags |= crate::dex::dex_file::ACC_NATIVE,
+            Modifier::Abstract => flags |= crate::dex::dex_file::ACC_ABSTRACT,
+            Modifier::Strict => flags |= crate::dex::dex_file::ACC_STRICT,
+            Modifier::Synthetic => flags |= crate::dex::dex_file::ACC_SYNTHETIC,
+            Modifier::DeclaredSynchronized => {
+                flags |= crate::dex::dex_file::ACC_DECLARED_SYNCHRONIZED
+            }
+            _ => {}
+        }
+    }
+    if method.constructor {
+        flags |= crate::dex::dex_file::ACC_CONSTRUCTOR;
+    }
+    flags
+}
+
+fn method_requires_code(method: &SmaliMethod) -> bool {
+    let is_abstract = method
+        .modifiers
+        .iter()
+        .any(|m| matches!(m, Modifier::Abstract));
+    let is_native = method
+        .modifiers
+        .iter()
+        .any(|m| matches!(m, Modifier::Native));
+    !(is_abstract || is_native)
+}
+
+fn is_direct_method(method: &SmaliMethod) -> bool {
+    let is_static = method
+        .modifiers
+        .iter()
+        .any(|m| matches!(m, Modifier::Static));
+    let is_private = method
+        .modifiers
+        .iter()
+        .any(|m| matches!(m, Modifier::Private));
+    is_static || is_private || method.constructor
+}
+
 fn literal_to_encoded_value(
     literal: &str,
     signature: &TypeSignature,
     pools: &DexIndexPools,
 ) -> Result<Option<EncodedValue>, DexError> {
     let trimmed = literal.trim();
+
+    if let TypeSignature::Array(inner) = signature {
+        if let Ok((_, entries)) = parse_java_array(trimmed) {
+            let mut values = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let value = literal_to_encoded_value(entry.trim(), inner, pools)?
+                    .ok_or_else(|| DexError::new("array literal element missing value"))?;
+                values.push(value);
+            }
+            return Ok(Some(EncodedValue::Array(values)));
+        }
+    }
+
     match signature {
         TypeSignature::Bool => {
             if let Some(val) = parse_boolean_literal(trimmed) {
@@ -1678,7 +2651,24 @@ fn trim_numeric_literal_suffix(literal: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dex::dex_file::DexFile;
     use crate::types::{MethodSignature, SmaliClass};
+
+    const ABSTRACT_CLASS: &str = r#"
+.class public abstract Lcom/example/AbstractThing;
+.super Ljava/lang/Object;
+.implements Ljava/lang/Runnable;
+
+.field public static final GREETING:Ljava/lang/String; = "hello"
+.field public static final FLAG:Z = true
+.field public value:I
+
+.method public static native helper()V
+.end method
+
+.method public abstract compute()I
+.end method
+"#;
 
     #[test]
     fn builds_basic_indexes_from_class() {
@@ -1814,18 +2804,7 @@ mod tests {
 
     #[test]
     fn plans_section_layout_with_data_offsets() {
-        let smali = r#"
-.class public Lcom/example/Foo;
-.super Ljava/lang/Object;
-.implements Ljava/lang/Runnable;
-
-.method public run()V
-    .locals 1
-    return-void
-.end method
-"#;
-
-        let class = SmaliClass::from_smali(smali).expect("parse class");
+        let class = SmaliClass::from_smali(ABSTRACT_CLASS).expect("parse class");
         let plan = DexLayoutPlan::from_classes(&[class]).expect("layout plan");
 
         assert!(plan.sections.type_ids.offset > plan.sections.string_ids.offset);
@@ -1838,23 +2817,12 @@ mod tests {
         // Runnable interface should allocate a TypeList chunk and assign a non-zero offset.
         assert_eq!(plan.class_defs.len(), 1);
         assert!(plan.class_defs[0].offsets.interfaces_off >= plan.sections.data_off);
+        assert!(plan.class_defs[0].offsets.class_data_off >= plan.sections.data_off);
     }
 
     #[test]
     fn plans_static_value_offsets_for_string_fields() {
-        let smali = r#"
-.class public Lcom/example/HasStatic;
-.super Ljava/lang/Object;
-
-.field public static final GREETING:Ljava/lang/String; = "hello"
-
-.method public constructor <init>()V
-    .locals 0
-    return-void
-.end method
-"#;
-
-        let class = SmaliClass::from_smali(smali).expect("parse class");
+        let class = SmaliClass::from_smali(ABSTRACT_CLASS).expect("parse class");
         let plan = DexLayoutPlan::from_classes(&[class]).expect("layout plan");
 
         assert_eq!(plan.class_defs.len(), 1);
@@ -1862,23 +2830,21 @@ mod tests {
         assert!(class_plan.item.static_values.is_some());
         assert!(class_plan.offsets.static_values_off >= plan.sections.data_off);
         assert!(plan.pools.strings.iter().any(|s| s == "hello"));
+        assert!(class_plan.class_data.is_some());
+        assert!(class_plan.offsets.class_data_off >= plan.sections.data_off);
+        assert!(
+            !class_plan
+                .class_data
+                .as_ref()
+                .unwrap()
+                .static_fields
+                .is_empty()
+        );
     }
 
     #[test]
     fn builds_binary_dex_file() {
-        let smali = r#"
-.class public Lcom/example/Hello;
-.super Ljava/lang/Object;
-
-.field public static final MESSAGE:Ljava/lang/String; = "hello"
-
-.method public constructor <init>()V
-    .locals 0
-    return-void
-.end method
-"#;
-
-        let class = SmaliClass::from_smali(smali).expect("parse class");
+        let class = SmaliClass::from_smali(ABSTRACT_CLASS).expect("parse class");
         let bytes = build_dex_file_bytes(&[class]).expect("build dex");
 
         assert!(bytes.starts_with(b"dex\n"));
@@ -1888,4 +2854,261 @@ mod tests {
         assert!(header.map_off >= header.data_off);
         assert!(header.string_ids_size > 0);
     }
+
+    #[test]
+    fn roundtrips_static_numeric_and_array_literals() {
+        let smali = r#"
+.class public abstract Lcom/example/Literals;
+.super Ljava/lang/Object;
+
+.field public static final COUNT:I = 0x2a
+.field public static final BIG:J = 0x100000000L
+.field public static final FACTOR:F = 1.5f
+.field public static final SCALE:D = 3.5
+.field public static final LETTER:C = 'A'
+.field public static final WORD:Ljava/lang/String; = "hello"
+.field public static final INTS:[I = { 0x1, 0x2, 0x3 }
+.field public static final WORDS:[Ljava/lang/String; = { "one", "two" }
+
+.method public abstract noop()V
+.end method
+"#;
+
+        let class = SmaliClass::from_smali(smali).expect("parse class");
+        let bytes = build_dex_file_bytes(&[class]).expect("build dex");
+
+        let dex = DexFile::from_bytes(&bytes).expect("read dex");
+        assert_eq!(dex.class_defs.len(), 1);
+        let class_def = &dex.class_defs[0];
+        let class_data = class_def
+            .class_data
+            .as_ref()
+            .expect("class data present for literals");
+        let static_values = class_def
+            .static_values
+            .as_ref()
+            .expect("static values encoded");
+        assert_eq!(class_data.static_fields.len(), static_values.len());
+
+        for (field_entry, value) in class_data.static_fields.iter().zip(static_values.iter()) {
+            let field = &dex.fields[field_entry.field_idx as usize];
+            let name = dex.strings[field.name_idx as usize]
+                .to_string()
+                .expect("field name string");
+            match (name.as_str(), value) {
+                ("COUNT", EncodedValue::Int(v)) => assert_eq!(*v, 0x2a),
+                ("BIG", EncodedValue::Long(v)) => assert_eq!(*v, 0x100000000),
+                ("FACTOR", EncodedValue::Float(v)) => assert!((*v - 1.5).abs() < f32::EPSILON),
+                ("SCALE", EncodedValue::Double(v)) => assert!((*v - 3.5).abs() < f64::EPSILON),
+                ("LETTER", EncodedValue::Char(v)) => assert_eq!(*v, 'A' as u16),
+                ("WORD", EncodedValue::String(idx)) => {
+                    let s = dex.strings[*idx as usize].to_string().expect("word string");
+                    assert_eq!(s, "hello");
+                }
+                ("INTS", EncodedValue::Array(values)) => {
+                    let ints: Vec<i32> = values
+                        .iter()
+                        .map(|v| match v {
+                            EncodedValue::Int(i) => *i,
+                            _ => panic!("expected int in array"),
+                        })
+                        .collect();
+                    assert_eq!(ints, vec![1, 2, 3]);
+                }
+                ("WORDS", EncodedValue::Array(values)) => {
+                    let words: Vec<String> = values
+                        .iter()
+                        .map(|v| match v {
+                            EncodedValue::String(idx) => {
+                                dex.strings[*idx as usize].to_string().expect("word")
+                            }
+                            _ => panic!("expected string in array"),
+                        })
+                        .collect();
+                    assert_eq!(words, vec!["one", "two"]);
+                }
+                other => panic!("unexpected literal {:?}", other),
+            }
+        }
+    }
+
+    const ANNOTATED_CLASS: &str = r#"
+.class public abstract Lcom/example/Annotated;
+.super Ljava/lang/Object;
+
+.annotation runtime Lcom/example/ClassAnn;
+    value = 0x2
+.end annotation
+
+.field public static final FLAG:Z = true
+    .annotation system Lcom/example/FieldAnn;
+        name = "field"
+    .end annotation
+.end field
+
+.method public static native note(I)V
+    .annotation runtime Lcom/example/MethodAnn;
+        value = "method"
+    .end annotation
+    .param p0
+        .annotation runtime Lcom/example/ParamAnn;
+            name = "param"
+        .end annotation
+    .end param
+.end method
+"#;
+
+    const ARRAY_DATA_CLASS: &str = r#"
+.class public abstract Lcom/example/WithArray;
+.super Ljava/lang/Object;
+
+.method public abstract data()[I
+:array_0
+.array-data 0x4
+    0x1
+    0x2
+.end array-data
+.end method
+"#;
+
+    #[test]
+    fn plans_annotation_offsets_and_chunks() {
+        let class = SmaliClass::from_smali(ANNOTATED_CLASS).expect("parse class");
+        let plan = DexLayoutPlan::from_classes(&[class]).expect("layout plan");
+
+        assert_eq!(plan.class_defs.len(), 1);
+        let class_plan = &plan.class_defs[0];
+        assert!(class_plan.offsets.annotations_off >= plan.sections.data_off);
+
+        let kinds: Vec<DataChunkKind> = plan
+            .data_section
+            .chunks()
+            .iter()
+            .map(|chunk| chunk.kind)
+            .collect();
+
+        assert!(
+            kinds
+                .iter()
+                .any(|k| matches!(k, DataChunkKind::AnnotationItem))
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|k| matches!(k, DataChunkKind::AnnotationSet))
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|k| matches!(k, DataChunkKind::AnnotationsDirectory))
+        );
+    }
+
+    #[test]
+    fn collects_array_data_chunks() {
+        let class = SmaliClass::from_smali(ARRAY_DATA_CLASS).expect("parse class");
+        let plan = DexLayoutPlan::from_classes(&[class]).expect("layout plan");
+
+        let offset = plan
+            .array_data_offsets
+            .get("array_0")
+            .copied()
+            .expect("array offset recorded");
+        assert!(offset >= plan.sections.data_off);
+        assert!(
+            plan.data_section
+                .chunks()
+                .iter()
+                .any(|chunk| matches!(chunk.kind, DataChunkKind::ArrayData))
+        );
+    }
+
+    #[test]
+    fn fails_on_methods_requiring_code() {
+        let smali = r#"
+.class public Lcom/example/HasCode;
+.super Ljava/lang/Object;
+
+.method public constructor <init>()V
+    .locals 0
+    return-void
+.end method
+"#;
+
+        let class = SmaliClass::from_smali(smali).expect("parse class");
+        let err = DexLayoutPlan::from_classes(&[class]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("method Lcom/example/HasCode;-><init> requires code emission")
+        );
+    }
+
+    #[test]
+    fn parses_method_handle_descriptor_variants() {
+        let literal =
+            "invoke-static {}, Lcom/example/Target;->doIt(Ljava/lang/String;)Ljava/lang/Object;";
+        let parsed =
+            parse_method_handle_descriptor(literal).expect("method handle descriptor parsed");
+        match parsed {
+            ParsedMemberRef::Method(method) => {
+                assert_eq!(method.class_desc, "Lcom/example/Target;");
+                assert_eq!(method.name, "doIt");
+                assert_eq!(
+                    method.proto.to_jni(),
+                    "(Ljava/lang/String;)Ljava/lang/Object;"
+                );
+            }
+            ParsedMemberRef::Field(_) => panic!("expected method"),
+        }
+
+        let field_literal = "static-get Lcom/example/Holder;->VALUE:Ljava/lang/String;";
+        let parsed = parse_method_handle_descriptor(field_literal).expect("field descriptor");
+        match parsed {
+            ParsedMemberRef::Field(field) => {
+                assert_eq!(field.class_desc, "Lcom/example/Holder;");
+                assert_eq!(field.name, "VALUE");
+                assert_eq!(field.type_desc, "Ljava/lang/String;");
+            }
+            ParsedMemberRef::Method(_) => panic!("expected field"),
+        }
+    }
+
+    #[test]
+    fn collects_method_handle_and_call_site_literals_into_pools() {
+        let class = SmaliClass::from_smali(HANDLE_CLASS).expect("parse class");
+        let pools = DexIndexPools::from_classes(&[class]).expect("build pools");
+
+        let handle_sig = MethodSignature::from_jni("(Ljava/lang/String;)Ljava/lang/Object;");
+        assert!(
+            pools
+                .method_index("Lcom/example/Target;", "doIt", &handle_sig)
+                .is_some()
+        );
+
+        let bootstrap_sig = MethodSignature::from_jni(
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;",
+        );
+        assert!(
+            pools
+                .method_index("Lcom/example/Bootstrap;", "bootstrap", &bootstrap_sig)
+                .is_some()
+        );
+
+        let call_site_proto =
+            MethodSignature::from_jni("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+        assert!(pools.proto_index(&call_site_proto).is_some());
+        assert!(pools.string_index("makeConcat").is_some());
+    }
+
+    const HANDLE_CLASS: &str = r#"
+.class public Lcom/example/Handles;
+.super Ljava/lang/Object;
+
+.method public static bridge()V
+    .locals 1
+    const-method-handle v0, "invoke-static {}, Lcom/example/Target;->doIt(Ljava/lang/String;)Ljava/lang/Object;"
+    invoke-custom {v0}, "Lcom/example/Bootstrap;->bootstrap(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;::makeConcat(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
+    return-void
+.end method
+"#;
 }
