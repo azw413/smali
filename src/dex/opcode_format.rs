@@ -124,7 +124,7 @@ pub mod assemble {
     use crate::types::{
         ArrayDataDirective, ArrayDataElement, DexOp, Label, MethodSignature, Modifier,
         PackedSwitchDirective, SmaliMethod, SmaliOp, SparseSwitchDirective, TypeSignature,
-        parse_methodsignature,
+        VerificationErrorRef, parse_methodsignature,
     };
     use std::collections::HashMap;
 
@@ -153,6 +153,37 @@ pub mod assemble {
 
     /// Result of assembling a single method body into Dalvik bytecode.
     #[allow(dead_code)]
+    #[derive(Debug, Default, Clone)]
+    pub struct LineEvent {
+        pub offset_cu: u32,
+        pub line: u32,
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum DebugDirective {
+        PrologueEnd,
+        EpilogueBegin,
+        StartLocal {
+            register: u16,
+            name: Option<String>,
+            descriptor: Option<String>,
+            signature: Option<String>,
+        },
+        EndLocal {
+            register: u16,
+        },
+        RestartLocal {
+            register: u16,
+        },
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct DebugDirectiveEvent {
+        pub offset_cu: u32,
+        pub directive: DebugDirective,
+    }
+
+    #[allow(dead_code)]
     #[derive(Debug)]
     pub struct MethodAssemblyResult {
         pub registers_size: u16,
@@ -160,6 +191,9 @@ pub mod assemble {
         pub outs_size: u16,
         pub tries_size: u16,
         pub encoded_code_units: Vec<u16>,
+        pub label_offsets: HashMap<String, u32>,
+        pub line_events: Vec<LineEvent>,
+        pub debug_events: Vec<DebugDirectiveEvent>,
     }
 
     /// Entry point for lowering `SmaliOp` instructions into encoded bytecode.
@@ -197,7 +231,36 @@ pub mod assemble {
             for op in &method.ops {
                 match op {
                     SmaliOp::Label(label) => state.define_label(label)?,
-                    SmaliOp::Line(_) => {}
+                    SmaliOp::Line(line) => state.record_line(*line),
+                    SmaliOp::Prologue => {
+                        state.record_debug(DebugDirective::PrologueEnd);
+                    }
+                    SmaliOp::Epilogue => {
+                        state.record_debug(DebugDirective::EpilogueBegin);
+                    }
+                    SmaliOp::Local {
+                        register,
+                        name,
+                        descriptor,
+                        signature,
+                    } => {
+                        let reg = resolve_register(&state.layout, register)?;
+                        state.record_debug(DebugDirective::StartLocal {
+                            register: reg,
+                            name: name.clone(),
+                            descriptor: descriptor.clone(),
+                            signature: signature.clone(),
+                        });
+                    }
+                    SmaliOp::EndLocal { register } => {
+                        let reg = resolve_register(&state.layout, register)?;
+                        state.record_debug(DebugDirective::EndLocal { register: reg });
+                    }
+                    SmaliOp::RestartLocal { register } => {
+                        let reg = resolve_register(&state.layout, register)?;
+                        state.record_debug(DebugDirective::RestartLocal { register: reg });
+                    }
+                    SmaliOp::Catch(_) => {}
                     SmaliOp::Op(dex_op) => {
                         let inst = self.lower_dex_op(dex_op, class_desc, method, &state.layout)?;
                         state.push_instruction(inst, true);
@@ -205,11 +268,6 @@ pub mod assemble {
                     SmaliOp::ArrayData(array) => state.push_array_data(array)?,
                     SmaliOp::PackedSwitch(dir) => state.push_packed_switch(dir)?,
                     SmaliOp::SparseSwitch(dir) => state.push_sparse_switch(dir)?,
-                    _ => {
-                        return Err(DexError::new(
-                            "assembler does not yet support directives beyond labels/ops",
-                        ));
-                    }
                 }
             }
 
@@ -280,6 +338,8 @@ pub mod assemble {
         labels: HashMap<String, usize>,
         current_offset_cu: usize,
         pending_labels: Vec<String>,
+        line_events: Vec<LineEvent>,
+        debug_events: Vec<DebugDirectiveEvent>,
     }
 
     impl MethodAssemblyState {
@@ -290,7 +350,23 @@ pub mod assemble {
                 labels: HashMap::new(),
                 current_offset_cu: 0,
                 pending_labels: Vec::new(),
+                line_events: Vec::new(),
+                debug_events: Vec::new(),
             }
+        }
+
+        fn record_line(&mut self, line: u32) {
+            self.line_events.push(LineEvent {
+                offset_cu: self.current_offset_cu as u32,
+                line,
+            });
+        }
+
+        fn record_debug(&mut self, directive: DebugDirective) {
+            self.debug_events.push(DebugDirectiveEvent {
+                offset_cu: self.current_offset_cu as u32,
+                directive,
+            });
         }
 
         fn define_label(&mut self, label: &Label) -> Result<(), DexError> {
@@ -384,12 +460,21 @@ pub mod assemble {
                 )?;
             }
 
+            let label_offsets = self
+                .labels
+                .into_iter()
+                .map(|(name, offset)| (name, offset as u32))
+                .collect();
+
             Ok(MethodAssemblyResult {
                 registers_size: self.layout.registers_size,
                 ins_size: self.layout.ins_size,
                 outs_size: 0,
                 tries_size: 0,
                 encoded_code_units: code,
+                label_offsets,
+                line_events: self.line_events,
+                debug_events: self.debug_events,
             })
         }
 
@@ -440,16 +525,23 @@ pub mod assemble {
                 LoweredKind::Format11n { .. } => 1,
                 LoweredKind::Format11x { .. } => 1,
                 LoweredKind::Format12x { .. } => 1,
+                LoweredKind::Format20bc { .. } => 2,
                 LoweredKind::Format21s { .. } => 2,
                 LoweredKind::Format21ih { .. } => 2,
+                LoweredKind::Format21lh { .. } => 2,
                 LoweredKind::Format21t { .. } => 2,
                 LoweredKind::Format22c { .. } => 2,
+                LoweredKind::Format22cs { .. } => 2,
                 LoweredKind::Format22t { .. } => 2,
                 LoweredKind::Format22b { .. } => 2,
                 LoweredKind::Format22s { .. } => 2,
                 LoweredKind::Format23x { .. } => 2,
                 LoweredKind::Format35c { .. } => 3,
+                LoweredKind::Format35mi { .. } => 3,
+                LoweredKind::Format35ms { .. } => 3,
                 LoweredKind::Format3rc { .. } => 3,
+                LoweredKind::Format3rmi { .. } => 3,
+                LoweredKind::Format3rms { .. } => 3,
                 LoweredKind::Format45cc { .. } => 4,
                 LoweredKind::Format4rcc { .. } => 4,
                 LoweredKind::Format31i { .. } => 3,
@@ -552,12 +644,22 @@ pub mod assemble {
                         | opcode_value as u16;
                     out.push(encoded);
                 }
+                LoweredKind::Format20bc { kind, index } => {
+                    let encoded = (((*kind as u16) & 0x00ff) << 8) | opcode_value as u16;
+                    out.push(encoded);
+                    out.push(*index);
+                }
                 LoweredKind::Format21s { reg, literal } => {
                     let encoded = (((*reg & 0x00ff) as u16) << 8) | opcode_value as u16;
                     out.push(encoded);
                     out.push(*literal as u16);
                 }
                 LoweredKind::Format21ih { reg, literal } => {
+                    let encoded = (((*reg & 0x00ff) as u16) << 8) | opcode_value as u16;
+                    out.push(encoded);
+                    out.push(*literal as u16);
+                }
+                LoweredKind::Format21lh { reg, literal } => {
                     let encoded = (((*reg & 0x00ff) as u16) << 8) | opcode_value as u16;
                     out.push(encoded);
                     out.push(*literal as u16);
@@ -619,6 +721,17 @@ pub mod assemble {
                         | opcode_value as u16;
                     out.push(encoded);
                     out.push(*index as u16);
+                }
+                LoweredKind::Format22cs {
+                    reg_a,
+                    reg_b,
+                    index,
+                } => {
+                    let encoded = (((*reg_b & 0x000f) as u16) << 12)
+                        | (((*reg_a & 0x000f) as u16) << 8)
+                        | opcode_value as u16;
+                    out.push(encoded);
+                    out.push(*index);
                 }
                 LoweredKind::Format22t {
                     reg_a,
@@ -685,6 +798,34 @@ pub mod assemble {
                     out.push(word1);
                     out.push(word2);
                 }
+                LoweredKind::Format35mi { index, regs, count } => {
+                    let (c, d, e, f, g) = unpack_invoke_regs(*count, regs);
+                    let word0 = ((u16::from(*count) & 0x000f) << 12)
+                        | ((g & 0x000f) << 8)
+                        | opcode_value as u16;
+                    let word1 = *index;
+                    let word2 = ((f & 0x000f) << 12)
+                        | ((e & 0x000f) << 8)
+                        | ((d & 0x000f) << 4)
+                        | (c & 0x000f);
+                    out.push(word0);
+                    out.push(word1);
+                    out.push(word2);
+                }
+                LoweredKind::Format35ms { index, regs, count } => {
+                    let (c, d, e, f, g) = unpack_invoke_regs(*count, regs);
+                    let word0 = ((u16::from(*count) & 0x000f) << 12)
+                        | ((g & 0x000f) << 8)
+                        | opcode_value as u16;
+                    let word1 = *index as u16;
+                    let word2 = ((f & 0x000f) << 12)
+                        | ((e & 0x000f) << 8)
+                        | ((d & 0x000f) << 4)
+                        | (c & 0x000f);
+                    out.push(word0);
+                    out.push(word1);
+                    out.push(word2);
+                }
                 LoweredKind::Format3rc {
                     first_reg,
                     count,
@@ -698,6 +839,24 @@ pub mod assemble {
                     }
                     out.push(((*count & 0x00ff) << 8) | opcode_value as u16);
                     out.push(*index as u16);
+                    out.push(*first_reg);
+                }
+                LoweredKind::Format3rmi {
+                    first_reg,
+                    count,
+                    index,
+                } => {
+                    out.push(((*count & 0x00ff) << 8) | opcode_value as u16);
+                    out.push(*index);
+                    out.push(*first_reg);
+                }
+                LoweredKind::Format3rms {
+                    first_reg,
+                    count,
+                    index,
+                } => {
+                    out.push(((*count & 0x00ff) << 8) | opcode_value as u16);
+                    out.push(*index);
                     out.push(*first_reg);
                 }
                 LoweredKind::Format45cc {
@@ -938,6 +1097,61 @@ pub mod assemble {
         (take(0), take(1), take(2), take(3), take(4))
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum QuickInvokeKind {
+        Virtual,
+        Super,
+    }
+
+    fn detect_quick_field(field: &FieldRef) -> Result<Option<u16>, DexError> {
+        if field.class != "Lquick;" {
+            return Ok(None);
+        }
+        let Some(rest) = field.name.strip_prefix("field@") else {
+            return Err(DexError::new(
+                "quick field placeholder must be written as Lquick;->field@N:Type",
+            ));
+        };
+        let idx = rest
+            .parse::<u16>()
+            .map_err(|_| DexError::new("quick field index out of range"))?;
+        Ok(Some(idx))
+    }
+
+    fn detect_quick_method(
+        opcode_name: &str,
+        method: &MethodRef,
+    ) -> Result<Option<(QuickInvokeKind, u16)>, DexError> {
+        if method.class != "Lquick;" {
+            return Ok(None);
+        }
+
+        let (kind, suffix) = if let Some(rest) = method.name.strip_prefix("virtual@") {
+            if !opcode_name.starts_with("invoke-virtual") {
+                return Err(DexError::new(
+                    "quick virtual targets must be paired with invoke-virtual opcodes",
+                ));
+            }
+            (QuickInvokeKind::Virtual, rest)
+        } else if let Some(rest) = method.name.strip_prefix("super@") {
+            if !opcode_name.starts_with("invoke-super") {
+                return Err(DexError::new(
+                    "quick super targets must be paired with invoke-super opcodes",
+                ));
+            }
+            (QuickInvokeKind::Super, rest)
+        } else {
+            return Err(DexError::new(
+                "unsupported quick method placeholder (expected virtual@N or super@N)",
+            ));
+        };
+
+        let idx = suffix
+            .parse::<u16>()
+            .map_err(|_| DexError::new("quick method index out of range"))?;
+        Ok(Some((kind, idx)))
+    }
+
     #[derive(Debug)]
     enum LoweredKind {
         Format10x,
@@ -952,11 +1166,19 @@ pub mod assemble {
             dest: u16,
             src: u16,
         },
+        Format20bc {
+            kind: u8,
+            index: u16,
+        },
         Format21s {
             reg: u16,
             literal: i16,
         },
         Format21ih {
+            reg: u16,
+            literal: i16,
+        },
+        Format21lh {
             reg: u16,
             literal: i16,
         },
@@ -988,6 +1210,11 @@ pub mod assemble {
             reg_a: u16,
             reg_b: u16,
             index: u32,
+        },
+        Format22cs {
+            reg_a: u16,
+            reg_b: u16,
+            index: u16,
         },
         Format22t {
             reg_a: u16,
@@ -1031,10 +1258,30 @@ pub mod assemble {
             regs: [u16; 5],
             count: u8,
         },
+        Format35mi {
+            index: u16,
+            regs: [u16; 5],
+            count: u8,
+        },
+        Format35ms {
+            index: u16,
+            regs: [u16; 5],
+            count: u8,
+        },
         Format3rc {
             first_reg: u16,
             count: u16,
             index: u32,
+        },
+        Format3rmi {
+            first_reg: u16,
+            count: u16,
+            index: u16,
+        },
+        Format3rms {
+            first_reg: u16,
+            count: u16,
+            index: u16,
         },
         Format45cc {
             index: u32,
@@ -1201,7 +1448,7 @@ pub mod assemble {
                         ensure_reg8(resolve_register(layout, dest)?, "const-wide/high16 dest")?;
                     Ok(LoweredInstruction::new(
                         opcode,
-                        LoweredKind::Format21ih {
+                        LoweredKind::Format21lh {
                             reg,
                             literal: *value,
                         },
@@ -1313,6 +1560,12 @@ pub mod assemble {
                 }
                 DexOp::MonitorExit { src } => self.lower_single_reg_op("monitor-exit", src, layout),
                 DexOp::Throw { src } => self.lower_single_reg_op("throw", src, layout),
+                DexOp::ThrowVerificationError { kind, reference } => {
+                    self.lower_throw_verification_error(*kind, reference)
+                }
+                DexOp::MoveException { dest } => {
+                    self.lower_single_reg_op("move-exception", dest, layout)
+                }
                 DexOp::AGet { dest, array, index } => {
                     self.lower_array_get("aget", dest, array, index, layout)
                 }
@@ -1489,6 +1742,261 @@ pub mod assemble {
                 DexOp::SPutShort { src, field } => {
                     self.lower_static_field_put("sput-short", src, field, layout)
                 }
+                DexOp::AddInt { dest, src1, src2 } => {
+                    self.lower_three_reg("add-int", dest, src1, src2, layout)
+                }
+                DexOp::SubInt { dest, src1, src2 } => {
+                    self.lower_three_reg("sub-int", dest, src1, src2, layout)
+                }
+                DexOp::MulInt { dest, src1, src2 } => {
+                    self.lower_three_reg("mul-int", dest, src1, src2, layout)
+                }
+                DexOp::DivInt { dest, src1, src2 } => {
+                    self.lower_three_reg("div-int", dest, src1, src2, layout)
+                }
+                DexOp::RemInt { dest, src1, src2 } => {
+                    self.lower_three_reg("rem-int", dest, src1, src2, layout)
+                }
+                DexOp::AndInt { dest, src1, src2 } => {
+                    self.lower_three_reg("and-int", dest, src1, src2, layout)
+                }
+                DexOp::OrInt { dest, src1, src2 } => {
+                    self.lower_three_reg("or-int", dest, src1, src2, layout)
+                }
+                DexOp::XorInt { dest, src1, src2 } => {
+                    self.lower_three_reg("xor-int", dest, src1, src2, layout)
+                }
+                DexOp::ShlInt { dest, src1, src2 } => {
+                    self.lower_three_reg("shl-int", dest, src1, src2, layout)
+                }
+                DexOp::ShrInt { dest, src1, src2 } => {
+                    self.lower_three_reg("shr-int", dest, src1, src2, layout)
+                }
+                DexOp::UshrInt { dest, src1, src2 } => {
+                    self.lower_three_reg("ushr-int", dest, src1, src2, layout)
+                }
+                DexOp::AddLong { dest, src1, src2 } => {
+                    self.lower_three_reg("add-long", dest, src1, src2, layout)
+                }
+                DexOp::SubLong { dest, src1, src2 } => {
+                    self.lower_three_reg("sub-long", dest, src1, src2, layout)
+                }
+                DexOp::MulLong { dest, src1, src2 } => {
+                    self.lower_three_reg("mul-long", dest, src1, src2, layout)
+                }
+                DexOp::DivLong { dest, src1, src2 } => {
+                    self.lower_three_reg("div-long", dest, src1, src2, layout)
+                }
+                DexOp::RemLong { dest, src1, src2 } => {
+                    self.lower_three_reg("rem-long", dest, src1, src2, layout)
+                }
+                DexOp::AndLong { dest, src1, src2 } => {
+                    self.lower_three_reg("and-long", dest, src1, src2, layout)
+                }
+                DexOp::OrLong { dest, src1, src2 } => {
+                    self.lower_three_reg("or-long", dest, src1, src2, layout)
+                }
+                DexOp::XorLong { dest, src1, src2 } => {
+                    self.lower_three_reg("xor-long", dest, src1, src2, layout)
+                }
+                DexOp::ShlLong { dest, src1, src2 } => {
+                    self.lower_three_reg("shl-long", dest, src1, src2, layout)
+                }
+                DexOp::ShrLong { dest, src1, src2 } => {
+                    self.lower_three_reg("shr-long", dest, src1, src2, layout)
+                }
+                DexOp::UshrLong { dest, src1, src2 } => {
+                    self.lower_three_reg("ushr-long", dest, src1, src2, layout)
+                }
+                DexOp::AddFloat { dest, src1, src2 } => {
+                    self.lower_three_reg("add-float", dest, src1, src2, layout)
+                }
+                DexOp::SubFloat { dest, src1, src2 } => {
+                    self.lower_three_reg("sub-float", dest, src1, src2, layout)
+                }
+                DexOp::MulFloat { dest, src1, src2 } => {
+                    self.lower_three_reg("mul-float", dest, src1, src2, layout)
+                }
+                DexOp::DivFloat { dest, src1, src2 } => {
+                    self.lower_three_reg("div-float", dest, src1, src2, layout)
+                }
+                DexOp::RemFloat { dest, src1, src2 } => {
+                    self.lower_three_reg("rem-float", dest, src1, src2, layout)
+                }
+                DexOp::AddDouble { dest, src1, src2 } => {
+                    self.lower_three_reg("add-double", dest, src1, src2, layout)
+                }
+                DexOp::SubDouble { dest, src1, src2 } => {
+                    self.lower_three_reg("sub-double", dest, src1, src2, layout)
+                }
+                DexOp::MulDouble { dest, src1, src2 } => {
+                    self.lower_three_reg("mul-double", dest, src1, src2, layout)
+                }
+                DexOp::DivDouble { dest, src1, src2 } => {
+                    self.lower_three_reg("div-double", dest, src1, src2, layout)
+                }
+                DexOp::RemDouble { dest, src1, src2 } => {
+                    self.lower_three_reg("rem-double", dest, src1, src2, layout)
+                }
+                DexOp::AddInt2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("add-int/2addr", reg, src, layout)
+                }
+                DexOp::SubInt2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("sub-int/2addr", reg, src, layout)
+                }
+                DexOp::MulInt2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("mul-int/2addr", reg, src, layout)
+                }
+                DexOp::DivInt2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("div-int/2addr", reg, src, layout)
+                }
+                DexOp::RemInt2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("rem-int/2addr", reg, src, layout)
+                }
+                DexOp::AndInt2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("and-int/2addr", reg, src, layout)
+                }
+                DexOp::OrInt2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("or-int/2addr", reg, src, layout)
+                }
+                DexOp::XorInt2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("xor-int/2addr", reg, src, layout)
+                }
+                DexOp::ShlInt2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("shl-int/2addr", reg, src, layout)
+                }
+                DexOp::ShrInt2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("shr-int/2addr", reg, src, layout)
+                }
+                DexOp::UshrInt2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("ushr-int/2addr", reg, src, layout)
+                }
+                DexOp::AddLong2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("add-long/2addr", reg, src, layout)
+                }
+                DexOp::SubLong2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("sub-long/2addr", reg, src, layout)
+                }
+                DexOp::MulLong2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("mul-long/2addr", reg, src, layout)
+                }
+                DexOp::DivLong2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("div-long/2addr", reg, src, layout)
+                }
+                DexOp::RemLong2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("rem-long/2addr", reg, src, layout)
+                }
+                DexOp::AndLong2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("and-long/2addr", reg, src, layout)
+                }
+                DexOp::OrLong2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("or-long/2addr", reg, src, layout)
+                }
+                DexOp::XorLong2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("xor-long/2addr", reg, src, layout)
+                }
+                DexOp::ShlLong2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("shl-long/2addr", reg, src, layout)
+                }
+                DexOp::ShrLong2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("shr-long/2addr", reg, src, layout)
+                }
+                DexOp::UshrLong2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("ushr-long/2addr", reg, src, layout)
+                }
+                DexOp::AddFloat2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("add-float/2addr", reg, src, layout)
+                }
+                DexOp::SubFloat2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("sub-float/2addr", reg, src, layout)
+                }
+                DexOp::MulFloat2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("mul-float/2addr", reg, src, layout)
+                }
+                DexOp::DivFloat2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("div-float/2addr", reg, src, layout)
+                }
+                DexOp::RemFloat2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("rem-float/2addr", reg, src, layout)
+                }
+                DexOp::AddDouble2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("add-double/2addr", reg, src, layout)
+                }
+                DexOp::SubDouble2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("sub-double/2addr", reg, src, layout)
+                }
+                DexOp::MulDouble2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("mul-double/2addr", reg, src, layout)
+                }
+                DexOp::DivDouble2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("div-double/2addr", reg, src, layout)
+                }
+                DexOp::RemDouble2Addr { reg, src } => {
+                    self.lower_two_reg_format12x("rem-double/2addr", reg, src, layout)
+                }
+                DexOp::NegInt { dest, src } => {
+                    self.lower_two_reg_format12x("neg-int", dest, src, layout)
+                }
+                DexOp::NotInt { dest, src } => {
+                    self.lower_two_reg_format12x("not-int", dest, src, layout)
+                }
+                DexOp::NegLong { dest, src } => {
+                    self.lower_two_reg_format12x("neg-long", dest, src, layout)
+                }
+                DexOp::NotLong { dest, src } => {
+                    self.lower_two_reg_format12x("not-long", dest, src, layout)
+                }
+                DexOp::NegFloat { dest, src } => {
+                    self.lower_two_reg_format12x("neg-float", dest, src, layout)
+                }
+                DexOp::NegDouble { dest, src } => {
+                    self.lower_two_reg_format12x("neg-double", dest, src, layout)
+                }
+                DexOp::IntToLong { dest, src } => {
+                    self.lower_two_reg_format12x("int-to-long", dest, src, layout)
+                }
+                DexOp::IntToFloat { dest, src } => {
+                    self.lower_two_reg_format12x("int-to-float", dest, src, layout)
+                }
+                DexOp::IntToDouble { dest, src } => {
+                    self.lower_two_reg_format12x("int-to-double", dest, src, layout)
+                }
+                DexOp::LongToInt { dest, src } => {
+                    self.lower_two_reg_format12x("long-to-int", dest, src, layout)
+                }
+                DexOp::LongToFloat { dest, src } => {
+                    self.lower_two_reg_format12x("long-to-float", dest, src, layout)
+                }
+                DexOp::LongToDouble { dest, src } => {
+                    self.lower_two_reg_format12x("long-to-double", dest, src, layout)
+                }
+                DexOp::FloatToInt { dest, src } => {
+                    self.lower_two_reg_format12x("float-to-int", dest, src, layout)
+                }
+                DexOp::FloatToLong { dest, src } => {
+                    self.lower_two_reg_format12x("float-to-long", dest, src, layout)
+                }
+                DexOp::FloatToDouble { dest, src } => {
+                    self.lower_two_reg_format12x("float-to-double", dest, src, layout)
+                }
+                DexOp::DoubleToInt { dest, src } => {
+                    self.lower_two_reg_format12x("double-to-int", dest, src, layout)
+                }
+                DexOp::DoubleToLong { dest, src } => {
+                    self.lower_two_reg_format12x("double-to-long", dest, src, layout)
+                }
+                DexOp::DoubleToFloat { dest, src } => {
+                    self.lower_two_reg_format12x("double-to-float", dest, src, layout)
+                }
+                DexOp::IntToByte { dest, src } => {
+                    self.lower_two_reg_format12x("int-to-byte", dest, src, layout)
+                }
+                DexOp::IntToChar { dest, src } => {
+                    self.lower_two_reg_format12x("int-to-char", dest, src, layout)
+                }
+                DexOp::IntToShort { dest, src } => {
+                    self.lower_two_reg_format12x("int-to-short", dest, src, layout)
+                }
                 DexOp::AddIntLit8 { dest, src, literal } => {
                     self.lower_lit8("add-int/lit8", dest, src, *literal, layout)
                 }
@@ -1561,6 +2069,10 @@ pub mod assemble {
                 DexOp::InvokeStatic { registers, method } => {
                     self.lower_invoke("invoke-static", registers, method, layout)
                 }
+                DexOp::ExecuteInline {
+                    registers,
+                    inline_index,
+                } => self.lower_execute_inline(registers, *inline_index, layout),
                 DexOp::InvokeVirtualRange { range, method } => {
                     self.lower_invoke_range("invoke-virtual/range", range, method, layout)
                 }
@@ -1576,6 +2088,10 @@ pub mod assemble {
                 DexOp::InvokeInterfaceRange { range, method } => {
                     self.lower_invoke_range("invoke-interface/range", range, method, layout)
                 }
+                DexOp::ExecuteInlineRange {
+                    range,
+                    inline_index,
+                } => self.lower_execute_inline_range(range, *inline_index, layout),
                 DexOp::InvokeCustom {
                     registers,
                     call_site,
@@ -1835,6 +2351,9 @@ pub mod assemble {
                 DexError::new(&format!("opcode {} not present in table", opcode_name))
             })?;
             let packed = self.pack_invoke_registers(opcode_name, registers, layout)?;
+            if let Some((kind, idx)) = detect_quick_method(opcode_name, method)? {
+                return self.lower_quick_invoke(kind, packed, idx);
+            }
             let index = self.resolve_method_index(method)?;
             Ok(LoweredInstruction::new(
                 opcode,
@@ -1857,10 +2376,60 @@ pub mod assemble {
                 DexError::new(&format!("opcode {} not present in table", opcode_name))
             })?;
             let (first_reg, count) = self.pack_invoke_range(opcode_name, range, layout)?;
+            if let Some((kind, idx)) = detect_quick_method(opcode_name, method)? {
+                return self.lower_quick_invoke_range(kind, first_reg, count, idx);
+            }
             let index = self.resolve_method_index(method)?;
             Ok(LoweredInstruction::new(
                 opcode,
                 LoweredKind::Format3rc {
+                    first_reg,
+                    count,
+                    index,
+                },
+            ))
+        }
+
+        fn lower_quick_invoke(
+            &self,
+            kind: QuickInvokeKind,
+            regs: PackedInvokeRegisters,
+            index: u16,
+        ) -> Result<LoweredInstruction, DexError> {
+            let opcode_name = match kind {
+                QuickInvokeKind::Virtual => "invoke-virtual-quick",
+                QuickInvokeKind::Super => "invoke-super-quick",
+            };
+            let opcode = opcode_by_name(opcode_name).ok_or_else(|| {
+                DexError::new(&format!("opcode {} not present in table", opcode_name))
+            })?;
+            Ok(LoweredInstruction::new(
+                opcode,
+                LoweredKind::Format35ms {
+                    index,
+                    regs: regs.regs,
+                    count: regs.count,
+                },
+            ))
+        }
+
+        fn lower_quick_invoke_range(
+            &self,
+            kind: QuickInvokeKind,
+            first_reg: u16,
+            count: u16,
+            index: u16,
+        ) -> Result<LoweredInstruction, DexError> {
+            let opcode_name = match kind {
+                QuickInvokeKind::Virtual => "invoke-virtual-quick/range",
+                QuickInvokeKind::Super => "invoke-super-quick/range",
+            };
+            let opcode = opcode_by_name(opcode_name).ok_or_else(|| {
+                DexError::new(&format!("opcode {} not present in table", opcode_name))
+            })?;
+            Ok(LoweredInstruction::new(
+                opcode,
+                LoweredKind::Format3rms {
                     first_reg,
                     count,
                     index,
@@ -2074,6 +2643,9 @@ pub mod assemble {
                 resolve_register(layout, object)?,
                 &format!("{} object", opcode_name),
             )?;
+            if let Some(idx) = detect_quick_field(field)? {
+                return self.lower_quick_field_accessor(opcode_name, dest_reg, obj_reg, idx);
+            }
             let index = self.resolve_field_index(field)?;
             Ok(LoweredInstruction::new(
                 opcode,
@@ -2104,12 +2676,36 @@ pub mod assemble {
                 resolve_register(layout, object)?,
                 &format!("{} object", opcode_name),
             )?;
+            if let Some(idx) = detect_quick_field(field)? {
+                return self.lower_quick_field_accessor(opcode_name, src_reg, obj_reg, idx);
+            }
             let index = self.resolve_field_index(field)?;
             Ok(LoweredInstruction::new(
                 opcode,
                 LoweredKind::Format22c {
                     reg_a: src_reg,
                     reg_b: obj_reg,
+                    index,
+                },
+            ))
+        }
+
+        fn lower_quick_field_accessor(
+            &self,
+            opcode_name: &str,
+            reg_a: u16,
+            reg_b: u16,
+            index: u16,
+        ) -> Result<LoweredInstruction, DexError> {
+            let quick_name = format!("{}-quick", opcode_name);
+            let opcode = opcode_by_name(&quick_name).ok_or_else(|| {
+                DexError::new(&format!("opcode {} not present in table", quick_name))
+            })?;
+            Ok(LoweredInstruction::new(
+                opcode,
+                LoweredKind::Format22cs {
+                    reg_a,
+                    reg_b,
                     index,
                 },
             ))
@@ -2334,6 +2930,81 @@ pub mod assemble {
             ))
         }
 
+        fn lower_throw_verification_error(
+            &self,
+            kind: u8,
+            reference: &VerificationErrorRef,
+        ) -> Result<LoweredInstruction, DexError> {
+            let opcode = opcode_by_name("throw-verification-error").ok_or_else(|| {
+                DexError::new("opcode throw-verification-error not present in table")
+            })?;
+            let index = self.resolve_verification_reference(reference)?;
+            Ok(LoweredInstruction::new(
+                opcode,
+                LoweredKind::Format20bc { kind, index },
+            ))
+        }
+
+        fn resolve_verification_reference(
+            &self,
+            reference: &VerificationErrorRef,
+        ) -> Result<u16, DexError> {
+            match reference {
+                VerificationErrorRef::None => Ok(0),
+                VerificationErrorRef::Type(desc) => {
+                    let idx = self.resolve_type_index(desc)?;
+                    ensure_u16_index(idx, "type")
+                }
+                VerificationErrorRef::Field(field) => {
+                    let idx = self.resolve_field_index(field)?;
+                    ensure_u16_index(idx, "field")
+                }
+                VerificationErrorRef::Method(method) => {
+                    let idx = self.resolve_method_index(method)?;
+                    ensure_u16_index(idx, "method")
+                }
+            }
+        }
+
+        fn lower_execute_inline(
+            &self,
+            registers: &[SmaliRegister],
+            inline_index: u16,
+            layout: &MethodRegisterLayout,
+        ) -> Result<LoweredInstruction, DexError> {
+            let opcode = opcode_by_name("execute-inline")
+                .ok_or_else(|| DexError::new("opcode execute-inline not present in table"))?;
+            let packed = self.pack_invoke_registers("execute-inline", registers, layout)?;
+            Ok(LoweredInstruction::new(
+                opcode,
+                LoweredKind::Format35mi {
+                    index: inline_index,
+                    regs: packed.regs,
+                    count: packed.count,
+                },
+            ))
+        }
+
+        fn lower_execute_inline_range(
+            &self,
+            range: &RegisterRange,
+            inline_index: u16,
+            layout: &MethodRegisterLayout,
+        ) -> Result<LoweredInstruction, DexError> {
+            let opcode = opcode_by_name("execute-inline/range")
+                .ok_or_else(|| DexError::new("opcode execute-inline/range not present in table"))?;
+            let (first_reg, count) =
+                self.pack_invoke_range("execute-inline/range", range, layout)?;
+            Ok(LoweredInstruction::new(
+                opcode,
+                LoweredKind::Format3rmi {
+                    first_reg,
+                    count,
+                    index: inline_index,
+                },
+            ))
+        }
+
         fn lower_single_reg_op(
             &self,
             opcode_name: &str,
@@ -2550,6 +3221,16 @@ pub mod assemble {
             )));
         }
         Ok(reg)
+    }
+
+    fn ensure_u16_index(value: u32, context: &str) -> Result<u16, DexError> {
+        if value > u16::MAX as u32 {
+            return Err(DexError::new(&format!(
+                "{} index {} exceeds 16-bit range",
+                context, value
+            )));
+        }
+        Ok(value as u16)
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -4261,6 +4942,27 @@ fn format_instruction_line(
             )
         }
         Format::Format35mi => {
+            // G|A | op, BBBB, F|E|D|C  (A=arg count, regs, BBBB inline index)
+            let inst0 = u16_at(code, pc);
+            let inst1 = u16_at(code, pc + 1);
+            let inst2 = u16_at(code, pc + 2);
+            let a = ((inst0 >> 12) & 0x0f) as u8; // arg count
+            let g = ((inst0 >> 8) & 0x0f) as u8;
+            let c = (inst2 & 0x000f) as u8;
+            let d = ((inst2 >> 4) & 0x0f) as u8;
+            let e = ((inst2 >> 8) & 0x0f) as u8;
+            let f = ((inst2 >> 12) & 0x0f) as u8;
+            let idx = inst1 as u16;
+            let mut regs = Vec::new();
+            for r in [c, d, e, f, g].into_iter().take(a as usize) {
+                regs.push(fmt_reg(regmap, r as u16));
+            }
+            (
+                format!("{} {{{}}}, inline@{}", op.name, regs.join(", "), idx),
+                3,
+            )
+        }
+        Format::Format35ms => {
             // G|A | op, BBBB, F|E|D|C  (A=arg count, C..G=regs, BBBB is vtable index / quick index)
             let inst0 = u16_at(code, pc);
             let inst1 = u16_at(code, pc + 1);
@@ -4310,6 +5012,23 @@ fn format_instruction_line(
             (format!("{} {}, {}", op.name, range, target), 3)
         }
         Format::Format3rmi => {
+            // AA | op, BBBB, CCCC  (range: first=C, count=AA, BBBB = inline index)
+            let inst0 = u16_at(code, pc);
+            let idx = u16_at(code, pc + 1);
+            let first = u16_at(code, pc + 2);
+            let count = a8(inst0) as u16;
+            let range = if count == 0 {
+                String::from("{}")
+            } else {
+                format!(
+                    "{{{} .. {}}}",
+                    fmt_reg(regmap, first),
+                    fmt_reg(regmap, first + count - 1)
+                )
+            };
+            (format!("{} {}, inline@{}", op.name, range, idx), 3)
+        }
+        Format::Format3rms => {
             // AA | op, BBBB, CCCC  (range: first=C, count=AA, BBBB = vtable/quick index)
             let inst0 = u16_at(code, pc);
             let idx = u16_at(code, pc + 1) as u32;
@@ -4625,8 +5344,8 @@ pub fn decode(bytecode: &[u8], api: i32, art_version: i32) -> Result<Vec<SmaliOp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dex::opcode_format::assemble::{AssemblerIndexResolver, MethodAssembler};
-    use crate::smali_ops::{MethodRef, RegisterRange, SmaliRegister};
+    use crate::dex::opcode_format::assemble::{AssemblerIndexResolver, LineEvent, MethodAssembler};
+    use crate::smali_ops::{MethodRef, SmaliRegister};
     use crate::types::{DexOp, MethodSignature, SmaliClass, SmaliOp};
     use std::collections::HashMap;
 
@@ -4750,6 +5469,226 @@ mod tests {
         let ops = decode(bc.as_slice(), 33, 0).unwrap();
 
         println!("{:?}", ops);
+    }
+
+    #[test]
+    fn bytecode_assembler_handles_arithmetic_ops() {
+        let smali = r#"
+.class public Lcom/example/Arith;
+.super Ljava/lang/Object;
+
+.method public static op(II)I
+    .locals 1
+    add-int v0, p0, p1
+    add-int/2addr v0, p0
+    sub-long p0, p0, p1
+    mul-float v0, v0, v0
+    div-double p0, p0, p0
+    return v0
+.end method
+"#;
+
+        let class = SmaliClass::from_smali(smali).expect("parse class");
+        let method = class
+            .methods
+            .iter()
+            .find(|m| m.name == "op")
+            .expect("method present");
+        let assembler = MethodAssembler::new(&DummyResolver, 33, 200);
+        let result = assembler
+            .assemble_method(&class.name.as_jni_type(), method)
+            .expect("assemble");
+        let ops = decode(&code_units_to_bytes(&result.encoded_code_units), 33, 200)
+            .expect("decode result");
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, SmaliOp::Op(DexOp::AddInt { .. })))
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, SmaliOp::Op(DexOp::AddInt2Addr { .. })))
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, SmaliOp::Op(DexOp::SubLong { .. })))
+        );
+    }
+
+    #[test]
+    fn bytecode_assembler_handles_conversions_and_unary_ops() {
+        let smali = r#"
+.class public Lcom/example/Convert;
+.super Ljava/lang/Object;
+
+.method public static convert(D)I
+    .locals 4
+    neg-double v0, p0
+    double-to-int v2, v0
+    int-to-long v0, v2
+    return v2
+.end method
+"#;
+
+        let class = SmaliClass::from_smali(smali).expect("parse class");
+        let method = class
+            .methods
+            .iter()
+            .find(|m| m.name == "convert")
+            .expect("method present");
+        let assembler = MethodAssembler::new(&DummyResolver, 33, 200);
+        let result = assembler
+            .assemble_method(&class.name.as_jni_type(), method)
+            .expect("assemble");
+        let ops = decode(&code_units_to_bytes(&result.encoded_code_units), 33, 200)
+            .expect("decode result");
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, SmaliOp::Op(DexOp::NegDouble { .. })))
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, SmaliOp::Op(DexOp::DoubleToInt { .. })))
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, SmaliOp::Op(DexOp::IntToLong { .. })))
+        );
+    }
+
+    #[test]
+    fn bytecode_assembler_handles_const_wide_high16() {
+        let smali = r#"
+.class public Lcom/example/Lit;
+.super Ljava/lang/Object;
+
+.method public static wide()J
+    .locals 2
+    const-wide/high16 v0, 0x1000000000000L
+    return-wide v0
+.end method
+"#;
+
+        let class = SmaliClass::from_smali(smali).expect("parse class");
+        let method = class
+            .methods
+            .iter()
+            .find(|m| m.name == "wide")
+            .expect("method present");
+        let assembler = MethodAssembler::new(&DummyResolver, 33, 200);
+        let result = assembler
+            .assemble_method(&class.name.as_jni_type(), method)
+            .expect("assemble");
+        assert_eq!(result.encoded_code_units[0] & 0x00ff, 0x19);
+        assert_eq!(result.encoded_code_units[1], 0x0001);
+    }
+
+    #[test]
+    fn bytecode_assembler_emits_quick_field_accessors() {
+        let smali = r#"
+.class public Lcom/example/QuickField;
+.super Ljava/lang/Object;
+
+.method public static load()V
+    .locals 2
+    iget v0, v1, Lquick;->field@3:I
+    return-void
+.end method
+"#;
+
+        let class = SmaliClass::from_smali(smali).expect("parse class");
+        let method = class
+            .methods
+            .iter()
+            .find(|m| m.name == "load")
+            .expect("method present");
+        let assembler = MethodAssembler::new(&DummyResolver, 33, 200);
+        let result = assembler
+            .assemble_method(&class.name.as_jni_type(), method)
+            .expect("assemble");
+        assert_eq!(result.encoded_code_units[0] & 0x00ff, 0xf2);
+    }
+
+    #[test]
+    fn bytecode_assembler_emits_quick_invoke() {
+        let smali = r#"
+.class public Lcom/example/QuickInvoke;
+.super Ljava/lang/Object;
+
+.method public static call()V
+    .locals 1
+    invoke-virtual {v0}, Lquick;->virtual@5()V
+    return-void
+.end method
+"#;
+
+        let class = SmaliClass::from_smali(smali).expect("parse class");
+        let method = class
+            .methods
+            .iter()
+            .find(|m| m.name == "call")
+            .expect("method present");
+        let assembler = MethodAssembler::new(&DummyResolver, 33, 200);
+        let result = assembler
+            .assemble_method(&class.name.as_jni_type(), method)
+            .expect("assemble");
+        assert_eq!(result.encoded_code_units[0] & 0x00ff, 0xf8);
+    }
+
+    #[test]
+    fn bytecode_assembler_emits_throw_verification_error() {
+        let smali = r#"
+.class public Lcom/example/Verify;
+.super Ljava/lang/Object;
+
+.method public static broken()V
+    .locals 0
+    throw-verification-error 7, Ljava/lang/Object;
+    return-void
+.end method
+"#;
+
+        let class = SmaliClass::from_smali(smali).expect("parse class");
+        let method = class
+            .methods
+            .iter()
+            .find(|m| m.name == "broken")
+            .expect("method present");
+        let assembler = MethodAssembler::new(&DummyResolver, 33, 200);
+        let result = assembler
+            .assemble_method(&class.name.as_jni_type(), method)
+            .expect("assemble");
+        assert_eq!(result.encoded_code_units[0] & 0x00ff, 0xed);
+        assert_eq!(result.encoded_code_units[0] >> 8, 7);
+    }
+
+    #[test]
+    fn bytecode_assembler_emits_execute_inline_variants() {
+        let smali = r#"
+.class public Lcom/example/Inline;
+.super Ljava/lang/Object;
+
+.method public static call()V
+    .locals 3
+    execute-inline {v0, v1}, inline@0x21
+    execute-inline/range {v0 .. v2}, inline@5
+    return-void
+.end method
+"#;
+
+        let class = SmaliClass::from_smali(smali).expect("parse class");
+        let method = class
+            .methods
+            .iter()
+            .find(|m| m.name == "call")
+            .expect("method present");
+        let assembler = MethodAssembler::new(&DummyResolver, 33, 200);
+        let result = assembler
+            .assemble_method(&class.name.as_jni_type(), method)
+            .expect("assemble");
+        assert_eq!(result.encoded_code_units[0] & 0x00ff, 0xee);
+        assert_eq!(result.encoded_code_units[1], 0x21);
+        assert_eq!(result.encoded_code_units[3] & 0x00ff, 0xef);
+        assert_eq!(result.encoded_code_units[4], 5);
     }
 
     #[test]

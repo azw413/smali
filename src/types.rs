@@ -6,7 +6,7 @@ use crate::dex::dex_file::{
     ACC_FINAL, ACC_INTERFACE, ACC_NATIVE, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
     ACC_STRICT, ACC_SYNCHRONIZED, ACC_SYNTHETIC, ACC_TRANSIENT, ACC_VARARGS, ACC_VOLATILE,
 };
-pub(crate) use crate::smali_ops::{DexOp, Label};
+pub(crate) use crate::smali_ops::{DexOp, Label, SmaliRegister, VerificationErrorRef};
 use crate::smali_parse::parse_class;
 use crate::smali_write::write_class;
 use crate::smali_write::{write_field, write_method};
@@ -838,6 +838,20 @@ pub enum SmaliOp {
     ArrayData(ArrayDataDirective),
     PackedSwitch(PackedSwitchDirective),
     SparseSwitch(SparseSwitchDirective),
+    Prologue,
+    Epilogue,
+    Local {
+        register: SmaliRegister,
+        name: Option<String>,
+        descriptor: Option<String>,
+        signature: Option<String>,
+    },
+    EndLocal {
+        register: SmaliRegister,
+    },
+    RestartLocal {
+        register: SmaliRegister,
+    },
 }
 
 /// Struct representing a method parameter

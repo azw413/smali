@@ -2,7 +2,7 @@ use crate::types::{parse_methodsignature, parse_typesignature};
 use nom::Parser;
 use nom::bytes::complete::escaped;
 use nom::character::complete::{none_of, one_of};
-use nom::combinator::opt;
+use nom::combinator::{map, opt};
 use nom::multi::separated_list0;
 use nom::sequence::pair;
 use nom::{
@@ -10,6 +10,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_until, take_while1},
     character::complete::{alphanumeric1, char, digit1, multispace0, space0, space1},
+    error::{Error, ErrorKind},
     sequence::{delimited, preceded},
 };
 use std::fmt;
@@ -75,6 +76,25 @@ impl fmt::Display for FieldRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Example: Lcom/example/MyClass;->myField:I
         write!(f, "{}->{}:{}", self.class, self.name, self.descriptor)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum VerificationErrorRef {
+    None,
+    Type(String),
+    Field(FieldRef),
+    Method(MethodRef),
+}
+
+impl fmt::Display for VerificationErrorRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VerificationErrorRef::None => write!(f, "none"),
+            VerificationErrorRef::Type(desc) => write!(f, "{}", desc),
+            VerificationErrorRef::Field(field) => write!(f, "{}", field),
+            VerificationErrorRef::Method(method) => write!(f, "{}", method),
+        }
     }
 }
 
@@ -269,6 +289,10 @@ pub enum DexOp {
     },
     Throw {
         src: SmaliRegister,
+    },
+    ThrowVerificationError {
+        kind: u8,
+        reference: VerificationErrorRef,
     },
     Goto {
         offset: Label,
@@ -542,6 +566,10 @@ pub enum DexOp {
         range: RegisterRange,
         method: MethodRef,
     },
+    ExecuteInlineRange {
+        range: RegisterRange,
+        inline_index: u16,
+    },
     InvokeDirect {
         registers: Vec<SmaliRegister>,
         method: MethodRef,
@@ -549,6 +577,10 @@ pub enum DexOp {
     InvokeStatic {
         registers: Vec<SmaliRegister>,
         method: MethodRef,
+    },
+    ExecuteInline {
+        registers: Vec<SmaliRegister>,
+        inline_index: u16,
     },
 
     // Group C: Arithmetic operations (non-2addr).
@@ -1200,6 +1232,9 @@ impl fmt::Display for DexOp {
                 write!(f, "fill-array-data {reg}, {offset}")
             }
             DexOp::Throw { src } => write!(f, "throw {src}"),
+            DexOp::ThrowVerificationError { kind, reference } => {
+                write!(f, "throw-verification-error {kind}, {reference}")
+            }
             DexOp::Goto { offset } => write!(f, "goto {offset}"),
             DexOp::Goto16 { offset } => write!(f, "goto/16 {offset}"),
             DexOp::Goto32 { offset } => write!(f, "goto/32 {offset}"),
@@ -1375,6 +1410,12 @@ impl fmt::Display for DexOp {
             }
             DexOp::InvokeInterfaceRange { range, method } => {
                 write!(f, "invoke-interface/range {range}, {method}")
+            }
+            DexOp::ExecuteInlineRange {
+                range,
+                inline_index,
+            } => {
+                write!(f, "execute-inline/range {range}, inline@{inline_index}")
             }
 
             // Group C: Arithmetic (non-2addr)
@@ -1604,6 +1645,17 @@ impl fmt::Display for DexOp {
                     .collect::<Vec<_>>()
                     .join(", ");
                 write!(f, "invoke-static {{{regs}}}, {method}")
+            }
+            DexOp::ExecuteInline {
+                registers,
+                inline_index,
+            } => {
+                let regs = registers
+                    .iter()
+                    .map(|r| format!("{r}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "execute-inline {{{regs}}}, inline@{inline_index}")
             }
 
             // Arithmetic operations
@@ -1869,6 +1921,30 @@ fn parse_field_ref(input: &str) -> IResult<&str, FieldRef> {
     ))
 }
 
+fn parse_verification_error_ref(input: &str) -> IResult<&str, VerificationErrorRef> {
+    alt((
+        map(parse_method_ref, VerificationErrorRef::Method),
+        map(parse_field_ref, VerificationErrorRef::Field),
+        map(parse_typesignature, |sig| {
+            VerificationErrorRef::Type(sig.to_jni())
+        }),
+        map(tag("none"), |_| VerificationErrorRef::None),
+    ))
+    .parse(input)
+}
+
+fn parse_throw_verification_error(input: &str) -> IResult<&str, DexOp> {
+    let (input, _) = space1(input)?;
+    let (input, kind_val): (&str, i32) = parse_literal_int(input)?;
+    if !(0..=u8::MAX as i32).contains(&kind_val) {
+        return Err(nom::Err::Failure(Error::new(input, ErrorKind::Digit)));
+    }
+    let kind = kind_val as u8;
+    let (input, _) = delimited(space0, char(','), space0).parse(input)?;
+    let (input, reference) = parse_verification_error_ref(input)?;
+    Ok((input, DexOp::ThrowVerificationError { kind, reference }))
+}
+
 fn parse_const_high16(input: &str) -> IResult<&str, DexOp> {
     let (input, _) = space1(input)?;
     let (input, dest) = parse_register(input)?;
@@ -1885,6 +1961,43 @@ fn parse_const_wide_high16(input: &str) -> IResult<&str, DexOp> {
     let (input, value64): (&str, i64) = parse_literal_int(input)?;
     let value = (value64 >> 48) as i16;
     Ok((input, DexOp::ConstWideHigh16 { dest, value }))
+}
+
+fn parse_inline_index(input: &str) -> IResult<&str, u16> {
+    let (input, _) = tag("inline@").parse(input)?;
+    let (input, value): (&str, i32) = parse_literal_int(input)?;
+    if !(0..=u16::MAX as i32).contains(&value) {
+        return Err(nom::Err::Failure(Error::new(input, ErrorKind::Digit)));
+    }
+    Ok((input, value as u16))
+}
+
+fn parse_execute_inline(input: &str) -> IResult<&str, DexOp> {
+    let (input, _) = space1(input)?;
+    let (input, registers) = parse_register_list(input)?;
+    let (input, _) = delimited(space0, char(','), space0).parse(input)?;
+    let (input, inline_index) = parse_inline_index(input)?;
+    Ok((
+        input,
+        DexOp::ExecuteInline {
+            registers,
+            inline_index,
+        },
+    ))
+}
+
+fn parse_execute_inline_range(input: &str) -> IResult<&str, DexOp> {
+    let (input, _) = space1(input)?;
+    let (input, range) = parse_register_range(input)?;
+    let (input, _) = delimited(space0, char(','), space0).parse(input)?;
+    let (input, inline_index) = parse_inline_index(input)?;
+    Ok((
+        input,
+        DexOp::ExecuteInlineRange {
+            range,
+            inline_index,
+        },
+    ))
 }
 
 /// Parses a register range enclosed in braces, e.g. "{v0 .. v6}".
@@ -2279,6 +2392,7 @@ pub fn parse_op(input: &str) -> IResult<&str, DexOp> {
     let r = match op {
         // Invoke operations
         "invoke-static" => invoke_case!(InvokeStatic, input),
+        "execute-inline" => parse_execute_inline(input),
         "invoke-virtual" => invoke_case!(InvokeVirtual, input),
         "invoke-super" => invoke_case!(InvokeSuper, input),
         "invoke-interface" => invoke_case!(InvokeInterface, input),
@@ -2300,6 +2414,7 @@ pub fn parse_op(input: &str) -> IResult<&str, DexOp> {
         "monitor-enter" => one_reg_case!(MonitorEnter, src, input),
         "monitor-exit" => one_reg_case!(MonitorExit, src, input),
         "throw" => one_reg_case!(Throw, src, input),
+        "throw-verification-error" => parse_throw_verification_error(input),
 
         // Two register operations
         // Group A: Move operations.
@@ -2566,6 +2681,7 @@ pub fn parse_op(input: &str) -> IResult<&str, DexOp> {
         "invoke-super/range" => range_method_case!(InvokeSuperRange, input),
         "invoke-direct/range" => range_method_case!(InvokeDirectRange, input),
         "invoke-static/range" => range_method_case!(InvokeStaticRange, input),
+        "execute-inline/range" => parse_execute_inline_range(input),
         "invoke-interface/range" => range_method_case!(InvokeInterfaceRange, input),
 
         // Quickened range invoke synonyms (normalize to standard forms)
@@ -2619,6 +2735,40 @@ mod tests {
         let (rest, mr) = parse_method_ref(input).unwrap();
         assert!(rest.trim().is_empty());
         assert_eq!(mr.to_string(), input);
+    }
+
+    #[test]
+    fn parse_throw_verification_error_reads_kind_and_type() {
+        let input = "throw-verification-error 7, Ljava/lang/Object;";
+        let (rest, op) = parse_op(input).unwrap();
+        assert!(rest.trim().is_empty());
+        match op {
+            DexOp::ThrowVerificationError { kind, reference } => {
+                assert_eq!(kind, 7);
+                assert_eq!(
+                    reference,
+                    VerificationErrorRef::Type("Ljava/lang/Object;".into())
+                );
+            }
+            other => panic!("unexpected op {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_execute_inline_parses_inline_index() {
+        let input = "execute-inline {v0, p1}, inline@0x10";
+        let (rest, op) = parse_op(input).unwrap();
+        assert!(rest.trim().is_empty());
+        match op {
+            DexOp::ExecuteInline {
+                registers,
+                inline_index,
+            } => {
+                assert_eq!(inline_index, 0x10);
+                assert_eq!(registers.len(), 2);
+            }
+            other => panic!("unexpected op {other:?}"),
+        }
     }
 
     #[test]

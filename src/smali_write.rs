@@ -159,6 +159,34 @@ pub(crate) fn write_method(method: &SmaliMethod) -> String {
             SmaliOp::SparseSwitch(ss) => {
                 out.push_str(&format!("    {ss}\n"));
             }
+            SmaliOp::Prologue => {
+                out.push_str("    .prologue\n");
+            }
+            SmaliOp::Epilogue => {
+                out.push_str("    .epilogue\n");
+            }
+            SmaliOp::Local {
+                register,
+                name,
+                descriptor,
+                signature,
+            } => {
+                let name_str = name.as_deref().unwrap_or("");
+                let desc = descriptor.as_deref().unwrap_or("");
+                if let Some(sig) = signature {
+                    out.push_str(&format!(
+                        "    .local {register}, \"{name_str}\":{desc}, \"{sig}\"\n"
+                    ));
+                } else {
+                    out.push_str(&format!("    .local {register}, \"{name_str}\":{desc}\n"));
+                }
+            }
+            SmaliOp::EndLocal { register } => {
+                out.push_str(&format!("    .end local {register}\n"));
+            }
+            SmaliOp::RestartLocal { register } => {
+                out.push_str(&format!("    .restart local {register}\n"));
+            }
         }
     }
 

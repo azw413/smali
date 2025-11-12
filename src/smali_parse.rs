@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use crate::smali_ops::parse_op as parse_dex_op;
-use crate::smali_ops::{Label, parse_label, parse_literal_int};
+use crate::smali_ops::{Label, SmaliRegister, parse_label, parse_literal_int};
 use crate::types::*;
 use nom::Err::Failure;
 use nom::branch::alt;
@@ -624,17 +624,66 @@ pub fn parse_method(smali: &str) -> IResult<&str, SmaliMethod> {
             found = true;
         }
 
-        // Other common directives (prologue, line, registers, etc.)
-        if let IResult::Ok((o, _)) = alt((
-            ws(tag::<&str, &str, Error<&str>>(".prologue")),
-            ws(tag::<&str, &str, Error<&str>>(".line")),
-            ws(tag::<&str, &str, Error<&str>>(".registers")),
-            ws(tag::<&str, &str, Error<&str>>(".local")),
-            ws(tag::<&str, &str, Error<&str>>(".restart local")),
-        ))
-        .parse(input)
+        // .line directive
+        if let IResult::Ok((o, _)) = ws(tag::<&str, &str, Error<&str>>(".line")).parse(input) {
+            let (o, value) = take_until_eol(o)?;
+            if let Ok(line) = value.trim().parse::<u32>() {
+                method.ops.push(SmaliOp::Line(line));
+            }
+            input = o;
+            continue;
+        }
+
+        // .prologue directive
+        if let IResult::Ok((o, _)) = ws(tag::<&str, &str, Error<&str>>(".prologue")).parse(input) {
+            method.ops.push(SmaliOp::Prologue);
+            let (o, _) = take_until_eol(o)?;
+            input = o;
+            continue;
+        }
+
+        // .epilogue directive
+        if let IResult::Ok((o, _)) = ws(tag::<&str, &str, Error<&str>>(".epilogue")).parse(input) {
+            method.ops.push(SmaliOp::Epilogue);
+            let (o, _) = take_until_eol(o)?;
+            input = o;
+            continue;
+        }
+
+        // .local directive
+        if let IResult::Ok((o, _)) = ws(tag::<&str, &str, Error<&str>>(".local")).parse(input) {
+            let (o, rest) = take_until_eol(o)?;
+            let directive =
+                parse_local_directive(rest).unwrap_or_else(|| panic!("invalid .local: {rest}"));
+            method.ops.push(directive);
+            input = o;
+            continue;
+        }
+
+        // .end local directive
+        if let IResult::Ok((o, _)) = ws(tag::<&str, &str, Error<&str>>(".end local")).parse(input) {
+            let (o, rest) = take_until_eol(o)?;
+            if let Some(reg) = parse_local_register(rest) {
+                method.ops.push(SmaliOp::EndLocal { register: reg });
+            }
+            input = o;
+            continue;
+        }
+
+        // .restart local directive
+        if let IResult::Ok((o, _)) =
+            ws(tag::<&str, &str, Error<&str>>(".restart local")).parse(input)
         {
-            // Skip the rest of the line
+            let (o, rest) = take_until_eol(o)?;
+            if let Some(reg) = parse_local_register(rest) {
+                method.ops.push(SmaliOp::RestartLocal { register: reg });
+            }
+            input = o;
+            continue;
+        }
+
+        // Other directives to skip (e.g., .registers)
+        if let IResult::Ok((o, _)) = ws(tag::<&str, &str, Error<&str>>(".registers")).parse(input) {
             let (o, _) = take_until_eol(o)?;
             input = o;
             found = true;
@@ -762,6 +811,130 @@ pub(crate) fn parse_class(smali: &str) -> IResult<&str, SmaliClass> {
             }));
         }
     }
+}
+
+fn strip_comment(line: &str) -> &str {
+    line.splitn(2, '#').next().map(str::trim).unwrap_or("")
+}
+
+fn parse_local_register(line: &str) -> Option<SmaliRegister> {
+    let (reg, _) = parse_register_token(strip_comment(line))?;
+    Some(reg)
+}
+
+fn parse_local_directive(line: &str) -> Option<SmaliOp> {
+    let mut remaining = strip_comment(line);
+    let (register, rest) = parse_register_token(remaining)?;
+    remaining = rest.trim_start();
+    if !remaining.starts_with(',') {
+        return None;
+    }
+    remaining = remaining[1..].trim_start();
+
+    let (name, rest) = parse_local_name_segment(remaining);
+    remaining = rest.trim_start();
+
+    if !remaining.starts_with(':') {
+        return None;
+    }
+    remaining = remaining[1..].trim_start();
+
+    let (descriptor, rest) = parse_type_descriptor_segment(remaining);
+    remaining = rest.trim_start();
+
+    let signature = if remaining.starts_with(',') {
+        let remaining_sig = remaining[1..].trim_start();
+        let (sig, rest) = parse_signature_segment(remaining_sig);
+        let _ = rest;
+        sig
+    } else {
+        None
+    };
+
+    Some(SmaliOp::Local {
+        register,
+        name,
+        descriptor,
+        signature,
+    })
+}
+
+fn parse_register_token(input: &str) -> Option<(SmaliRegister, &str)> {
+    let trimmed = input.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut chars = trimmed.chars();
+    let prefix = chars.next()?;
+    if prefix != 'v' && prefix != 'p' {
+        return None;
+    }
+    let mut end = 1;
+    while trimmed[end..]
+        .chars()
+        .next()
+        .map_or(false, |ch| ch.is_ascii_digit())
+    {
+        end += 1;
+        if end >= trimmed.len() {
+            break;
+        }
+    }
+    let number_str = &trimmed[1..end];
+    if number_str.is_empty() {
+        return None;
+    }
+    let value: u16 = number_str.parse().ok()?;
+    let register = if prefix == 'v' {
+        SmaliRegister::Local(value)
+    } else {
+        SmaliRegister::Parameter(value)
+    };
+    Some((register, &trimmed[end..]))
+}
+
+fn parse_local_name_segment(input: &str) -> (Option<String>, &str) {
+    let trimmed = input.trim_start();
+    if trimmed.starts_with('"') {
+        if let Ok((rest, value)) = quoted::<Error<&str>>().parse(trimmed) {
+            return (Some(value.to_string()), rest);
+        }
+    }
+    let mut end = trimmed.len();
+    for (idx, ch) in trimmed.char_indices() {
+        if ch == ':' || ch == ',' {
+            end = idx;
+            break;
+        }
+    }
+    let name = trimmed[..end].trim();
+    let rest = &trimmed[end..];
+    if name.is_empty() {
+        (None, rest)
+    } else {
+        (Some(name.to_string()), rest)
+    }
+}
+
+fn parse_type_descriptor_segment(input: &str) -> (Option<String>, &str) {
+    let trimmed = input.trim_start();
+    if trimmed.is_empty() {
+        return (None, trimmed);
+    }
+    if let Ok((rest, sig)) = parse_typesignature(trimmed) {
+        return (Some(sig.to_jni()), rest);
+    }
+    (None, trimmed)
+}
+
+fn parse_signature_segment(input: &str) -> (Option<String>, &str) {
+    let trimmed = input.trim_start();
+    if trimmed.starts_with('"') {
+        if let Ok((rest, value)) = quoted::<Error<&str>>().parse(trimmed) {
+            return (Some(value.to_string()), rest);
+        }
+    }
+    (None, trimmed)
 }
 
 #[cfg(test)]

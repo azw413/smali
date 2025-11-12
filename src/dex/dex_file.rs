@@ -192,6 +192,18 @@ impl EncodedField {
 }
 
 pub const DBG_END_SEQUENCE: u8 = 0x00;
+pub const DBG_ADVANCE_PC: u8 = 0x01;
+pub const DBG_ADVANCE_LINE: u8 = 0x02;
+pub const DBG_START_LOCAL: u8 = 0x03;
+pub const DBG_START_LOCAL_EXTENDED: u8 = 0x04;
+pub const DBG_END_LOCAL: u8 = 0x05;
+pub const DBG_RESTART_LOCAL: u8 = 0x06;
+pub const DBG_SET_PROLOGUE_END: u8 = 0x07;
+pub const DBG_SET_EPILOGUE_BEGIN: u8 = 0x08;
+pub const DBG_SET_FILE: u8 = 0x09;
+pub const DBG_FIRST_SPECIAL: u8 = 0x0a;
+pub const DBG_LINE_BASE: i32 = -4;
+pub const DBG_LINE_RANGE: u8 = 15;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DebugInfo {
@@ -212,11 +224,14 @@ impl crate::dex::dex_file::DebugInfo {
             parameter_names.push(if idx < 0 { None } else { Some(idx as u32) });
         }
 
-        // todo: read byte code
+        let start = *ix;
+        skip_debug_stream(bytes, ix)?;
+        let debug_opcodes = bytes[start..*ix].to_vec();
+
         Ok(DebugInfo {
             line_start,
             parameter_names,
-            debug_opcodes: vec![],
+            debug_opcodes,
         })
     }
 
@@ -238,6 +253,50 @@ impl crate::dex::dex_file::DebugInfo {
         }
         c
     }
+}
+
+fn skip_debug_stream(bytes: &[u8], ix: &mut usize) -> Result<(), DexError> {
+    loop {
+        let opcode = read_u1(bytes, ix)?;
+        match opcode {
+            DBG_END_SEQUENCE => break,
+            DBG_ADVANCE_PC => {
+                read_uleb128(bytes, ix)?;
+            }
+            DBG_ADVANCE_LINE => {
+                read_sleb128(bytes, ix)?;
+            }
+            DBG_START_LOCAL => {
+                read_uleb128(bytes, ix)?;
+                read_uleb128p1(bytes, ix)?;
+                read_uleb128p1(bytes, ix)?;
+            }
+            DBG_START_LOCAL_EXTENDED => {
+                read_uleb128(bytes, ix)?;
+                read_uleb128p1(bytes, ix)?;
+                read_uleb128p1(bytes, ix)?;
+                read_uleb128p1(bytes, ix)?;
+            }
+            DBG_END_LOCAL | DBG_RESTART_LOCAL => {
+                read_uleb128(bytes, ix)?;
+            }
+            DBG_SET_PROLOGUE_END | DBG_SET_EPILOGUE_BEGIN => {}
+            DBG_SET_FILE => {
+                read_uleb128p1(bytes, ix)?;
+            }
+            other => {
+                if other >= DBG_FIRST_SPECIAL {
+                    // no payload
+                } else {
+                    return Err(DexError::new(&format!(
+                        "unknown debug opcode 0x{:x}",
+                        other
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,6 +409,32 @@ pub struct CodeItem {
 }
 
 impl crate::dex::dex_file::CodeItem {
+    pub fn debug_info(&self) -> Option<&DebugInfo> {
+        self.debug_info.as_ref()
+    }
+
+    pub fn new(
+        registers_size: u16,
+        args_in_size: u16,
+        args_out_size: u16,
+        instructions: Vec<u16>,
+        tries: Vec<TryItem>,
+        handlers: Vec<EncodedCatchHandler>,
+        debug_info: Option<DebugInfo>,
+    ) -> Self {
+        CodeItem {
+            registers_size,
+            args_in_size,
+            args_out_size,
+            tries_size: tries.len() as u16,
+            debug_info,
+            instructions,
+            padding: 0,
+            tries,
+            handlers,
+        }
+    }
+
     pub fn read(bytes: &[u8], ix: &mut usize) -> Result<crate::dex::dex_file::CodeItem, DexError> {
         let code_item_start = *ix;
         let registers_size = read_u2(bytes, ix)?;

@@ -1,13 +1,21 @@
 use crate::dex::annotations::AnnotationItem;
 use crate::dex::dex_file::{
-    ClassDataItem, ClassDefItem, DEX_FILE_MAGIC, DexString, ENDIAN_CONSTANT, EncodedField,
-    EncodedMethod, FieldItem, Header, MethodItem, NO_INDEX, PrototypeItem, TypeList,
+    ClassDataItem, ClassDefItem, CodeItem, DBG_ADVANCE_LINE, DBG_ADVANCE_PC, DBG_END_LOCAL,
+    DBG_END_SEQUENCE, DBG_FIRST_SPECIAL, DBG_LINE_BASE, DBG_LINE_RANGE, DBG_RESTART_LOCAL,
+    DBG_SET_EPILOGUE_BEGIN, DBG_SET_PROLOGUE_END, DBG_START_LOCAL, DBG_START_LOCAL_EXTENDED,
+    DEX_FILE_MAGIC, DebugInfo, DexString, ENDIAN_CONSTANT, EncodedCatchHandler, EncodedField,
+    EncodedMethod, EncodedTypeAddrPair, FieldItem, Header, MethodItem, NO_INDEX, PrototypeItem,
+    TryItem, TypeList,
 };
 use crate::dex::encoded_values::{
     AnnotationElement as DexAnnotationElement, EncodedAnnotation, EncodedValue, write_encoded_array,
 };
 use crate::dex::error::DexError;
-use crate::dex::{write_u2, write_u4};
+use crate::dex::opcode_format::assemble::{
+    AssemblerIndexResolver, DebugDirective, DebugDirectiveEvent, LineEvent, MethodAssembler,
+    MethodAssemblyResult,
+};
+use crate::dex::{write_sleb128, write_u2, write_u4, write_uleb128, write_uleb128p1};
 use crate::smali_ops::{DexOp, FieldRef, MethodRef, parse_literal_int};
 use crate::smali_parse::parse_java_array;
 use crate::types::{
@@ -16,7 +24,7 @@ use crate::types::{
     SmaliMethod, SmaliOp, TypeSignature, parse_methodsignature, parse_typesignature,
 };
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::TryFrom;
 
 use adler::adler32_slice;
@@ -39,6 +47,10 @@ const TYPE_ANNOTATION_ITEM: u16 = 0x2003;
 const TYPE_ANNOTATIONS_DIRECTORY_ITEM: u16 = 0x2006;
 const TYPE_ENCODED_ARRAY_ITEM: u16 = 0x2005;
 const ARRAY_DATA_SIGNATURE: u16 = 0x0300;
+const TYPE_CODE_ITEM: u16 = 0x2001;
+
+const DEFAULT_API_LEVEL: i32 = 33;
+const DEFAULT_ART_VERSION: i32 = 200;
 
 /// Canonicalized string/type/proto/field/method tables built from a set of `SmaliClass` items.
 ///
@@ -60,6 +72,65 @@ pub struct DexIndexPools {
 
     pub methods: Vec<MethodEntry>,
     method_index: HashMap<MethodKey, u32>,
+}
+
+struct PoolIndexResolver<'a> {
+    pools: &'a DexIndexPools,
+}
+
+impl<'a> PoolIndexResolver<'a> {
+    fn new(pools: &'a DexIndexPools) -> Self {
+        PoolIndexResolver { pools }
+    }
+}
+
+impl<'a> AssemblerIndexResolver for PoolIndexResolver<'a> {
+    fn string_index(&self, value: &str) -> Result<u32, DexError> {
+        self.pools
+            .string_index(value)
+            .ok_or_else(|| DexError::new("missing string index"))
+    }
+
+    fn type_index(&self, descriptor: &str) -> Result<u32, DexError> {
+        self.pools
+            .type_index(descriptor)
+            .ok_or_else(|| DexError::new("missing type index"))
+    }
+
+    fn field_index(&self, class_desc: &str, name: &str, type_desc: &str) -> Result<u32, DexError> {
+        self.pools
+            .field_index(class_desc, name, type_desc)
+            .ok_or_else(|| DexError::new("missing field index"))
+    }
+
+    fn method_index(
+        &self,
+        class_desc: &str,
+        name: &str,
+        proto: &MethodSignature,
+    ) -> Result<u32, DexError> {
+        self.pools
+            .method_index(class_desc, name, proto)
+            .ok_or_else(|| DexError::new("missing method index"))
+    }
+
+    fn proto_index(&self, proto: &MethodSignature) -> Result<u32, DexError> {
+        self.pools
+            .proto_index(proto)
+            .ok_or_else(|| DexError::new("missing proto index"))
+    }
+
+    fn call_site_index(&self, _name: &str) -> Result<u32, DexError> {
+        Err(DexError::new(
+            "call-site instructions are not supported in assembler yet",
+        ))
+    }
+
+    fn method_handle_index(&self, _literal: &str) -> Result<u32, DexError> {
+        Err(DexError::new(
+            "method-handle instructions are not supported in assembler yet",
+        ))
+    }
 }
 
 #[derive(Debug)]
@@ -153,6 +224,14 @@ struct ArrayDataPlanEntry {
     chunk_index: usize,
 }
 
+#[derive(Debug, Clone)]
+struct MethodCodeBinding {
+    class_plan_idx: usize,
+    method_idx: usize,
+    is_direct: bool,
+    chunk_index: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DataChunkKind {
     StringData,
@@ -164,6 +243,7 @@ enum DataChunkKind {
     AnnotationSetRefList,
     AnnotationsDirectory,
     ArrayData,
+    CodeItem,
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +261,10 @@ enum DataChunkOwner {
         directory_rel_offset: u32,
     },
     ArrayData(String),
+    MethodCode {
+        class_idx: usize,
+        method_idx: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -479,6 +563,10 @@ impl DataSectionPlan {
         &self.chunks
     }
 
+    fn chunks_mut(&mut self) -> &mut [DataChunk] {
+        &mut self.chunks
+    }
+
     fn apply_fixups(&mut self, base: u32) {
         let offsets: Vec<u32> = self.chunks.iter().map(|c| c.offset).collect();
         for (_idx, chunk) in self.chunks.iter_mut().enumerate() {
@@ -570,17 +658,39 @@ impl DataSectionBuilder {
         });
     }
 
-    fn add_class_data(&mut self, class_idx: usize, class_data: &ClassDataItem) {
+    fn add_class_data(&mut self, class_idx: usize, class_data: &ClassDataItem) -> usize {
         let mut bytes = Vec::new();
         class_data.write(&mut bytes);
-        self.chunks.push(DataChunk {
+        self.push_chunk(DataChunk {
             owner: DataChunkOwner::ClassData(class_idx),
             kind: DataChunkKind::ClassData,
             align: 1,
             offset: 0,
             bytes,
             fixups: Vec::new(),
+        })
+    }
+
+    fn add_code_item(
+        &mut self,
+        class_idx: usize,
+        method_idx: usize,
+        code_item: &CodeItem,
+    ) -> Result<usize, DexError> {
+        let mut bytes = Vec::new();
+        code_item.write(&mut bytes, 0)?;
+        let chunk_idx = self.push_chunk(DataChunk {
+            owner: DataChunkOwner::MethodCode {
+                class_idx,
+                method_idx,
+            },
+            kind: DataChunkKind::CodeItem,
+            align: 4,
+            offset: 0,
+            bytes,
+            fixups: Vec::new(),
         });
+        Ok(chunk_idx)
     }
 
     fn finish(mut self) -> DataSectionPlan {
@@ -609,14 +719,18 @@ impl DexLayoutPlan {
         let ids = pools.build_id_tables();
 
         let mut class_defs = build_class_def_plans(classes, &pools)?;
+        let mut class_data_chunk_indices = vec![None; class_defs.len()];
         let mut class_plan_by_idx = HashMap::new();
         for (i, plan) in class_defs.iter().enumerate() {
             class_plan_by_idx.insert(plan.class_idx, i);
         }
 
+        let resolver = PoolIndexResolver::new(&pools);
+        let assembler = MethodAssembler::new(&resolver, DEFAULT_API_LEVEL, DEFAULT_ART_VERSION);
         let mut data_builder = DataSectionBuilder::new();
         data_builder.add_string_data(&ids.strings);
         data_builder.add_proto_parameter_lists(&ids.proto_ids);
+        let mut method_code_bindings = Vec::new();
         let mut array_data_entries = Vec::new();
         for class in classes {
             let class_idx = pools
@@ -629,10 +743,18 @@ impl DexLayoutPlan {
                 data_builder.add_static_values(plan_idx, &values);
                 class_defs[plan_idx].item.static_values = Some(values);
             }
-            if let Some(class_data) = build_class_data_item(class, &pools)? {
+            if let Some(class_data) = build_class_data_item(
+                class,
+                &pools,
+                plan_idx,
+                &assembler,
+                &mut data_builder,
+                &mut method_code_bindings,
+            )? {
                 class_defs[plan_idx].class_data = Some(class_data);
                 if let Some(data) = class_defs[plan_idx].class_data.as_ref() {
-                    data_builder.add_class_data(plan_idx, data);
+                    let chunk_idx = data_builder.add_class_data(plan_idx, data);
+                    class_data_chunk_indices[plan_idx] = Some(chunk_idx);
                 }
             }
             build_class_annotations(class, plan_idx, &pools, &mut data_builder)?;
@@ -643,6 +765,14 @@ impl DexLayoutPlan {
 
         let sections = SectionOffsets::new(&ids, class_defs.len() as u32, data_section.size);
         let data_base = sections.data_off;
+
+        finalize_method_code_offsets(
+            &mut data_section,
+            data_base,
+            &mut class_defs,
+            &method_code_bindings,
+            &class_data_chunk_indices,
+        )?;
 
         data_section.apply_fixups(data_base);
         let mut array_data_offsets = HashMap::new();
@@ -846,6 +976,15 @@ fn build_map_items(plan: &DexLayoutPlan, map_off: u32) -> Vec<MapItem> {
             TYPE_ENCODED_ARRAY_ITEM,
             encoded_count,
             encoded_offset.unwrap(),
+        ));
+    }
+
+    let (code_item_count, code_item_offset) = chunk_stats_by_kind(&plan, DataChunkKind::CodeItem);
+    if code_item_count > 0 {
+        items.push(MapItem::new(
+            TYPE_CODE_ITEM,
+            code_item_count,
+            code_item_offset.unwrap(),
         ));
     }
 
@@ -1232,6 +1371,22 @@ impl DexPoolBuilder {
                     }
                 }
                 SmaliOp::Op(dex_op) => self.collect_dex_op(dex_op),
+                SmaliOp::Local {
+                    name,
+                    descriptor,
+                    signature,
+                    ..
+                } => {
+                    if let Some(name) = name {
+                        self.strings.insert(name);
+                    }
+                    if let Some(desc) = descriptor {
+                        self.insert_type_descriptor(desc);
+                    }
+                    if let Some(sig) = signature {
+                        self.strings.insert(sig);
+                    }
+                }
                 _ => {}
             }
         }
@@ -1899,6 +2054,10 @@ fn build_static_value_array(
 fn build_class_data_item(
     class: &SmaliClass,
     pools: &DexIndexPools,
+    class_plan_idx: usize,
+    assembler: &MethodAssembler<PoolIndexResolver<'_>>,
+    data_builder: &mut DataSectionBuilder,
+    method_bindings: &mut Vec<MethodCodeBinding>,
 ) -> Result<Option<ClassDataItem>, DexError> {
     let class_desc = class.name.as_jni_type();
 
@@ -1932,12 +2091,6 @@ fn build_class_data_item(
     let mut virtual_methods = Vec::new();
     for method in &class.methods {
         let needs_code = method_requires_code(method);
-        if needs_code {
-            return Err(DexError::new(&format!(
-                "method {}->{} requires code emission, which is not yet supported",
-                class_desc, method.name
-            )));
-        }
 
         let method_idx = pools
             .method_index(&class_desc, &method.name, &method.signature)
@@ -1945,14 +2098,26 @@ fn build_class_data_item(
         let method_idx = usize::try_from(method_idx)
             .map_err(|_| DexError::new("method index does not fit in usize"))?;
 
-        let encoded = EncodedMethod {
+        let mut encoded = EncodedMethod {
             method_idx,
             access_flags: method_access_flags(method),
             code_off: 0,
             code: None,
         };
 
-        if is_direct_method(method) {
+        let is_direct = is_direct_method(method);
+        if needs_code {
+            let code_item = assemble_concrete_method(&class_desc, method, assembler, pools)?;
+            let chunk_index = data_builder.add_code_item(class_plan_idx, method_idx, &code_item)?;
+            method_bindings.push(MethodCodeBinding {
+                class_plan_idx,
+                method_idx,
+                is_direct,
+                chunk_index,
+            });
+        }
+
+        if is_direct {
             direct_methods.push(encoded);
         } else {
             virtual_methods.push(encoded);
@@ -2088,6 +2253,459 @@ fn collect_array_data_chunks(
         }
     }
     Ok(())
+}
+
+fn finalize_method_code_offsets(
+    data_section: &mut DataSectionPlan,
+    data_base: u32,
+    class_defs: &mut [ClassDefPlan],
+    bindings: &[MethodCodeBinding],
+    class_data_chunks: &[Option<usize>],
+) -> Result<(), DexError> {
+    for binding in bindings {
+        let chunk = data_section
+            .chunks_mut()
+            .get_mut(binding.chunk_index)
+            .ok_or_else(|| DexError::new("code chunk missing for method"))?;
+        let code_off = data_base
+            .checked_add(chunk.offset)
+            .ok_or_else(|| DexError::new("code offset overflow"))?;
+        let class_plan = class_defs
+            .get_mut(binding.class_plan_idx)
+            .ok_or_else(|| DexError::new("class plan missing for method code"))?;
+        let class_data = class_plan
+            .class_data
+            .as_mut()
+            .ok_or_else(|| DexError::new("class data missing for method code"))?;
+        let methods = if binding.is_direct {
+            &mut class_data.direct_methods
+        } else {
+            &mut class_data.virtual_methods
+        };
+        let entry = methods
+            .iter_mut()
+            .find(|m| m.method_idx == binding.method_idx)
+            .ok_or_else(|| DexError::new("encoded method missing for code binding"))?;
+        entry.code_off = code_off;
+        patch_debug_info_pointer(chunk, code_off)?;
+    }
+
+    for (class_idx, chunk_idx) in class_data_chunks.iter().enumerate() {
+        if let Some(chunk_index) = chunk_idx {
+            let Some(chunk) = data_section.chunks_mut().get_mut(*chunk_index) else {
+                return Err(DexError::new("class data chunk missing while patching"));
+            };
+            let Some(class_data) = class_defs[class_idx].class_data.as_ref() else {
+                return Err(DexError::new(
+                    "class data missing for chunk while patching code offsets",
+                ));
+            };
+            let mut bytes = Vec::new();
+            class_data.write(&mut bytes);
+            chunk.bytes = bytes;
+        }
+    }
+
+    Ok(())
+}
+
+fn patch_debug_info_pointer(chunk: &mut DataChunk, code_off: u32) -> Result<(), DexError> {
+    if chunk.bytes.len() < 12 {
+        return Ok(());
+    }
+    let mut buf = [0u8; 4];
+    buf.copy_from_slice(&chunk.bytes[8..12]);
+    let current = u32::from_le_bytes(buf);
+    if current == 0 {
+        return Ok(());
+    }
+    let absolute = code_off
+        .checked_add(current)
+        .ok_or_else(|| DexError::new("debug info offset overflow"))?;
+    chunk.bytes[8..12].copy_from_slice(&absolute.to_le_bytes());
+    Ok(())
+}
+
+fn assemble_concrete_method(
+    class_desc: &str,
+    method: &SmaliMethod,
+    assembler: &MethodAssembler<PoolIndexResolver<'_>>,
+    pools: &DexIndexPools,
+) -> Result<CodeItem, DexError> {
+    let assembly = assembler.assemble_method(class_desc, method)?;
+    let (tries, handlers) = build_try_items(method, &assembly.label_offsets, pools)?;
+    let debug_info = build_debug_info(method, pools, &assembly)?;
+    Ok(CodeItem::new(
+        assembly.registers_size,
+        assembly.ins_size,
+        assembly.outs_size,
+        assembly.encoded_code_units,
+        tries,
+        handlers,
+        debug_info,
+    ))
+}
+
+#[derive(Default)]
+struct TryHandlerAccumulator {
+    typed: Vec<(String, String)>,
+    catch_all: Option<String>,
+}
+
+fn build_try_items(
+    method: &SmaliMethod,
+    label_offsets: &HashMap<String, u32>,
+    pools: &DexIndexPools,
+) -> Result<(Vec<TryItem>, Vec<EncodedCatchHandler>), DexError> {
+    let mut accumulators: BTreeMap<(String, String), TryHandlerAccumulator> = BTreeMap::new();
+
+    for op in &method.ops {
+        if let SmaliOp::Catch(directive) = op {
+            match directive {
+                CatchDirective::Catch {
+                    exception,
+                    try_range,
+                    handler,
+                } => {
+                    let key = (try_range.start.0.clone(), try_range.end.0.clone());
+                    let entry = accumulators.entry(key).or_default();
+                    entry.typed.push((exception.clone(), handler.0.clone()));
+                }
+                CatchDirective::CatchAll { try_range, handler } => {
+                    let key = (try_range.start.0.clone(), try_range.end.0.clone());
+                    let entry = accumulators.entry(key).or_default();
+                    if entry.catch_all.is_some() {
+                        return Err(DexError::new("duplicate catchall for the same try range"));
+                    }
+                    entry.catch_all = Some(handler.0.clone());
+                }
+            }
+        }
+    }
+
+    if accumulators.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let mut handlers = Vec::with_capacity(accumulators.len());
+    let mut tries = Vec::with_capacity(accumulators.len());
+
+    for ((start_label, end_label), acc) in accumulators {
+        if acc.typed.is_empty() && acc.catch_all.is_none() {
+            continue;
+        }
+        let start = resolve_label_offset(&start_label, label_offsets, "try start")?;
+        let end = resolve_label_offset(&end_label, label_offsets, "try end")?;
+        if end <= start {
+            return Err(DexError::new(&format!(
+                "try range {:} .. {:} has non-positive length",
+                start_label, end_label
+            )));
+        }
+        let insn_span = end - start;
+        if insn_span > u16::MAX as u32 {
+            return Err(DexError::new(
+                "try range exceeds maximum encodable instruction span",
+            ));
+        }
+
+        let mut typed_pairs = Vec::with_capacity(acc.typed.len());
+        for (exception_desc, handler_label) in acc.typed {
+            let type_idx = pools
+                .type_index(&exception_desc)
+                .ok_or_else(|| DexError::new("missing type index for catch handler"))?;
+            let type_idx = usize::try_from(type_idx)
+                .map_err(|_| DexError::new("type index does not fit in usize"))?;
+            let addr = resolve_label_offset(&handler_label, label_offsets, "catch handler")?;
+            typed_pairs.push(EncodedTypeAddrPair { type_idx, addr });
+        }
+        typed_pairs.sort_by_key(|pair| pair.type_idx);
+
+        let catch_all_addr = if let Some(label) = acc.catch_all {
+            Some(resolve_label_offset(
+                &label,
+                label_offsets,
+                "catchall handler",
+            )?)
+        } else {
+            None
+        };
+
+        let handler_idx = handlers.len();
+        handlers.push(EncodedCatchHandler {
+            handlers: typed_pairs,
+            catch_all_addr,
+        });
+        tries.push(TryItem {
+            start_addr: start,
+            insn_count: insn_span as u16,
+            handler_off: 0,
+            handler_idx: Some(handler_idx),
+        });
+    }
+
+    Ok((tries, handlers))
+}
+
+fn resolve_label_offset(
+    label: &str,
+    label_offsets: &HashMap<String, u32>,
+    context: &str,
+) -> Result<u32, DexError> {
+    label_offsets.get(label).copied().ok_or_else(|| {
+        DexError::new(&format!(
+            "label :{} referenced in {} not defined",
+            label, context
+        ))
+    })
+}
+
+fn build_debug_info(
+    method: &SmaliMethod,
+    pools: &DexIndexPools,
+    assembly: &MethodAssemblyResult,
+) -> Result<Option<DebugInfo>, DexError> {
+    let mut line_events = assembly.line_events.clone();
+    line_events.sort_by_key(|event| event.offset_cu);
+    let mut debug_events = assembly.debug_events.clone();
+    debug_events.sort_by_key(|event| event.offset_cu);
+
+    let line_start = line_events
+        .first()
+        .map(|event| event.line)
+        .or_else(|| {
+            method.ops.iter().find_map(|op| {
+                if let SmaliOp::Line(line) = op {
+                    Some(*line)
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or(0);
+
+    let mut parameter_names = Vec::with_capacity(method.params.len());
+    let mut has_names = false;
+    for param in &method.params {
+        if let Some(name) = &param.name {
+            let idx = pools
+                .string_index(name)
+                .ok_or_else(|| DexError::new("missing string index for parameter"))?;
+            parameter_names.push(Some(idx));
+            has_names = true;
+        } else {
+            parameter_names.push(None);
+        }
+    }
+
+    let has_lines = !line_events.is_empty();
+    let has_debug_directives = !debug_events.is_empty();
+    if !has_lines && !has_names && !has_debug_directives {
+        return Ok(None);
+    }
+
+    let debug_opcodes = encode_debug_opcodes(line_start, &line_events, &debug_events, pools)?;
+
+    Ok(Some(DebugInfo {
+        line_start,
+        parameter_names,
+        debug_opcodes,
+    }))
+}
+
+fn encode_debug_position_opcodes(events: &[LineEvent]) -> Vec<u8> {
+    if events.is_empty() {
+        return vec![DBG_END_SEQUENCE];
+    }
+    let mut ops = Vec::new();
+    let mut last_pc = 0u32;
+    let mut last_line = events[0].line;
+    append_position_delta(
+        &mut ops,
+        events[0].offset_cu,
+        events[0].line,
+        last_pc,
+        last_line,
+    );
+    last_pc = events[0].offset_cu;
+    last_line = events[0].line;
+    for event in events.iter().skip(1) {
+        append_position_delta(&mut ops, event.offset_cu, event.line, last_pc, last_line);
+        last_pc = event.offset_cu;
+        last_line = event.line;
+    }
+    if ops.last().copied() != Some(DBG_END_SEQUENCE) {
+        ops.push(DBG_END_SEQUENCE);
+    }
+    ops
+}
+
+fn append_position_delta(
+    ops: &mut Vec<u8>,
+    target_pc: u32,
+    target_line: u32,
+    last_pc: u32,
+    last_line: u32,
+) {
+    let mut pc_delta = target_pc.saturating_sub(last_pc);
+    let mut line_delta = target_line as i32 - last_line as i32;
+    if pc_delta == 0 && line_delta == 0 {
+        return;
+    }
+
+    while line_delta < DBG_LINE_BASE {
+        ops.push(DBG_ADVANCE_LINE);
+        write_sleb128(ops, -(DBG_LINE_RANGE as i32));
+        line_delta += DBG_LINE_RANGE as i32;
+    }
+    while line_delta >= DBG_LINE_BASE + DBG_LINE_RANGE as i32 {
+        ops.push(DBG_ADVANCE_LINE);
+        write_sleb128(ops, DBG_LINE_RANGE as i32);
+        line_delta -= DBG_LINE_RANGE as i32;
+    }
+
+    while pc_delta >= DBG_LINE_RANGE as u32 {
+        let step = pc_delta - (DBG_LINE_RANGE as u32 - 1);
+        ops.push(DBG_ADVANCE_PC);
+        write_uleb128(ops, step);
+        pc_delta -= step;
+    }
+
+    let special = DBG_FIRST_SPECIAL
+        + ((line_delta - DBG_LINE_BASE) as u8)
+        + (DBG_LINE_RANGE * pc_delta as u8);
+    ops.push(special);
+}
+
+fn encode_debug_opcodes(
+    line_start: u32,
+    line_events: &[LineEvent],
+    debug_events: &[DebugDirectiveEvent],
+    pools: &DexIndexPools,
+) -> Result<Vec<u8>, DexError> {
+    let mut ops = Vec::new();
+    let mut current_pc = 0u32;
+    let mut current_line = line_start;
+    let mut line_iter = line_events.iter().peekable();
+    let mut directive_iter = debug_events.iter().peekable();
+
+    while line_iter.peek().is_some() || directive_iter.peek().is_some() {
+        let take_line = match (line_iter.peek(), directive_iter.peek()) {
+            (Some(line), Some(dir)) => line.offset_cu <= dir.offset_cu,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => false,
+        };
+
+        if take_line {
+            let event = line_iter.next().unwrap();
+            append_position_delta(
+                &mut ops,
+                event.offset_cu,
+                event.line,
+                current_pc,
+                current_line,
+            );
+            current_pc = event.offset_cu;
+            current_line = event.line;
+        } else if let Some(event) = directive_iter.next() {
+            advance_pc(&mut ops, &mut current_pc, event.offset_cu)?;
+            encode_debug_directive(&mut ops, event, pools)?;
+        }
+    }
+
+    if ops.last().copied() != Some(DBG_END_SEQUENCE) {
+        ops.push(DBG_END_SEQUENCE);
+    }
+    Ok(ops)
+}
+
+fn advance_pc(ops: &mut Vec<u8>, current_pc: &mut u32, target: u32) -> Result<(), DexError> {
+    if target < *current_pc {
+        return Err(DexError::new(
+            "debug directive cannot move backwards in code",
+        ));
+    }
+    if target == *current_pc {
+        return Ok(());
+    }
+    ops.push(DBG_ADVANCE_PC);
+    write_uleb128(ops, target - *current_pc);
+    *current_pc = target;
+    Ok(())
+}
+
+fn encode_debug_directive(
+    ops: &mut Vec<u8>,
+    event: &DebugDirectiveEvent,
+    pools: &DexIndexPools,
+) -> Result<(), DexError> {
+    match &event.directive {
+        DebugDirective::PrologueEnd => ops.push(DBG_SET_PROLOGUE_END),
+        DebugDirective::EpilogueBegin => ops.push(DBG_SET_EPILOGUE_BEGIN),
+        DebugDirective::StartLocal {
+            register,
+            name,
+            descriptor,
+            signature,
+        } => {
+            let name_idx = lookup_string_index(pools, name.as_deref(), "local name")?;
+            let type_idx = lookup_type_index(pools, descriptor.as_deref(), "local type")?;
+            let reg = *register as u32;
+            if let Some(sig) = signature {
+                let sig_idx = lookup_string_index(pools, Some(sig), "local signature")?;
+                ops.push(DBG_START_LOCAL_EXTENDED);
+                write_uleb128(ops, reg);
+                write_uleb128p1(ops, name_idx);
+                write_uleb128p1(ops, type_idx);
+                write_uleb128p1(ops, sig_idx);
+            } else {
+                ops.push(DBG_START_LOCAL);
+                write_uleb128(ops, reg);
+                write_uleb128p1(ops, name_idx);
+                write_uleb128p1(ops, type_idx);
+            }
+        }
+        DebugDirective::EndLocal { register } => {
+            ops.push(DBG_END_LOCAL);
+            write_uleb128(ops, *register as u32);
+        }
+        DebugDirective::RestartLocal { register } => {
+            ops.push(DBG_RESTART_LOCAL);
+            write_uleb128(ops, *register as u32);
+        }
+    }
+    Ok(())
+}
+
+fn lookup_string_index(
+    pools: &DexIndexPools,
+    value: Option<&str>,
+    context: &str,
+) -> Result<i32, DexError> {
+    if let Some(val) = value {
+        pools
+            .string_index(val)
+            .map(|idx| idx as i32)
+            .ok_or_else(|| DexError::new(&format!("missing string index for {context}")))
+    } else {
+        Ok(-1)
+    }
+}
+
+fn lookup_type_index(
+    pools: &DexIndexPools,
+    value: Option<&str>,
+    context: &str,
+) -> Result<i32, DexError> {
+    if let Some(desc) = value {
+        pools
+            .type_index(desc)
+            .map(|idx| idx as i32)
+            .ok_or_else(|| DexError::new(&format!("missing type index for {context}")))
+    } else {
+        Ok(-1)
+    }
 }
 
 fn write_annotation_set_chunk(
@@ -2651,7 +3269,10 @@ fn trim_numeric_literal_suffix(literal: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dex::dex_file::DexFile;
+    use crate::dex::dex_file::{
+        DBG_END_LOCAL, DBG_RESTART_LOCAL, DBG_SET_EPILOGUE_BEGIN, DBG_SET_PROLOGUE_END,
+        DBG_START_LOCAL, DBG_START_LOCAL_EXTENDED, DexFile,
+    };
     use crate::types::{MethodSignature, SmaliClass};
 
     const ABSTRACT_CLASS: &str = r#"
@@ -3024,22 +3645,166 @@ mod tests {
     }
 
     #[test]
-    fn fails_on_methods_requiring_code() {
+    fn plans_methods_with_code_items() {
         let smali = r#"
 .class public Lcom/example/HasCode;
 .super Ljava/lang/Object;
 
 .method public constructor <init>()V
-    .locals 0
+    .locals 1
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    return-void
+.end method
+"#;
+
+        let plan_class = SmaliClass::from_smali(smali).expect("parse class");
+        let plan = DexLayoutPlan::from_classes(&[plan_class]).expect("layout plan with code");
+
+        assert!(
+            plan.data_section
+                .chunks()
+                .iter()
+                .any(|chunk| matches!(chunk.kind, DataChunkKind::CodeItem))
+        );
+
+        let class_data = plan.class_defs[0]
+            .class_data
+            .as_ref()
+            .expect("class data present");
+        assert!(plan.class_defs[0].offsets.class_data_off >= plan.sections.data_off);
+        let has_method = class_data.direct_methods.iter().any(|m| m.code_off > 0)
+            || class_data.virtual_methods.iter().any(|m| m.code_off > 0);
+        assert!(has_method, "expected at least one method with code");
+
+        let dex_class = SmaliClass::from_smali(smali).expect("parse class for dex");
+        let bytes = build_dex_file_bytes(&[dex_class]).expect("build dex");
+        let dex = DexFile::from_bytes(&bytes).expect("read dex");
+        let class_def = &dex.class_defs[0];
+        let cd = class_def.class_data.as_ref().expect("class data in dex");
+        let method = cd
+            .direct_methods
+            .iter()
+            .chain(cd.virtual_methods.iter())
+            .find(|m| m.code.is_some())
+            .expect("method with code in dex");
+        assert!(method.code_off > 0);
+    }
+
+    #[test]
+    fn assembles_try_catch_blocks() {
+        let smali = r#"
+.class public Lcom/example/Catcher;
+.super Ljava/lang/Object;
+
+.method public static demo()V
+    .locals 1
+    :try_start
+    const/4 v0, 0x0
+    goto :try_end
+    :handler
+    move-exception v0
+    :try_end
+    return-void
+.catch Ljava/lang/Exception; {:try_start .. :try_end} :handler
+.end method
+"#;
+
+        let class = SmaliClass::from_smali(smali).expect("parse class");
+        let bytes = build_dex_file_bytes(&[class]).expect("build dex");
+        let dex = DexFile::from_bytes(&bytes).expect("read dex");
+        let class_def = &dex.class_defs[0];
+        let data = class_def.class_data.as_ref().expect("class data");
+        let method = data
+            .direct_methods
+            .iter()
+            .chain(data.virtual_methods.iter())
+            .find(|m| m.code.is_some())
+            .expect("method with code");
+        assert!(method.code_off > 0);
+    }
+
+    #[test]
+    fn encodes_debug_line_events() {
+        let smali = r#"
+.class public Lcom/example/Debuggable;
+.super Ljava/lang/Object;
+
+.method public static doWork()V
+    .locals 1
+    .line 10
+    const/4 v0, 0x0
+    .line 20
     return-void
 .end method
 "#;
 
         let class = SmaliClass::from_smali(smali).expect("parse class");
-        let err = DexLayoutPlan::from_classes(&[class]).unwrap_err();
+        let bytes = build_dex_file_bytes(&[class]).expect("build dex");
+        let dex = DexFile::from_bytes(&bytes).expect("read dex");
+        let class_def = &dex.class_defs[0];
+        let data = class_def.class_data.as_ref().expect("class data");
+        let method = data
+            .direct_methods
+            .iter()
+            .find(|m| m.code.is_some())
+            .expect("method with code");
+        let code = method.code.as_ref().expect("code item");
+        assert!(code.debug_info().is_some());
+    }
+
+    #[test]
+    fn encodes_debug_local_directives() {
+        let smali = r#"
+.class public Lcom/example/DebugLocals;
+.super Ljava/lang/Object;
+
+.method public static trace()V
+    .locals 2
+    .prologue
+    .line 1
+    .local v0, "value":I, "Ljava/lang/Integer;"
+    const/4 v0, 0x0
+    .line 2
+    .end local v0
+    .line 3
+    .restart local v0
+    .epilogue
+    return-void
+.end method
+"#;
+
+        let class = SmaliClass::from_smali(smali).expect("parse class");
+        let bytes = build_dex_file_bytes(&[class]).expect("build dex");
+        let dex = DexFile::from_bytes(&bytes).expect("read dex");
+        let class_def = &dex.class_defs[0];
+        let data = class_def.class_data.as_ref().expect("class data");
+        let method = data
+            .direct_methods
+            .iter()
+            .find(|m| m.code.is_some())
+            .expect("method with code");
+        let debug = method
+            .code
+            .as_ref()
+            .and_then(|code| code.debug_info())
+            .expect("debug info");
+        let opcodes = &debug.debug_opcodes;
         assert!(
-            err.to_string()
-                .contains("method Lcom/example/HasCode;-><init> requires code emission")
+            opcodes.contains(&DBG_START_LOCAL) || opcodes.contains(&DBG_START_LOCAL_EXTENDED),
+            "missing start-local opcode"
+        );
+        assert!(opcodes.contains(&DBG_END_LOCAL), "missing end-local opcode");
+        assert!(
+            opcodes.contains(&DBG_RESTART_LOCAL),
+            "missing restart-local opcode"
+        );
+        assert!(
+            opcodes.contains(&DBG_SET_PROLOGUE_END),
+            "missing prologue marker"
+        );
+        assert!(
+            opcodes.contains(&DBG_SET_EPILOGUE_BEGIN),
+            "missing epilogue marker"
         );
     }
 
