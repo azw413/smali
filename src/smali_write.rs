@@ -246,15 +246,39 @@ pub(crate) fn write_class(dex: &SmaliClass) -> String {
 
     if !dex.fields.is_empty() {
         out.push_str("\n# fields\n");
-        for f in &dex.fields {
-            out.push_str(&write_field(f));
+        let mut fields: Vec<(usize, &SmaliField, String)> = dex
+            .fields
+            .iter()
+            .enumerate()
+            .map(|(idx, field)| (idx, field, field.signature.to_jni()))
+            .collect();
+        fields.sort_by(|a, b| {
+            a.1.name
+                .cmp(&b.1.name)
+                .then(a.2.cmp(&b.2))
+                .then(a.0.cmp(&b.0))
+        });
+        for (_, field, _) in fields {
+            out.push_str(&write_field(field));
         }
     }
 
     if !dex.methods.is_empty() {
         out.push_str("\n# methods\n");
-        for m in &dex.methods {
-            out.push_str(&write_method(m));
+        let mut methods: Vec<(usize, &SmaliMethod, String)> = dex
+            .methods
+            .iter()
+            .enumerate()
+            .map(|(idx, method)| (idx, method, method.signature.to_jni()))
+            .collect();
+        methods.sort_by(|a, b| {
+            a.1.name
+                .cmp(&b.1.name)
+                .then(a.2.cmp(&b.2))
+                .then(a.0.cmp(&b.0))
+        });
+        for (_, method, _) in methods {
+            out.push_str(&write_method(method));
         }
     }
 

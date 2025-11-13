@@ -64,7 +64,7 @@ impl Error for SmaliError {
 ///  assert_eq!(o.as_java_type(), "com.basic.Test");
 ///  assert_eq!(o.as_jni_type(), "Lcom/basic/Test;");
 /// ```
-#[derive(Debug, Eq, Serialize, Deserialize)]
+#[derive(Debug, Eq, Serialize, Deserialize, Clone)]
 pub struct ObjectIdentifier {
     pub(crate) class_name: String,
     pub(crate) type_arguments: Option<Vec<TypeSignature>>,
@@ -157,7 +157,7 @@ impl ObjectIdentifier {
 ///  let t = TypeSignature::Bool;
 ///  assert_eq!(t.to_jni(), "Z");
 /// ```
-#[derive(Debug, Eq, Serialize, Deserialize)]
+#[derive(Debug, Eq, Serialize, Deserialize, Clone)]
 pub enum TypeSignature {
     Array(Box<TypeSignature>),
     Object(ObjectIdentifier),

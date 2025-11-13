@@ -7,8 +7,8 @@ mod annotations;
 pub mod builder;
 mod encoded_values;
 mod leb;
-mod opcode_format;
-mod opcodes;
+pub mod opcode_format;
+pub mod opcodes;
 
 use crate::dex::error::DexError;
 use crate::dex::leb::{decode_uleb128, decode_uleb128p1, encode_uleb128, encode_uleb128p1};

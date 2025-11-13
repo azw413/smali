@@ -1151,6 +1151,46 @@ pub enum DexOp {
     },
 }
 
+pub fn unescape_smali_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                match next {
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    '\\' => out.push('\\'),
+                    '\"' => out.push('\"'),
+                    '\'' => out.push('\''),
+                    '0' => out.push('\0'),
+                    'u' => {
+                        let mut buf = String::new();
+                        for _ in 0..4 {
+                            if let Some(hex) = chars.next() {
+                                buf.push(hex);
+                            }
+                        }
+                        if let Ok(code) = u16::from_str_radix(&buf, 16) {
+                            if let Some(decoded) = char::from_u32(code as u32) {
+                                out.push(decoded);
+                            }
+                        }
+                    }
+                    _ => {
+                        out.push('\\');
+                        out.push(next);
+                    }
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 impl fmt::Display for DexOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1869,12 +1909,16 @@ where
     // Decimal path: strict signed integer (no wrapping)
     let (input, num_str) = digit1.parse(input)?;
     let (input, _) = opt(char('L')).parse(input)?;
-    let mut value_i64 = num_str
-        .parse::<i64>()
+    let mut value_i128 = num_str
+        .parse::<i128>()
         .map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Digit)))?;
     if sign.is_some() {
-        value_i64 = -value_i64;
+        value_i128 = -value_i128;
     }
+    if value_i128 < i64::MIN as i128 || value_i128 > i64::MAX as i128 {
+        return Err(nom::Err::Failure(Error::new(input, ErrorKind::Digit)));
+    }
+    let value_i64 = value_i128 as i64;
     let out = T::try_from(value_i64)
         .map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Digit)))?;
     Ok((input, out))

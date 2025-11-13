@@ -16,7 +16,7 @@ use crate::dex::opcode_format::assemble::{
     MethodAssemblyResult,
 };
 use crate::dex::{write_sleb128, write_u2, write_u4, write_uleb128, write_uleb128p1};
-use crate::smali_ops::{DexOp, FieldRef, MethodRef, parse_literal_int};
+use crate::smali_ops::{DexOp, FieldRef, MethodRef, parse_literal_int, unescape_smali_string};
 use crate::smali_parse::parse_java_array;
 use crate::types::{
     AnnotationValue, AnnotationVisibility, ArrayDataDirective, ArrayDataElement, CatchDirective,
@@ -72,6 +72,8 @@ pub struct DexIndexPools {
 
     pub methods: Vec<MethodEntry>,
     method_index: HashMap<MethodKey, u32>,
+
+    annotation_elements: HashMap<String, HashMap<String, TypeSignature>>,
 }
 
 struct PoolIndexResolver<'a> {
@@ -221,14 +223,6 @@ struct ChunkFixup {
 #[derive(Debug, Clone)]
 struct ArrayDataPlanEntry {
     label: String,
-    chunk_index: usize,
-}
-
-#[derive(Debug, Clone)]
-struct MethodCodeBinding {
-    class_plan_idx: usize,
-    method_idx: usize,
-    is_direct: bool,
     chunk_index: usize,
 }
 
@@ -406,6 +400,16 @@ impl DexIndexPools {
         let key = MethodKey::new(class_desc.to_string(), name.to_string(), proto);
         self.method_index.get(&key).copied()
     }
+
+    fn annotation_element_type(
+        &self,
+        annotation_desc: &str,
+        element: &str,
+    ) -> Option<&TypeSignature> {
+        self.annotation_elements
+            .get(annotation_desc)
+            .and_then(|m| m.get(element))
+    }
 }
 
 impl SectionOffsets {
@@ -553,6 +557,12 @@ impl DataSectionPlan {
         chunks.sort_by_key(|chunk| chunk.offset);
         let mut buf = Vec::with_capacity(self.size as usize);
         for chunk in chunks {
+            if buf.len() > chunk.offset as usize {
+                panic!(
+                    "chunk {:?} (offset {}) overlaps previously written data",
+                    chunk.owner, chunk.offset
+                );
+            }
             ensure_len(&mut buf, chunk.offset as usize);
             buf.extend_from_slice(&chunk.bytes);
         }
@@ -590,6 +600,16 @@ struct DataSectionBuilder {
 impl DataSectionBuilder {
     fn new() -> Self {
         DataSectionBuilder { chunks: Vec::new() }
+    }
+
+    fn recompute_offsets(&mut self) -> u32 {
+        let mut cursor = 0u32;
+        for chunk in &mut self.chunks {
+            cursor = align_to(cursor, chunk.align);
+            chunk.offset = cursor;
+            cursor += chunk.bytes.len() as u32;
+        }
+        cursor
     }
 
     fn add_string_data(&mut self, strings: &[DexString]) {
@@ -694,12 +714,7 @@ impl DataSectionBuilder {
     }
 
     fn finish(mut self) -> DataSectionPlan {
-        let mut cursor = 0u32;
-        for chunk in &mut self.chunks {
-            cursor = align_to(cursor, chunk.align);
-            chunk.offset = cursor;
-            cursor += chunk.bytes.len() as u32;
-        }
+        let cursor = self.recompute_offsets();
         DataSectionPlan {
             chunks: self.chunks,
             size: cursor,
@@ -719,18 +734,18 @@ impl DexLayoutPlan {
         let ids = pools.build_id_tables();
 
         let mut class_defs = build_class_def_plans(classes, &pools)?;
-        let mut class_data_chunk_indices = vec![None; class_defs.len()];
         let mut class_plan_by_idx = HashMap::new();
         for (i, plan) in class_defs.iter().enumerate() {
             class_plan_by_idx.insert(plan.class_idx, i);
         }
 
+        let preliminary_sections = SectionOffsets::new(&ids, class_defs.len() as u32, 0);
+        let data_base = preliminary_sections.data_off;
         let resolver = PoolIndexResolver::new(&pools);
         let assembler = MethodAssembler::new(&resolver, DEFAULT_API_LEVEL, DEFAULT_ART_VERSION);
         let mut data_builder = DataSectionBuilder::new();
         data_builder.add_string_data(&ids.strings);
         data_builder.add_proto_parameter_lists(&ids.proto_ids);
-        let mut method_code_bindings = Vec::new();
         let mut array_data_entries = Vec::new();
         for class in classes {
             let class_idx = pools
@@ -749,13 +764,10 @@ impl DexLayoutPlan {
                 plan_idx,
                 &assembler,
                 &mut data_builder,
-                &mut method_code_bindings,
+                data_base,
             )? {
+                data_builder.add_class_data(plan_idx, &class_data);
                 class_defs[plan_idx].class_data = Some(class_data);
-                if let Some(data) = class_defs[plan_idx].class_data.as_ref() {
-                    let chunk_idx = data_builder.add_class_data(plan_idx, data);
-                    class_data_chunk_indices[plan_idx] = Some(chunk_idx);
-                }
             }
             build_class_annotations(class, plan_idx, &pools, &mut data_builder)?;
             collect_array_data_chunks(class, &mut data_builder, &mut array_data_entries)?;
@@ -764,15 +776,7 @@ impl DexLayoutPlan {
         let mut data_section = data_builder.finish();
 
         let sections = SectionOffsets::new(&ids, class_defs.len() as u32, data_section.size);
-        let data_base = sections.data_off;
-
-        finalize_method_code_offsets(
-            &mut data_section,
-            data_base,
-            &mut class_defs,
-            &method_code_bindings,
-            &class_data_chunk_indices,
-        )?;
+        debug_assert_eq!(data_base, sections.data_off);
 
         data_section.apply_fixups(data_base);
         let mut array_data_offsets = HashMap::new();
@@ -1210,7 +1214,10 @@ struct DexPoolBuilder {
     type_descriptors: BTreeSet<String>,
     proto_keys: BTreeSet<PrototypeKey>,
     field_keys: BTreeSet<FieldKey>,
-    method_keys: BTreeSet<MethodKey>,
+    method_keys: Vec<MethodKey>,
+    method_key_set: BTreeSet<MethodKey>,
+    annotation_elements: HashMap<String, HashMap<String, TypeSignature>>,
+    string_aliases: HashMap<String, String>,
 }
 
 impl DexPoolBuilder {
@@ -1219,6 +1226,20 @@ impl DexPoolBuilder {
         self.insert_type_descriptor(&class_desc);
         if let Some(source) = &class.source {
             self.strings.insert(source);
+        }
+
+        if class
+            .modifiers
+            .iter()
+            .any(|m| matches!(m, Modifier::Annotation))
+        {
+            let entry = self
+                .annotation_elements
+                .entry(class_desc.to_string())
+                .or_default();
+            for method in &class.methods {
+                entry.insert(method.name.clone(), method.signature.result.clone());
+            }
         }
 
         let super_desc = class.super_class.as_jni_type();
@@ -1243,7 +1264,12 @@ impl DexPoolBuilder {
     }
 
     fn finalize(self) -> Result<DexIndexPools, DexError> {
-        let (strings, string_index) = self.strings.into_vec();
+        let (strings, mut string_index) = self.strings.into_vec();
+        for (raw, normalized) in self.string_aliases {
+            if let Some(&idx) = string_index.get(&normalized) {
+                string_index.insert(raw, idx);
+            }
+        }
 
         let mut types = Vec::with_capacity(self.type_descriptors.len());
         let mut type_index = HashMap::with_capacity(self.type_descriptors.len());
@@ -1337,6 +1363,7 @@ impl DexPoolBuilder {
             field_index: field_index_map,
             methods,
             method_index: method_index_map,
+            annotation_elements: self.annotation_elements,
         })
     }
 
@@ -1395,13 +1422,25 @@ impl DexPoolBuilder {
         self.register_proto_components(&proto_key);
         self.proto_keys.insert(proto_key.clone());
         let key = MethodKey::new(class_desc.to_string(), method.name.clone(), proto_key);
-        self.method_keys.insert(key);
+        self.insert_method_key(key);
+    }
+
+    fn insert_method_key(&mut self, key: MethodKey) {
+        if self.method_key_set.insert(key.clone()) {
+            self.method_keys.push(key);
+        }
     }
 
     fn collect_dex_op(&mut self, op: &DexOp) {
         match op {
             DexOp::ConstString { value, .. } | DexOp::ConstStringJumbo { value, .. } => {
-                self.strings.insert(value);
+                let normalized = unescape_smali_string(value);
+                if normalized != *value {
+                    self.string_aliases
+                        .entry(value.clone())
+                        .or_insert_with(|| normalized.clone());
+                }
+                self.strings.insert(normalized);
             }
             DexOp::ConstClass { class, .. }
             | DexOp::CheckCast { class, .. }
@@ -1494,7 +1533,7 @@ impl DexPoolBuilder {
         self.register_proto_components(&proto_key);
         self.proto_keys.insert(proto_key.clone());
         let key = MethodKey::new(method.class.clone(), method.name.clone(), proto_key);
-        self.method_keys.insert(key);
+        self.insert_method_key(key);
     }
 
     fn collect_proto_descriptor(&mut self, descriptor: &str) {
@@ -1588,7 +1627,7 @@ impl DexPoolBuilder {
         self.register_proto_components(&proto_key);
         self.proto_keys.insert(proto_key.clone());
         let key = MethodKey::new(method.class_desc.clone(), method.name.clone(), proto_key);
-        self.method_keys.insert(key);
+        self.method_keys.push(key);
     }
 
     fn collect_parsed_field(&mut self, field: &ParsedFieldRef) {
@@ -1738,9 +1777,6 @@ struct StringCollector(BTreeSet<String>);
 impl StringCollector {
     fn insert<S: AsRef<str>>(&mut self, value: S) {
         let val = value.as_ref();
-        if val.is_empty() {
-            return;
-        }
         self.0.insert(val.to_string());
     }
 
@@ -2057,7 +2093,7 @@ fn build_class_data_item(
     class_plan_idx: usize,
     assembler: &MethodAssembler<PoolIndexResolver<'_>>,
     data_builder: &mut DataSectionBuilder,
-    method_bindings: &mut Vec<MethodCodeBinding>,
+    data_base: u32,
 ) -> Result<Option<ClassDataItem>, DexError> {
     let class_desc = class.name.as_jni_type();
 
@@ -2089,6 +2125,7 @@ fn build_class_data_item(
 
     let mut direct_methods = Vec::new();
     let mut virtual_methods = Vec::new();
+    let mut pending_code_chunks: Vec<(usize, bool, usize)> = Vec::new();
     for method in &class.methods {
         let needs_code = method_requires_code(method);
 
@@ -2109,12 +2146,7 @@ fn build_class_data_item(
         if needs_code {
             let code_item = assemble_concrete_method(&class_desc, method, assembler, pools)?;
             let chunk_index = data_builder.add_code_item(class_plan_idx, method_idx, &code_item)?;
-            method_bindings.push(MethodCodeBinding {
-                class_plan_idx,
-                method_idx,
-                is_direct,
-                chunk_index,
-            });
+            pending_code_chunks.push((method_idx, is_direct, chunk_index));
         }
 
         if is_direct {
@@ -2125,6 +2157,32 @@ fn build_class_data_item(
     }
     direct_methods.sort_by_key(|m| m.method_idx);
     virtual_methods.sort_by_key(|m| m.method_idx);
+
+    if !pending_code_chunks.is_empty() {
+        data_builder.recompute_offsets();
+        for (method_idx, is_direct, chunk_index) in pending_code_chunks {
+            let chunk = data_builder
+                .chunks
+                .get_mut(chunk_index)
+                .ok_or_else(|| DexError::new("code chunk missing during class data build"))?;
+            let code_off = data_base
+                .checked_add(chunk.offset)
+                .ok_or_else(|| DexError::new("code offset overflow"))?;
+            patch_debug_info_pointer(chunk, code_off)?;
+            let methods = if is_direct {
+                &mut direct_methods
+            } else {
+                &mut virtual_methods
+            };
+            let entry = methods
+                .iter_mut()
+                .find(|m| m.method_idx == method_idx)
+                .ok_or_else(|| {
+                    DexError::new("encoded method missing while assigning code offset")
+                })?;
+            entry.code_off = code_off;
+        }
+    }
 
     if static_fields.is_empty()
         && instance_fields.is_empty()
@@ -2252,60 +2310,6 @@ fn collect_array_data_chunks(
             }
         }
     }
-    Ok(())
-}
-
-fn finalize_method_code_offsets(
-    data_section: &mut DataSectionPlan,
-    data_base: u32,
-    class_defs: &mut [ClassDefPlan],
-    bindings: &[MethodCodeBinding],
-    class_data_chunks: &[Option<usize>],
-) -> Result<(), DexError> {
-    for binding in bindings {
-        let chunk = data_section
-            .chunks_mut()
-            .get_mut(binding.chunk_index)
-            .ok_or_else(|| DexError::new("code chunk missing for method"))?;
-        let code_off = data_base
-            .checked_add(chunk.offset)
-            .ok_or_else(|| DexError::new("code offset overflow"))?;
-        let class_plan = class_defs
-            .get_mut(binding.class_plan_idx)
-            .ok_or_else(|| DexError::new("class plan missing for method code"))?;
-        let class_data = class_plan
-            .class_data
-            .as_mut()
-            .ok_or_else(|| DexError::new("class data missing for method code"))?;
-        let methods = if binding.is_direct {
-            &mut class_data.direct_methods
-        } else {
-            &mut class_data.virtual_methods
-        };
-        let entry = methods
-            .iter_mut()
-            .find(|m| m.method_idx == binding.method_idx)
-            .ok_or_else(|| DexError::new("encoded method missing for code binding"))?;
-        entry.code_off = code_off;
-        patch_debug_info_pointer(chunk, code_off)?;
-    }
-
-    for (class_idx, chunk_idx) in class_data_chunks.iter().enumerate() {
-        if let Some(chunk_index) = chunk_idx {
-            let Some(chunk) = data_section.chunks_mut().get_mut(*chunk_index) else {
-                return Err(DexError::new("class data chunk missing while patching"));
-            };
-            let Some(class_data) = class_defs[class_idx].class_data.as_ref() else {
-                return Err(DexError::new(
-                    "class data missing for chunk while patching code offsets",
-                ));
-            };
-            let mut bytes = Vec::new();
-            class_data.write(&mut bytes);
-            chunk.bytes = bytes;
-        }
-    }
-
     Ok(())
 }
 
@@ -2814,7 +2818,8 @@ fn encode_annotation_payload(
         let name_idx = pools
             .string_index(&element.name)
             .ok_or_else(|| DexError::new("missing string index for annotation element"))?;
-        let value = encode_annotation_value(&element.value, pools)?;
+        let expected_type = pools.annotation_element_type(&type_desc, &element.name);
+        let value = encode_annotation_value(&element.value, pools, expected_type)?;
         elements.push(DexAnnotationElement { name_idx, value });
     }
     Ok(EncodedAnnotation { type_idx, elements })
@@ -2831,12 +2836,30 @@ fn encode_annotation_visibility(vis: &AnnotationVisibility) -> u8 {
 fn encode_annotation_value(
     value: &AnnotationValue,
     pools: &DexIndexPools,
+    expected_type: Option<&TypeSignature>,
 ) -> Result<EncodedValue, DexError> {
     match value {
-        AnnotationValue::Single(literal) => encode_annotation_literal(literal, pools),
+        AnnotationValue::Single(literal) => {
+            if let Some(sig) = expected_type {
+                if let Some(encoded) = literal_to_encoded_value(literal, sig, pools)? {
+                    return Ok(encoded);
+                }
+            }
+            encode_annotation_literal(literal, pools)
+        }
         AnnotationValue::Array(entries) => {
             let mut values = Vec::with_capacity(entries.len());
+            let element_sig = match expected_type {
+                Some(TypeSignature::Array(inner)) => Some(inner.as_ref()),
+                _ => None,
+            };
             for entry in entries {
+                if let Some(sig) = element_sig {
+                    if let Some(encoded) = literal_to_encoded_value(entry, sig, pools)? {
+                        values.push(encoded);
+                        continue;
+                    }
+                }
                 values.push(encode_annotation_literal(entry, pools)?);
             }
             Ok(EncodedValue::Array(values))
@@ -2881,9 +2904,9 @@ fn encode_annotation_literal(
 
     if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
         if let Some(parsed) = parse_smali_string_literal(trimmed) {
-            let idx = pools
-                .string_index(&parsed)
-                .ok_or_else(|| DexError::new("missing string literal in pool"))?;
+            let idx = pools.string_index(&parsed).ok_or_else(|| {
+                DexError::new(&format!("missing string literal '{}' in pool", parsed))
+            })?;
             return Ok(EncodedValue::String(idx));
         }
     }
@@ -2894,11 +2917,29 @@ fn encode_annotation_literal(
         }
     }
 
-    if let Some(value) = parse_float_literal(trimmed) {
-        return Ok(EncodedValue::Float(value));
-    }
-    if let Some(value) = parse_double_literal(trimmed) {
-        return Ok(EncodedValue::Double(value));
+    let has_float_suffix = trimmed.ends_with('f') || trimmed.ends_with('F');
+    let has_double_suffix = trimmed.ends_with('d') || trimmed.ends_with('D');
+    let looks_fractional = has_float_suffix
+        || has_double_suffix
+        || trimmed.contains('.')
+        || trimmed.contains('e')
+        || trimmed.contains('E')
+        || trimmed.contains('p')
+        || trimmed.contains('P');
+    if looks_fractional {
+        if has_float_suffix {
+            if let Some(value) = parse_float_literal(trimmed) {
+                return Ok(EncodedValue::Float(value));
+            }
+        }
+        if let Some(value) = parse_double_literal(trimmed) {
+            return Ok(EncodedValue::Double(value));
+        }
+        if !has_float_suffix {
+            if let Some(value) = parse_float_literal(trimmed) {
+                return Ok(EncodedValue::Float(value));
+            }
+        }
     }
 
     if let Ok((_, value)) = parse_literal_int::<i32>(trim_numeric_literal_suffix(trimmed)) {
@@ -2909,13 +2950,15 @@ fn encode_annotation_literal(
     }
 
     if let Some(parsed) = parse_smali_string_literal(trimmed) {
-        let idx = pools
-            .string_index(&parsed)
-            .ok_or_else(|| DexError::new("missing string literal in pool"))?;
+        let idx = pools.string_index(&parsed).ok_or_else(|| {
+            DexError::new(&format!("missing string literal '{}' in pool", parsed))
+        })?;
         return Ok(EncodedValue::String(idx));
     }
 
-    Err(DexError::new("unsupported annotation literal"))
+    Err(DexError::new(&format!(
+        "unsupported annotation literal: {trimmed}"
+    )))
 }
 
 fn looks_like_type_descriptor(value: &str) -> bool {
@@ -3143,8 +3186,9 @@ fn literal_to_encoded_value(
             if let Some(ch) = parse_char_literal(trimmed) {
                 return Ok(Some(EncodedValue::Char(ch as u16)));
             }
-            if let Ok((_, value)) = parse_literal_int::<i16>(trim_numeric_literal_suffix(trimmed)) {
-                return Ok(Some(EncodedValue::Char(value as u16)));
+            if let Ok((_, value)) = parse_literal_int::<i32>(trim_numeric_literal_suffix(trimmed)) {
+                let clamped = value & 0xFFFF;
+                return Ok(Some(EncodedValue::Char(clamped as u16)));
             }
         }
         TypeSignature::Int => {
@@ -3178,9 +3222,9 @@ fn literal_to_encoded_value(
                 return Ok(Some(EncodedValue::Null));
             }
             if let Some(parsed) = parse_smali_string_literal(trimmed) {
-                let idx = pools
-                    .string_index(&parsed)
-                    .ok_or_else(|| DexError::new("missing string literal in pool"))?;
+                let idx = pools.string_index(&parsed).ok_or_else(|| {
+                    DexError::new(&format!("missing string literal '{}' in pool", parsed))
+                })?;
                 return Ok(Some(EncodedValue::String(idx)));
             }
         }
@@ -3229,35 +3273,6 @@ fn parse_float_literal(literal: &str) -> Option<f32> {
 fn parse_double_literal(literal: &str) -> Option<f64> {
     let trimmed = literal.trim().trim_end_matches(|c| matches!(c, 'd' | 'D'));
     trimmed.parse::<f64>().ok()
-}
-
-fn unescape_smali_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut chars = value.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            if let Some(next) = chars.next() {
-                match next {
-                    'n' => out.push('\n'),
-                    'r' => out.push('\r'),
-                    't' => out.push('\t'),
-                    '\\' => out.push('\\'),
-                    '\"' => out.push('"'),
-                    '\'' => out.push('\''),
-                    '0' => out.push('\0'),
-                    _ => {
-                        out.push('\\');
-                        out.push(next);
-                    }
-                }
-            } else {
-                out.push('\\');
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
 }
 
 fn trim_numeric_literal_suffix(literal: &str) -> &str {

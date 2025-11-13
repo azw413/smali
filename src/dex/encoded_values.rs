@@ -402,19 +402,9 @@ fn byte_size_u16(v: u16) -> u8 {
     max(1, 2 - s)
 }
 
-fn byte_size_i32(v: i32) -> u8 {
-    let s = (v.leading_zeros() / 8) as u8;
-    max(1, 4 - s)
-}
-
 fn byte_size_u32(v: u32) -> u8 {
     let s = (v.leading_zeros() / 8) as u8;
     max(1, 4 - s)
-}
-
-fn byte_size_i64(v: i64) -> u8 {
-    let s = (v.leading_zeros() / 8) as u8;
-    max(1, 8 - s)
 }
 
 fn byte_size_f32(v: f32) -> u8 {
@@ -427,6 +417,32 @@ fn byte_size_f64(v: f64) -> u8 {
     let u = u64::from_le_bytes(v.to_le_bytes());
     let s = (u.leading_zeros() / 8) as u8;
     max(1, 8 - s)
+}
+
+fn byte_size_i32(v: i32) -> u8 {
+    let val = v as i64;
+    for size in 1..=4 {
+        let bits = 8 * size;
+        let min = -(1i64 << (bits - 1));
+        let max = (1i64 << (bits - 1)) - 1;
+        if val >= min && val <= max {
+            return size as u8;
+        }
+    }
+    4
+}
+
+fn byte_size_i64(v: i64) -> u8 {
+    let val = v as i128;
+    for size in 1..=8 {
+        let bits = 8 * size;
+        let min = -(1i128 << (bits - 1));
+        let max = (1i128 << (bits - 1)) - 1;
+        if val >= min && val <= max {
+            return size as u8;
+        }
+    }
+    8
 }
 
 pub fn write_encoded_array(encoded_array: &[EncodedValue], bytes: &mut Vec<u8>) -> usize {

@@ -555,19 +555,15 @@ pub fn parse_param_block(input: &str) -> IResult<&str, SmaliParam> {
 
 pub fn parse_method(smali: &str) -> IResult<&str, SmaliMethod> {
     let (input, _) = tag(".method")(smali)?;
-    let (o, modifiers) = parse_modifiers(input)?;
+    let (mut input, mut modifiers) = parse_modifiers(input)?;
 
-    let mut input = o;
-
-    // Is it a class initializer or constructor
-    let constructor = if let IResult::Ok((o, _)) =
-        ws(tag::<&str, &str, Error<&str>>("constructor ")).parse(input)
-    {
-        input = o;
-        true
-    } else {
-        false
-    };
+    // Constructors are represented both as a modifier token and a dedicated flag
+    // on `SmaliMethod`. Capture the flag and drop the modifier so we do not
+    // render `constructor` twice when writing smali.
+    let constructor = modifiers.iter().any(|m| matches!(m, Modifier::Constructor));
+    if constructor {
+        modifiers.retain(|m| !matches!(m, Modifier::Constructor));
+    }
 
     let (o, name) = take_while(|c| c != '(').parse(input)?;
     let (o, ms) = parse_methodsignature(o)?;

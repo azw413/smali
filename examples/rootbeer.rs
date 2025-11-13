@@ -1,19 +1,23 @@
-use smali::find_smali_files;
+use smali::android::zip::{pack_apk, unpack_apk};
+use smali::dex::DexFile;
 use smali::smali_ops::{DexOp, v};
 use smali::types::SmaliOp::Op;
 use smali::types::*;
 use std::env;
 use std::error::Error;
-use std::path::PathBuf;
-use std::process::Command;
-use std::str::FromStr;
+use std::fs;
+use std::path::{Path, PathBuf};
 
-// This demo unpacks an APK file with apktool (you need this on your path), searches for rootBeer and disables it.
+// This demo unpacks an APK, searches for RootBeer and disables it by patching methods inside classes.dex.
 // Try it on the RootBeer Sample app https://play.google.com/store/apps/details?id=com.scottyab.rootbeer.sample
 
 //Usage: main <apk-file>
 fn main() {
     let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: {} <apk-file>", args[0]);
+        std::process::exit(1);
+    }
 
     // Do everything else with the error trap
     match process_apk(&args[1]) {
@@ -44,18 +48,64 @@ fn is_rootbeer_class(c: &SmaliClass) -> bool {
 
 /* This is where all the processing takes place, to make error handling easier */
 fn process_apk(apk_file: &str) -> Result<(), Box<dyn Error>> {
-    // Call apktool to unpack the APK
-    execute_command("apktool", &["decode", "-f", apk_file, "-o", "out"])?;
+    let work_dir = PathBuf::from("out_apk");
+    if work_dir.exists() {
+        fs::remove_dir_all(&work_dir)?;
+    }
+    unpack_apk(apk_file, &work_dir)?;
 
-    // Load all the smali classes
-    let mut p = PathBuf::from_str("out")?;
-    p.push("smali");
-    let mut classes = find_smali_files(&p)?;
-    println!("{:} smali classes loaded.", classes.len());
+    let mut dex_paths = Vec::new();
+    collect_dex_files(&work_dir, &mut dex_paths)?;
+    if dex_paths.is_empty() {
+        return Err("No classes*.dex files found in APK".into());
+    }
 
-    // Search for the RootBeer class
+    let mut patched = false;
+    for dex_path in dex_paths {
+        if patch_dex_file(&dex_path)? {
+            println!("Patched {}", dex_path.display());
+            patched = true;
+        }
+    }
+
+    if !patched {
+        println!("No RootBeer detections found; output APK will match the input.");
+    }
+
+    pack_apk(&work_dir, "out.apk")?;
+    println!("Wrote patched APK to out.apk");
+
+    Ok(())
+}
+
+fn collect_dex_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Box<dyn Error>> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_dex_files(&path, out)?;
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|name| name.starts_with("classes") && name.ends_with(".dex"))
+            .unwrap_or(false)
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn patch_dex_file(path: &Path) -> Result<bool, Box<dyn Error>> {
+    let dex = DexFile::from_file(path)?;
+    let mut classes = dex.to_smali()?;
+    let mut touched = false;
+
     for c in classes.iter_mut() {
         if is_rootbeer_class(c) {
+            touched = true;
             // Patch all the methods returning a boolean
             for m in c.methods.iter_mut() {
                 if m.signature.result == TypeSignature::Bool && m.signature.args.is_empty() {
@@ -75,33 +125,12 @@ fn process_apk(apk_file: &str) -> Result<(), Box<dyn Error>> {
                 }
             }
         }
-        // Save all classes, even unmodified so we can thoroughly test parser and writer
-        c.save()?;
     }
 
-    // Repack the APK
-    execute_command("apktool", &["build", "out", "-o", "out.apk"])?;
-
-    Ok(())
-}
-
-/* Wrapper around command for nicer error handling */
-fn execute_command(cmd: &str, args: &[&str]) -> Result<String, Box<dyn Error>> {
-    match Command::new(cmd).args(args).output() {
-        Ok(output) => {
-            if output.status.success() {
-                //info!("Successfully executed {}", cmd);
-                Ok(String::from_utf8(output.stdout)?)
-            } else {
-                println!("Error executing command {} {:?}", cmd, args);
-                println!("Return code: {:?}", output.status);
-                println!("stderr: {:?}", String::from_utf8(output.stderr)?);
-                Err(Box::new(SmaliError::new("Bad return code")))
-            }
-        }
-        Err(e) => {
-            println!("Error executing command {} {:?}", cmd, args);
-            Err(Box::new(e))
-        }
+    if touched {
+        let rebuilt = DexFile::from_smali(&classes)?;
+        rebuilt.to_path(path)?;
     }
+
+    Ok(touched)
 }

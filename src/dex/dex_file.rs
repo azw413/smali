@@ -3,6 +3,7 @@
 use crate::dex::annotations::{
     AnnotationItem, AnnotationSetItem, AnnotationSetRefList, AnnotationsDirectoryItem,
 };
+use crate::dex::builder::build_dex_file_bytes;
 use crate::dex::encoded_values::{EncodedValue, read_encoded_array};
 use crate::dex::error::DexError;
 use crate::dex::{
@@ -11,7 +12,7 @@ use crate::dex::{
 };
 use crate::types::{
     AnnotationElement as SmaliAnnElement, AnnotationValue as SmaliAnnValue,
-    AnnotationVisibility as SmaliAnnVis, MethodSignature, Modifiers, ObjectIdentifier,
+    AnnotationVisibility as SmaliAnnVis, MethodSignature, Modifier, Modifiers, ObjectIdentifier,
     SmaliAnnotation, SmaliClass, SmaliField, SmaliMethod, SmaliParam, TypeSignature,
 };
 use cesu8::to_java_cesu8;
@@ -1264,7 +1265,7 @@ impl DexFile {
                         initial_value: if let Some(s) = &c.static_values {
                             if i < s.len() {
                                 match s[i] {
-                                    EncodedValue::Null => None,
+                                    EncodedValue::Null => Some("null".to_string()),
                                     EncodedValue::String(sid) => {
                                         let raw = self.get_string(sid as usize)?;
                                         Some(format!(
@@ -1431,10 +1432,20 @@ impl DexFile {
                     (0, Vec::new())
                 };
 
+                let mut modifiers = Modifiers::from_u32(m.access_flags);
+                let constructor = modifiers
+                    .iter()
+                    .any(|modif| matches!(modif, Modifier::Constructor))
+                    || name == "<init>"
+                    || name == "<clinit>";
+                if constructor {
+                    modifiers.retain(|modif| !matches!(modif, Modifier::Constructor));
+                }
+
                 smali.methods.push(SmaliMethod {
                     name,
-                    modifiers: Modifiers::from_u32(m.access_flags),
-                    constructor: false, // could set true if name == "<init>", keep false for now
+                    modifiers,
+                    constructor,
                     signature,
                     locals,
                     params,
@@ -1501,14 +1512,39 @@ impl DexFile {
         (api, art_version)
     }
 
+    /// Parse a `DexFile` from an in-memory byte slice.
     pub fn from_bytes(bytes: &[u8]) -> Result<DexFile, DexError> {
         let mut ix = 0;
         DexFile::read(bytes, &mut ix)
     }
 
+    /// Build a fresh `DexFile` from a collection of decoded `SmaliClass` structures.
+    /// This is the high-level counterpart to `build_dex_file_bytes`, returning a fully
+    /// parsed `DexFile` so callers can immediately inspect IDs, header metadata, etc.
+    pub fn from_smali(classes: &[SmaliClass]) -> Result<DexFile, DexError> {
+        let bytes = build_dex_file_bytes(classes)?;
+        DexFile::from_bytes(&bytes)
+    }
+
+    /// Convenience wrapper that reads a `.dex` off disk and parses it.
+    pub fn from_path<P: AsRef<Path>>(path: P) -> Result<DexFile, DexError> {
+        DexFile::from_file(path.as_ref())
+    }
+
+    /// Parse a DEX file from the provided filesystem path.
     pub fn from_file(path: &Path) -> Result<DexFile, DexError> {
         let bytes = fs::read(path).map_err(|e| DexError::new(&format!("io Error: {}", e)))?;
         DexFile::from_bytes(&bytes)
+    }
+
+    /// Return the raw bytes of this DEX file.
+    pub fn to_bytes(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Write the current DEX file to the given path.
+    pub fn to_path<P: AsRef<Path>>(&self, path: P) -> Result<(), DexError> {
+        fs::write(path, &self.data).map_err(|e| DexError::new(&format!("io Error: {}", e)))
     }
 }
 
