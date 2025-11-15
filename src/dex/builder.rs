@@ -746,6 +746,7 @@ impl DexLayoutPlan {
         let mut data_builder = DataSectionBuilder::new();
         data_builder.add_string_data(&ids.strings);
         data_builder.add_proto_parameter_lists(&ids.proto_ids);
+        data_builder.add_class_interface_lists(&class_defs);
         let mut array_data_entries = Vec::new();
         for class in classes {
             let class_idx = pools
@@ -772,7 +773,6 @@ impl DexLayoutPlan {
             build_class_annotations(class, plan_idx, &pools, &mut data_builder)?;
             collect_array_data_chunks(class, &mut data_builder, &mut array_data_entries)?;
         }
-        data_builder.add_class_interface_lists(&class_defs);
         let mut data_section = data_builder.finish();
 
         let sections = SectionOffsets::new(&ids, class_defs.len() as u32, data_section.size);
@@ -908,46 +908,45 @@ fn emit_dex_file(plan: DexLayoutPlan) -> Result<Vec<u8>, DexError> {
 }
 
 fn build_map_items(plan: &DexLayoutPlan, map_off: u32) -> Vec<MapItem> {
-    let mut items = Vec::new();
-    items.push(MapItem::new(TYPE_HEADER_ITEM, 1, 0));
-
+    let mut items = vec![MapItem::new(TYPE_HEADER_ITEM, 1, 0)];
+    let mut rest = Vec::new();
     if plan.sections.string_ids.count > 0 {
-        items.push(MapItem::new(
+        rest.push(MapItem::new(
             TYPE_STRING_ID_ITEM,
             plan.sections.string_ids.count,
             plan.sections.string_ids.offset,
         ));
     }
     if plan.sections.type_ids.count > 0 {
-        items.push(MapItem::new(
+        rest.push(MapItem::new(
             TYPE_TYPE_ID_ITEM,
             plan.sections.type_ids.count,
             plan.sections.type_ids.offset,
         ));
     }
     if plan.sections.proto_ids.count > 0 {
-        items.push(MapItem::new(
+        rest.push(MapItem::new(
             TYPE_PROTO_ID_ITEM,
             plan.sections.proto_ids.count,
             plan.sections.proto_ids.offset,
         ));
     }
     if plan.sections.field_ids.count > 0 {
-        items.push(MapItem::new(
+        rest.push(MapItem::new(
             TYPE_FIELD_ID_ITEM,
             plan.sections.field_ids.count,
             plan.sections.field_ids.offset,
         ));
     }
     if plan.sections.method_ids.count > 0 {
-        items.push(MapItem::new(
+        rest.push(MapItem::new(
             TYPE_METHOD_ID_ITEM,
             plan.sections.method_ids.count,
             plan.sections.method_ids.offset,
         ));
     }
     if plan.sections.class_defs.count > 0 {
-        items.push(MapItem::new(
+        rest.push(MapItem::new(
             TYPE_CLASS_DEF_ITEM,
             plan.sections.class_defs.count,
             plan.sections.class_defs.offset,
@@ -962,12 +961,12 @@ fn build_map_items(plan: &DexLayoutPlan, map_off: u32) -> Vec<MapItem> {
             .copied()
             .min()
             .expect("string offsets present");
-        items.push(MapItem::new(TYPE_STRING_DATA_ITEM, string_count, first));
+        rest.push(MapItem::new(TYPE_STRING_DATA_ITEM, string_count, first));
     }
 
     let (type_list_count, type_list_offset) = chunk_stats_by_kind(&plan, DataChunkKind::TypeList);
     if type_list_count > 0 {
-        items.push(MapItem::new(
+        rest.push(MapItem::new(
             TYPE_TYPE_LIST,
             type_list_count,
             type_list_offset.unwrap(),
@@ -976,7 +975,7 @@ fn build_map_items(plan: &DexLayoutPlan, map_off: u32) -> Vec<MapItem> {
 
     let (encoded_count, encoded_offset) = chunk_stats_by_kind(&plan, DataChunkKind::EncodedArray);
     if encoded_count > 0 {
-        items.push(MapItem::new(
+        rest.push(MapItem::new(
             TYPE_ENCODED_ARRAY_ITEM,
             encoded_count,
             encoded_offset.unwrap(),
@@ -985,7 +984,7 @@ fn build_map_items(plan: &DexLayoutPlan, map_off: u32) -> Vec<MapItem> {
 
     let (code_item_count, code_item_offset) = chunk_stats_by_kind(&plan, DataChunkKind::CodeItem);
     if code_item_count > 0 {
-        items.push(MapItem::new(
+        rest.push(MapItem::new(
             TYPE_CODE_ITEM,
             code_item_count,
             code_item_offset.unwrap(),
@@ -995,7 +994,7 @@ fn build_map_items(plan: &DexLayoutPlan, map_off: u32) -> Vec<MapItem> {
     let (class_data_count, class_data_offset) =
         chunk_stats_by_kind(&plan, DataChunkKind::ClassData);
     if class_data_count > 0 {
-        items.push(MapItem::new(
+        rest.push(MapItem::new(
             TYPE_CLASS_DATA_ITEM,
             class_data_count,
             class_data_offset.unwrap(),
@@ -1005,7 +1004,7 @@ fn build_map_items(plan: &DexLayoutPlan, map_off: u32) -> Vec<MapItem> {
     let (set_ref_count, set_ref_offset) =
         chunk_stats_by_kind(&plan, DataChunkKind::AnnotationSetRefList);
     if set_ref_count > 0 {
-        items.push(MapItem::new(
+        rest.push(MapItem::new(
             TYPE_ANNOTATION_SET_REF_LIST,
             set_ref_count,
             set_ref_offset.unwrap(),
@@ -1014,7 +1013,7 @@ fn build_map_items(plan: &DexLayoutPlan, map_off: u32) -> Vec<MapItem> {
 
     let (set_count, set_offset) = chunk_stats_by_kind(&plan, DataChunkKind::AnnotationSet);
     if set_count > 0 {
-        items.push(MapItem::new(
+        rest.push(MapItem::new(
             TYPE_ANNOTATION_SET_ITEM,
             set_count,
             set_offset.unwrap(),
@@ -1024,7 +1023,7 @@ fn build_map_items(plan: &DexLayoutPlan, map_off: u32) -> Vec<MapItem> {
     let (annotation_item_count, annotation_item_offset) =
         chunk_stats_by_kind(&plan, DataChunkKind::AnnotationItem);
     if annotation_item_count > 0 {
-        items.push(MapItem::new(
+        rest.push(MapItem::new(
             TYPE_ANNOTATION_ITEM,
             annotation_item_count,
             annotation_item_offset.unwrap(),
@@ -1034,14 +1033,16 @@ fn build_map_items(plan: &DexLayoutPlan, map_off: u32) -> Vec<MapItem> {
     let (directory_count, directory_offset) =
         chunk_stats_by_kind(&plan, DataChunkKind::AnnotationsDirectory);
     if directory_count > 0 {
-        items.push(MapItem::new(
+        rest.push(MapItem::new(
             TYPE_ANNOTATIONS_DIRECTORY_ITEM,
             directory_count,
             directory_offset.unwrap(),
         ));
     }
 
-    items.push(MapItem::new(TYPE_MAP_LIST, 1, map_off));
+    rest.push(MapItem::new(TYPE_MAP_LIST, 1, map_off));
+    rest.sort_by_key(|item| item.offset);
+    items.extend(rest);
     items
 }
 
@@ -1830,7 +1831,7 @@ impl PrototypeKey {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct FieldKey {
     class_descriptor: String,
     name: String,
@@ -1856,6 +1857,21 @@ impl FieldKey {
 
     fn type_descriptor(&self) -> &str {
         &self.type_descriptor
+    }
+}
+
+impl Ord for FieldKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.class_descriptor
+            .cmp(&other.class_descriptor)
+            .then_with(|| self.name.cmp(&other.name))
+            .then_with(|| self.type_descriptor.cmp(&other.type_descriptor))
+    }
+}
+
+impl PartialOrd for FieldKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 

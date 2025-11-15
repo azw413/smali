@@ -445,38 +445,53 @@ pub mod assemble {
         }
 
         fn finish(
-            self,
+            mut self,
             api_level: i32,
             art_version: i32,
         ) -> Result<MethodAssemblyResult, DexError> {
-            let mut code = Vec::with_capacity(self.current_offset_cu);
-            let payload_bases = self.compute_payload_bases()?;
-            for inst in &self.instructions {
-                inst.encode(
-                    api_level,
-                    art_version,
-                    &self.labels,
-                    &payload_bases,
-                    &mut code,
-                )?;
+            loop {
+                let payload_bases = self.compute_payload_bases()?;
+                let mut code = Vec::with_capacity(self.current_offset_cu);
+                let mut branch_overflow: Option<usize> = None;
+                for (idx, inst) in self.instructions.iter().enumerate() {
+                    match inst.encode(
+                        api_level,
+                        art_version,
+                        &self.labels,
+                        &payload_bases,
+                        &mut code,
+                    ) {
+                        Ok(()) => {}
+                        Err(InstructionEncodeError::BranchOutOfRange) => {
+                            branch_overflow = Some(idx);
+                            break;
+                        }
+                        Err(InstructionEncodeError::Dex(err)) => return Err(err),
+                    }
+                }
+
+                if let Some(idx) = branch_overflow {
+                    self.promote_branch(idx)?;
+                    continue;
+                }
+
+                let label_offsets = self
+                    .labels
+                    .into_iter()
+                    .map(|(name, offset)| (name, offset as u32))
+                    .collect();
+
+                return Ok(MethodAssemblyResult {
+                    registers_size: self.layout.registers_size,
+                    ins_size: self.layout.ins_size,
+                    outs_size: 0,
+                    tries_size: 0,
+                    encoded_code_units: code,
+                    label_offsets,
+                    line_events: self.line_events,
+                    debug_events: self.debug_events,
+                });
             }
-
-            let label_offsets = self
-                .labels
-                .into_iter()
-                .map(|(name, offset)| (name, offset as u32))
-                .collect();
-
-            Ok(MethodAssemblyResult {
-                registers_size: self.layout.registers_size,
-                ins_size: self.layout.ins_size,
-                outs_size: 0,
-                tries_size: 0,
-                encoded_code_units: code,
-                label_offsets,
-                line_events: self.line_events,
-                debug_events: self.debug_events,
-            })
         }
 
         fn compute_payload_bases(&self) -> Result<HashMap<usize, usize>, DexError> {
@@ -493,6 +508,37 @@ pub mod assemble {
                 }
             }
             Ok(bases)
+        }
+
+        fn promote_branch(&mut self, index: usize) -> Result<(), DexError> {
+            let inst = self.instructions.get_mut(index).ok_or_else(|| {
+                DexError::new("branch overflow reported for out-of-range instruction index")
+            })?;
+            let (old_size, delta) = inst.widen_branch()?;
+            if delta == 0 {
+                return Err(DexError::new(
+                    "branch offset does not fit even in widest encoding",
+                ));
+            }
+            self.adjust_offsets(index, old_size, delta);
+            Ok(())
+        }
+
+        fn adjust_offsets(&mut self, index: usize, old_size: usize, new_size: usize) {
+            if new_size == old_size {
+                return;
+            }
+            let delta = new_size - old_size;
+            let changed_offset = self.instructions[index].offset_cu;
+            for inst in self.instructions.iter_mut().skip(index + 1) {
+                inst.offset_cu += delta;
+            }
+            for value in self.labels.values_mut() {
+                if *value > changed_offset {
+                    *value += delta;
+                }
+            }
+            self.current_offset_cu += delta;
         }
     }
 
@@ -518,6 +564,10 @@ pub mod assemble {
                 kind,
                 offset_cu: 0,
             }
+        }
+
+        fn set_opcode(&mut self, opcode: &'static Opcode) {
+            self.opcode = opcode;
         }
 
         fn size_cu(&self) -> usize {
@@ -569,6 +619,37 @@ pub mod assemble {
             }
         }
 
+        fn widen_branch(&mut self) -> Result<(usize, usize), DexError> {
+            let old_size = self.size_cu();
+            if let LoweredKind::Branch {
+                encoding, variant, ..
+            } = &mut self.kind
+            {
+                match encoding {
+                    BranchEncoding::Format10t => {
+                        *encoding = BranchEncoding::Format20t;
+                        *variant = BranchVariant::Goto16;
+                        let opcode = variant.opcode()?;
+                        self.set_opcode(opcode);
+                    }
+                    BranchEncoding::Format20t => {
+                        *encoding = BranchEncoding::Format30t;
+                        *variant = BranchVariant::Goto32;
+                        let opcode = variant.opcode()?;
+                        self.set_opcode(opcode);
+                    }
+                    BranchEncoding::Format30t => {
+                        return Ok((old_size, old_size));
+                    }
+                }
+                let new_size = self.size_cu();
+                return Ok((old_size, new_size));
+            }
+            Err(DexError::new(
+                "attempted to widen non-branch instruction during assembly",
+            ))
+        }
+
         fn encode(
             &self,
             api_level: i32,
@@ -576,7 +657,7 @@ pub mod assemble {
             labels: &HashMap<String, usize>,
             payload_bases: &HashMap<usize, usize>,
             out: &mut Vec<u16>,
-        ) -> Result<(), DexError> {
+        ) -> Result<(), InstructionEncodeError> {
             match &self.kind {
                 LoweredKind::ArrayPayload { units } => {
                     out.extend_from_slice(units);
@@ -612,7 +693,8 @@ pub mod assemble {
                         "opcode {} not available for api {} art {}",
                         self.opcode.name, api_level, art_version
                     ))
-                })?;
+                })
+                .map_err(InstructionEncodeError::Dex)?;
 
             match &self.kind {
                 LoweredKind::Format10x => {
@@ -622,12 +704,13 @@ pub mod assemble {
                     if *reg > 0x0f {
                         return Err(DexError::new(
                             "const/4 destination register must be below v16",
-                        ));
+                        )
+                        .into());
                     }
                     if !(-8..=7).contains(literal) {
-                        return Err(DexError::new(
-                            "const/4 literal must be in signed 4-bit range",
-                        ));
+                        return Err(
+                            DexError::new("const/4 literal must be in signed 4-bit range").into(),
+                        );
                     }
                     let reg_bits = (reg & 0x0f) as u16;
                     let lit_bits = ((*literal as i16) & 0x0f) as u16;
@@ -688,7 +771,7 @@ pub mod assemble {
                 }
                 LoweredKind::Format21c { reg, index } => {
                     if *index > u16::MAX as u32 {
-                        return Err(DexError::new("reference index exceeds 16-bit range"));
+                        return Err(DexError::new("reference index exceeds 16-bit range").into());
                     }
                     let encoded = (((*reg & 0x00ff) as u16) << 8) | opcode_value as u16;
                     out.push(encoded);
@@ -703,7 +786,9 @@ pub mod assemble {
                 LoweredKind::Format21t { reg, label } => {
                     let delta = branch_delta(label, labels, self.offset_cu)?;
                     if !(i16::MIN as i32..=i16::MAX as i32).contains(&delta) {
-                        return Err(DexError::new("if-*z target offset exceeds 16-bit range"));
+                        return Err(
+                            DexError::new("if-*z target offset exceeds 16-bit range").into()
+                        );
                     }
                     let encoded = (((*reg & 0x00ff) as u16) << 8) | opcode_value as u16;
                     out.push(encoded);
@@ -715,7 +800,9 @@ pub mod assemble {
                     index,
                 } => {
                     if *index > u16::MAX as u32 {
-                        return Err(DexError::new("field reference index exceeds 16-bit range"));
+                        return Err(
+                            DexError::new("field reference index exceeds 16-bit range").into()
+                        );
                     }
                     let encoded = (((*reg_b & 0x000f) as u16) << 12)
                         | (((*reg_a & 0x000f) as u16) << 8)
@@ -741,7 +828,7 @@ pub mod assemble {
                 } => {
                     let delta = branch_delta(label, labels, self.offset_cu)?;
                     if !(i16::MIN as i32..=i16::MAX as i32).contains(&delta) {
-                        return Err(DexError::new("if-* target offset exceeds 16-bit range"));
+                        return Err(DexError::new("if-* target offset exceeds 16-bit range").into());
                     }
                     let encoded = (((*reg_b & 0x000f) as u16) << 12)
                         | (((*reg_a & 0x000f) as u16) << 8)
@@ -751,7 +838,7 @@ pub mod assemble {
                 }
                 LoweredKind::Format22b { dest, src, literal } => {
                     if *dest > u8::MAX as u16 || *src > u8::MAX as u16 {
-                        return Err(DexError::new("22b register index exceeds 8-bit range"));
+                        return Err(DexError::new("22b register index exceeds 8-bit range").into());
                     }
                     let first = (((*dest & 0x00ff) as u16) << 8) | opcode_value as u16;
                     let second =
@@ -784,7 +871,9 @@ pub mod assemble {
                 }
                 LoweredKind::Format35c { index, regs, count } => {
                     if *index > u16::MAX as u32 {
-                        return Err(DexError::new("method reference index exceeds 16-bit range"));
+                        return Err(
+                            DexError::new("method reference index exceeds 16-bit range").into()
+                        );
                     }
                     let (c, d, e, f, g) = unpack_invoke_regs(*count, regs);
                     let word0 = ((u16::from(*count) & 0x000f) << 12)
@@ -833,10 +922,12 @@ pub mod assemble {
                     index,
                 } => {
                     if *index > u16::MAX as u32 {
-                        return Err(DexError::new("method reference index exceeds 16-bit range"));
+                        return Err(
+                            DexError::new("method reference index exceeds 16-bit range").into()
+                        );
                     }
                     if *count > u8::MAX as u16 {
-                        return Err(DexError::new("invoke/range count exceeds 8-bit range"));
+                        return Err(DexError::new("invoke/range count exceeds 8-bit range").into());
                     }
                     out.push(((*count & 0x00ff) << 8) | opcode_value as u16);
                     out.push(*index as u16);
@@ -869,12 +960,14 @@ pub mod assemble {
                     if *index > u16::MAX as u32 {
                         return Err(DexError::new(
                             "invoke-polymorphic reference index exceeds 16-bit range",
-                        ));
+                        )
+                        .into());
                     }
                     if *proto_index > u16::MAX as u32 {
                         return Err(DexError::new(
                             "invoke-polymorphic proto index exceeds 16-bit range",
-                        ));
+                        )
+                        .into());
                     }
                     let (c, d, e, f, g) = unpack_invoke_regs(*count, regs);
                     let word0 = ((u16::from(*count) & 0x000f) << 12)
@@ -899,29 +992,34 @@ pub mod assemble {
                     if *index > u16::MAX as u32 {
                         return Err(DexError::new(
                             "invoke-polymorphic/range reference index exceeds 16-bit range",
-                        ));
+                        )
+                        .into());
                     }
                     if *proto_index > u16::MAX as u32 {
                         return Err(DexError::new(
                             "invoke-polymorphic/range proto index exceeds 16-bit range",
-                        ));
+                        )
+                        .into());
                     }
                     if *count > u8::MAX as u16 {
                         return Err(DexError::new(
                             "invoke-polymorphic/range count exceeds 8-bit range",
-                        ));
+                        )
+                        .into());
                     }
                     out.push(((*count & 0x00ff) << 8) | opcode_value as u16);
                     out.push(*index as u16);
                     out.push(*first_reg);
                     out.push(*proto_index as u16);
                 }
-                LoweredKind::Branch { label, encoding } => {
+                LoweredKind::Branch {
+                    label, encoding, ..
+                } => {
                     let delta = branch_delta(label, labels, self.offset_cu)?;
                     match encoding {
                         BranchEncoding::Format10t => {
                             if !(i8::MIN as i32..=i8::MAX as i32).contains(&delta) {
-                                return Err(DexError::new("goto offset does not fit in format10t"));
+                                return Err(InstructionEncodeError::BranchOutOfRange);
                             }
                             let imm = (delta as i8 as u8) as u16;
                             let encoded = (imm << 8) | opcode_value as u16;
@@ -929,9 +1027,7 @@ pub mod assemble {
                         }
                         BranchEncoding::Format20t => {
                             if !(i16::MIN as i32..=i16::MAX as i32).contains(&delta) {
-                                return Err(DexError::new(
-                                    "goto/16 offset does not fit in format20t",
-                                ));
+                                return Err(InstructionEncodeError::BranchOutOfRange);
                             }
                             out.push(opcode_value as u16);
                             out.push(delta as i16 as u16);
@@ -1299,6 +1395,7 @@ pub mod assemble {
         Branch {
             label: String,
             encoding: BranchEncoding,
+            variant: BranchVariant,
         },
     }
 
@@ -1307,6 +1404,36 @@ pub mod assemble {
         Format10t,
         Format20t,
         Format30t,
+    }
+
+    enum InstructionEncodeError {
+        Dex(DexError),
+        BranchOutOfRange,
+    }
+
+    impl From<DexError> for InstructionEncodeError {
+        fn from(value: DexError) -> Self {
+            InstructionEncodeError::Dex(value)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum BranchVariant {
+        Goto,
+        Goto16,
+        Goto32,
+    }
+
+    impl BranchVariant {
+        fn opcode(self) -> Result<&'static Opcode, DexError> {
+            let name = match self {
+                BranchVariant::Goto => "goto",
+                BranchVariant::Goto16 => "goto/16",
+                BranchVariant::Goto32 => "goto/32",
+            };
+            opcode_by_name(name)
+                .ok_or_else(|| DexError::new(&format!("opcode {} not present in table", name)))
+        }
     }
 
     fn compute_ins_size(method: &SmaliMethod) -> u16 {
@@ -1526,8 +1653,12 @@ pub mod assemble {
                     let reg = ensure_reg8(resolve_register(layout, dest)?, "const-string dest")?;
                     let index = self.resolver.string_index(value)?;
                     if index > u16::MAX as u32 {
-                        return Err(DexError::new(
-                            "const-string index exceeds 16-bit; use const-string/jumbo",
+                        let jumbo = opcode_by_name("const-string/jumbo").ok_or_else(|| {
+                            DexError::new("opcode const-string/jumbo not present in table")
+                        })?;
+                        return Ok(LoweredInstruction::new(
+                            jumbo,
+                            LoweredKind::Format31c { reg, index },
                         ));
                     }
                     Ok(LoweredInstruction::new(
@@ -1548,13 +1679,13 @@ pub mod assemble {
                     ))
                 }
                 DexOp::Goto { offset } => {
-                    self.lower_branch("goto", offset, BranchEncoding::Format10t)
+                    self.lower_branch(BranchVariant::Goto, offset, BranchEncoding::Format10t)
                 }
                 DexOp::Goto16 { offset } => {
-                    self.lower_branch("goto/16", offset, BranchEncoding::Format20t)
+                    self.lower_branch(BranchVariant::Goto16, offset, BranchEncoding::Format20t)
                 }
                 DexOp::Goto32 { offset } => {
-                    self.lower_branch("goto/32", offset, BranchEncoding::Format30t)
+                    self.lower_branch(BranchVariant::Goto32, offset, BranchEncoding::Format30t)
                 }
                 DexOp::MonitorEnter { src } => {
                     self.lower_single_reg_op("monitor-enter", src, layout)
@@ -2182,18 +2313,17 @@ pub mod assemble {
 
         fn lower_branch(
             &self,
-            opcode_name: &str,
+            variant: BranchVariant,
             label: &Label,
             encoding: BranchEncoding,
         ) -> Result<LoweredInstruction, DexError> {
-            let opcode = opcode_by_name(opcode_name).ok_or_else(|| {
-                DexError::new(&format!("opcode {} not present in table", opcode_name))
-            })?;
+            let opcode = variant.opcode()?;
             Ok(LoweredInstruction::new(
                 opcode,
                 LoweredKind::Branch {
                     label: label.0.clone(),
                     encoding,
+                    variant,
                 },
             ))
         }

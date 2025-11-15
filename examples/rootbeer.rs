@@ -1,14 +1,14 @@
-use smali::android::zip::{pack_apk, unpack_apk};
+use smali::android::zip::ApkFile;
 use smali::dex::DexFile;
 use smali::smali_ops::{DexOp, v};
 use smali::types::SmaliOp::Op;
 use smali::types::*;
 use std::env;
 use std::error::Error;
-use std::fs;
-use std::path::{Path, PathBuf};
 
-// This demo unpacks an APK, searches for RootBeer and disables it by patching methods inside classes.dex.
+// This demo reads an APK entirely in memory, searches for RootBeer and disables it by patching
+// methods inside classes.dex, then writes a new APK without touching the filesystem for
+// intermediate smali output.
 // Try it on the RootBeer Sample app https://play.google.com/store/apps/details?id=com.scottyab.rootbeer.sample
 
 //Usage: main <apk-file>
@@ -19,102 +19,60 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Do everything else with the error trap
     match process_apk(&args[1]) {
-        Ok(_) => {
-            println!("All done: written out.apk");
-        }
-        Err(e) => {
-            println!("Aborted due to error: {:?}", e);
-        }
+        Ok(_) => println!("All done: written out.apk"),
+        Err(e) => eprintln!("Aborted due to error: {e:?}"),
     }
 }
 
-// Matches the known field / method signatures for the RootBeer.class (remember this could be renamed)
-fn is_rootbeer_class(c: &SmaliClass) -> bool {
-    if c.fields.len() == 2 && c.methods.len() == 25 {
-        // Probably unreliable if the ordering changes
-        if c.fields[0].signature == TypeSignature::Bool
-            && c.methods[1].signature.result == TypeSignature::Bool
-            && c.methods[4].signature.args.is_empty()
-            && c.methods[4].signature.result == TypeSignature::Bool
-        {
-            println!("Detected RootBeer class: {}", c.name.as_java_type());
-            return true;
-        }
-    }
-    false
-}
-
-/* This is where all the processing takes place, to make error handling easier */
-fn process_apk(apk_file: &str) -> Result<(), Box<dyn Error>> {
-    let work_dir = PathBuf::from("out_apk");
-    if work_dir.exists() {
-        fs::remove_dir_all(&work_dir)?;
-    }
-    unpack_apk(apk_file, &work_dir)?;
-
-    let mut dex_paths = Vec::new();
-    collect_dex_files(&work_dir, &mut dex_paths)?;
-    if dex_paths.is_empty() {
+fn process_apk(apk_path: &str) -> Result<(), Box<dyn Error>> {
+    let mut apk = ApkFile::from_file(apk_path)?;
+    let dex_entries: Vec<String> = apk
+        .entry_names()
+        .filter(|name| name.ends_with(".dex"))
+        .map(|s| s.to_string())
+        .collect();
+    if dex_entries.is_empty() {
         return Err("No classes*.dex files found in APK".into());
     }
 
     let mut patched = false;
-    for dex_path in dex_paths {
-        if patch_dex_file(&dex_path)? {
-            println!("Patched {}", dex_path.display());
+    for entry_name in dex_entries {
+        if patch_dex_entry(&mut apk, &entry_name)? {
+            println!("Patched {entry_name}");
             patched = true;
         }
     }
 
     if !patched {
-        println!("No RootBeer detections found; output APK will match the input.");
+        println!("No RootBeer detections found; writing original APK");
     }
 
-    pack_apk(&work_dir, "out.apk")?;
+    apk.write_to_file("out.apk")?;
     println!("Wrote patched APK to out.apk");
-
     Ok(())
 }
 
-fn collect_dex_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Box<dyn Error>> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            collect_dex_files(&path, out)?;
-            continue;
-        }
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|name| name.starts_with("classes") && name.ends_with(".dex"))
-            .unwrap_or(false)
-        {
-            out.push(path);
-        }
-    }
-    Ok(())
-}
-
-fn patch_dex_file(path: &Path) -> Result<bool, Box<dyn Error>> {
-    let dex = DexFile::from_file(path)?;
+fn patch_dex_entry(apk: &mut ApkFile, entry_name: &str) -> Result<bool, Box<dyn Error>> {
+    let entry = apk
+        .entry(entry_name)
+        .ok_or_else(|| SmaliError::new(&format!("missing {entry_name}")))?;
+    let dex = DexFile::from_bytes(&entry.data)?;
     let mut classes = dex.to_smali()?;
     let mut touched = false;
 
     for c in classes.iter_mut() {
         if is_rootbeer_class(c) {
             touched = true;
-            // Patch all the methods returning a boolean
             for m in c.methods.iter_mut() {
                 if m.signature.result == TypeSignature::Bool && m.signature.args.is_empty() {
-                    let mut new_instructions = vec![];
-                    new_instructions.push(Op(DexOp::Const4 {
-                        dest: v(0),
-                        value: 0,
-                    })); // "const/4 v0, 0x0" - Set v0 to false
-                    new_instructions.push(Op(DexOp::Return { src: v(0) })); //  "return v0" - return v0
+                    let mut new_instructions = vec![
+                        Op(DexOp::Const4 {
+                            dest: v(0),
+                            value: 0,
+                        }),
+                        Op(DexOp::Return { src: v(0) }),
+                    ];
                     m.ops = new_instructions;
                     m.locals = 1;
                     println!(
@@ -129,8 +87,23 @@ fn patch_dex_file(path: &Path) -> Result<bool, Box<dyn Error>> {
 
     if touched {
         let rebuilt = DexFile::from_smali(&classes)?;
-        rebuilt.to_path(path)?;
+        apk.replace_entry(entry_name, rebuilt.to_bytes().to_vec())?;
     }
 
     Ok(touched)
+}
+
+// Matches the known field / method signatures for the RootBeer.class (remember this could be renamed)
+fn is_rootbeer_class(c: &SmaliClass) -> bool {
+    if c.fields.len() == 2 && c.methods.len() == 25 {
+        if c.fields[0].signature == TypeSignature::Bool
+            && c.methods[1].signature.result == TypeSignature::Bool
+            && c.methods[4].signature.args.is_empty()
+            && c.methods[4].signature.result == TypeSignature::Bool
+        {
+            println!("Detected RootBeer class: {}", c.name.as_java_type());
+            return true;
+        }
+    }
+    false
 }
