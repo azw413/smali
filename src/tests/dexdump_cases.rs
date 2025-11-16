@@ -1,5 +1,5 @@
-use smali::dex::DexFile;
-use smali::types::SmaliClass;
+use crate::dex::DexFile;
+use crate::types::SmaliClass;
 use std::fs;
 use std::process::Command;
 
@@ -243,6 +243,7 @@ fn run_case(name: &str, smali: &[&str]) {
     let path = std::env::temp_dir()
         .join(format!("smali-test-{}-{name}.dex", std::process::id()));
     fs::write(&path, dex.to_bytes()).unwrap();
+    let keep_output = std::env::var_os("KEEP_DEX").is_some();
 
     let output = Command::new("dexdump")
         .arg(&path)
@@ -256,12 +257,27 @@ fn run_case(name: &str, smali: &[&str]) {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let _ = fs::remove_file(path);
+    if keep_output {
+        eprintln!("kept dex for {name}: {}", path.display());
+    } else {
+        let _ = fs::remove_file(&path);
+    }
 }
 
 #[test]
 fn dexdump_minimal_cases() {
+    let filter = std::env::var("DEXDUMP_CASE").ok();
+    let mut ran = false;
     for (name, smali) in CASES {
+        if let Some(target) = filter.as_deref() {
+            if *name != target {
+                continue;
+            }
+        }
+        ran = true;
         run_case(name, smali);
+    }
+    if let Some(target) = filter {
+        assert!(ran, "DEXDUMP_CASE '{target}' did not match any scenarios");
     }
 }

@@ -1,5 +1,6 @@
 mod dex_roundtrip;
 mod opcode_tests;
+mod dexdump_cases;
 
 #[cfg(test)]
 mod tests {
