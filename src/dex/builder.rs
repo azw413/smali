@@ -1406,9 +1406,8 @@ impl DexPoolBuilder {
 
         let mut methods = Vec::with_capacity(self.method_keys.len());
         let mut method_index_map = HashMap::with_capacity(self.method_keys.len());
-        let mut method_keys = self.method_keys;
-        method_keys.sort();
-        for key in method_keys.into_iter() {
+        let mut keyed_methods = Vec::with_capacity(self.method_keys.len());
+        for key in self.method_keys.into_iter() {
             let class_idx = *type_index
                 .get(key.class_descriptor())
                 .ok_or_else(|| DexError::new("missing type for method class"))?;
@@ -1418,6 +1417,12 @@ impl DexPoolBuilder {
             let proto_idx = *proto_index_map
                 .get(key.prototype())
                 .ok_or_else(|| DexError::new("missing prototype for method"))?;
+            keyed_methods.push((key, class_idx, name_idx, proto_idx));
+        }
+        keyed_methods.sort_by(|a, b| {
+            (a.1, a.2, a.3).cmp(&(b.1, b.2, b.3))
+        });
+        for (key, class_idx, name_idx, proto_idx) in keyed_methods {
             let idx = methods.len() as u32;
             methods.push(MethodEntry {
                 class_idx,
@@ -1641,10 +1646,30 @@ impl DexPoolBuilder {
         }
     }
 
+    fn register_enum_reference(
+        &mut self,
+        class_desc: &str,
+        field_name: &str,
+        field_type: &str,
+    ) {
+        self.insert_type_descriptor(class_desc);
+        self.strings.insert(field_name);
+        let key = FieldKey::new(
+            class_desc.to_string(),
+            field_name.to_string(),
+            field_type.to_string(),
+        );
+        self.field_keys.insert(key);
+    }
+
     fn collect_annotation_value(&mut self, value: &AnnotationValue) {
         match value {
             AnnotationValue::Single(v) => {
-                if let Some(parsed) = parse_smali_string_literal(v) {
+                if let Some((class_desc, field_name, field_type)) =
+                    parse_enum_literal_components(v)
+                {
+                    self.register_enum_reference(&class_desc, &field_name, &field_type);
+                } else if let Some(parsed) = parse_smali_string_literal(v) {
                     self.strings.insert(parsed);
                 } else {
                     self.strings.insert(v);
@@ -1655,6 +1680,12 @@ impl DexPoolBuilder {
             }
             AnnotationValue::Array(values) => {
                 for v in values {
+                    if let Some((class_desc, field_name, field_type)) =
+                        parse_enum_literal_components(v)
+                    {
+                        self.register_enum_reference(&class_desc, &field_name, &field_type);
+                        continue;
+                    }
                     if let Some(parsed) = parse_smali_string_literal(v) {
                         self.strings.insert(parsed);
                     } else {
@@ -1668,10 +1699,7 @@ impl DexPoolBuilder {
             AnnotationValue::SubAnnotation(sub) => self.collect_annotation(sub),
             AnnotationValue::Enum(obj, name) => {
                 let desc = canonical_object_descriptor(obj);
-                self.insert_type_descriptor(&desc);
-                self.strings.insert(name);
-                let key = FieldKey::new(desc.clone(), name.clone(), desc);
-                self.field_keys.insert(key);
+                self.register_enum_reference(&desc, name, &desc);
             }
         }
     }
@@ -1805,7 +1833,6 @@ fn build_class_def_plans(
         plans.push(ClassDefPlan::new(class_idx, item));
     }
 
-    plans.sort_by_key(|plan| plan.class_idx);
     Ok(plans)
 }
 
@@ -2968,6 +2995,12 @@ fn encode_annotation_literal(
             return Ok(EncodedValue::Type(idx));
         }
     }
+    if let Some((class_desc, field_name, field_type)) = parse_enum_literal_components(trimmed) {
+        let field_idx = pools
+            .field_index(&class_desc, &field_name, &field_type)
+            .ok_or_else(|| DexError::new("missing enum field index"))?;
+        return Ok(EncodedValue::Enum(field_idx));
+    }
 
     let has_float_suffix = trimmed.ends_with('f') || trimmed.ends_with('F');
     let has_double_suffix = trimmed.ends_with('d') || trimmed.ends_with('D');
@@ -3017,6 +3050,9 @@ fn looks_like_type_descriptor(value: &str) -> bool {
     if value.is_empty() {
         return false;
     }
+    if value.contains("->") || value.contains(':') {
+        return false;
+    }
     if value.starts_with('L') && value.ends_with(';') {
         return true;
     }
@@ -3027,6 +3063,18 @@ fn looks_like_type_descriptor(value: &str) -> bool {
         value.chars().next().unwrap(),
         'V' | 'Z' | 'B' | 'S' | 'C' | 'I' | 'J' | 'F' | 'D'
     )
+}
+
+fn parse_enum_literal_components(literal: &str) -> Option<(String, String, String)> {
+    let trimmed = literal.trim();
+    let rest = trimmed.strip_prefix(".enum").unwrap_or(trimmed).trim();
+    let (class_part, remainder) = rest.split_once("->")?;
+    let (name_part, type_part) = remainder.split_once(':')?;
+    Some((
+        class_part.trim().to_string(),
+        name_part.trim().to_string(),
+        type_part.trim().to_string(),
+    ))
 }
 
 fn write_annotation_set_ref_list_chunk(
@@ -3278,6 +3326,14 @@ fn literal_to_encoded_value(
                     DexError::new(&format!("missing string literal '{}' in pool", parsed))
                 })?;
                 return Ok(Some(EncodedValue::String(idx)));
+            }
+            if let Some((class_desc, field_name, field_type)) =
+                parse_enum_literal_components(trimmed)
+            {
+                let field_idx = pools
+                    .field_index(&class_desc, &field_name, &field_type)
+                    .ok_or_else(|| DexError::new("missing enum field index"))?;
+                return Ok(Some(EncodedValue::Enum(field_idx)));
             }
         }
         _ => {}

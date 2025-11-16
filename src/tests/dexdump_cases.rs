@@ -1,6 +1,7 @@
 use crate::dex::DexFile;
 use crate::types::SmaliClass;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const CASES: &[(&str, &[&str])] = &[
@@ -233,20 +234,13 @@ const CASES: &[(&str, &[&str])] = &[
     ),
 ];
 
-fn run_case(name: &str, smali: &[&str]) {
-    let classes: Vec<_> = smali
-        .iter()
-        .map(|src| SmaliClass::from_smali(src).unwrap())
-        .collect();
-    let dex = DexFile::from_smali(&classes).unwrap();
+fn temp_dex_path(label: &str, name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("smali-test-{}-{label}-{name}.dex", std::process::id()))
+}
 
-    let path = std::env::temp_dir()
-        .join(format!("smali-test-{}-{name}.dex", std::process::id()));
-    fs::write(&path, dex.to_bytes()).unwrap();
-    let keep_output = std::env::var_os("KEEP_DEX").is_some();
-
+fn run_dexdump(path: &Path, name: &str) {
     let output = Command::new("dexdump")
-        .arg(&path)
+        .arg(path)
         .output()
         .unwrap_or_else(|err| panic!("failed to spawn dexdump for {name}: {err}"));
 
@@ -256,7 +250,20 @@ fn run_case(name: &str, smali: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
 
+fn run_case(name: &str, smali: &[&str]) {
+    let classes: Vec<_> = smali
+        .iter()
+        .map(|src| SmaliClass::from_smali(src).unwrap())
+        .collect();
+    let dex = DexFile::from_smali(&classes).unwrap();
+
+    let path = temp_dex_path("case", name);
+    fs::write(&path, dex.to_bytes()).unwrap();
+    let keep_output = std::env::var_os("KEEP_DEX").is_some();
+
+    run_dexdump(&path, name);
     if keep_output {
         eprintln!("kept dex for {name}: {}", path.display());
     } else {
@@ -279,5 +286,24 @@ fn dexdump_minimal_cases() {
     }
     if let Some(target) = filter {
         assert!(ran, "DEXDUMP_CASE '{target}' did not match any scenarios");
+    }
+}
+
+#[test]
+fn dexdump_rootbeer_roundtrip() {
+    let bytes = fs::read("tests/rootbeer.dex").expect("read rootbeer fixture");
+    let dex = DexFile::from_bytes(&bytes).expect("parse rootbeer dex");
+    let classes = dex.to_smali().expect("convert original dex to smali");
+    let rebuilt = DexFile::from_smali(&classes).expect("rebuild dex from smali classes");
+
+    let path = temp_dex_path("rootbeer", "roundtrip");
+    fs::write(&path, rebuilt.to_bytes()).expect("write rebuilt dex");
+    let keep_output = std::env::var_os("KEEP_DEX").is_some();
+
+    run_dexdump(&path, "rootbeer_roundtrip");
+    if keep_output {
+        eprintln!("kept dex for rootbeer_roundtrip: {}", path.display());
+    } else {
+        let _ = fs::remove_file(&path);
     }
 }
