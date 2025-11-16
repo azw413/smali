@@ -43,7 +43,7 @@ const TYPE_TYPE_LIST: u16 = 0x1001;
 const TYPE_ANNOTATION_SET_REF_LIST: u16 = 0x1002;
 const TYPE_ANNOTATION_SET_ITEM: u16 = 0x1003;
 const TYPE_STRING_DATA_ITEM: u16 = 0x2002;
-const TYPE_ANNOTATION_ITEM: u16 = 0x2003;
+const TYPE_ANNOTATION_ITEM: u16 = 0x2004;
 const TYPE_ANNOTATIONS_DIRECTORY_ITEM: u16 = 0x2006;
 const TYPE_ENCODED_ARRAY_ITEM: u16 = 0x2005;
 const ARRAY_DATA_SIGNATURE: u16 = 0x0300;
@@ -223,7 +223,7 @@ struct ChunkFixup {
 #[derive(Debug, Clone)]
 struct ArrayDataPlanEntry {
     label: String,
-    chunk_index: usize,
+    bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -602,6 +602,37 @@ impl DataSectionBuilder {
         DataSectionBuilder { chunks: Vec::new() }
     }
 
+    fn chunk_priority(kind: DataChunkKind) -> u32 {
+        match kind {
+            DataChunkKind::StringData => 0,
+            DataChunkKind::TypeList => 1,
+            DataChunkKind::EncodedArray => 2,
+            DataChunkKind::AnnotationItem => 3,
+            DataChunkKind::AnnotationSetRefList => 4,
+            DataChunkKind::AnnotationSet => 5,
+            DataChunkKind::AnnotationsDirectory => 6,
+            DataChunkKind::CodeItem => 7,
+            DataChunkKind::ArrayData => 8,
+            DataChunkKind::ClassData => 9,
+        }
+    }
+
+    fn reorder_chunks(&mut self) {
+        let mut indexed: Vec<(usize, DataChunk)> = self.chunks.drain(..).enumerate().collect();
+        indexed.sort_by_key(|(idx, chunk)| (Self::chunk_priority(chunk.kind), *idx));
+        let mut remap = vec![0usize; indexed.len()];
+        self.chunks.reserve(indexed.len());
+        for (new_idx, (old_idx, chunk)) in indexed.into_iter().enumerate() {
+            remap[old_idx] = new_idx;
+            self.chunks.push(chunk);
+        }
+        for chunk in &mut self.chunks {
+            for fixup in &mut chunk.fixups {
+                fixup.target_chunk = remap[fixup.target_chunk];
+            }
+        }
+    }
+
     fn recompute_offsets(&mut self) -> u32 {
         let mut cursor = 0u32;
         for chunk in &mut self.chunks {
@@ -714,6 +745,7 @@ impl DataSectionBuilder {
     }
 
     fn finish(mut self) -> DataSectionPlan {
+        self.reorder_chunks();
         let cursor = self.recompute_offsets();
         DataSectionPlan {
             chunks: self.chunks,
@@ -748,7 +780,9 @@ impl DexLayoutPlan {
         data_builder.add_proto_parameter_lists(&ids.proto_ids);
         data_builder.add_class_interface_lists(&class_defs);
         let mut array_data_entries = Vec::new();
-        for class in classes {
+        let mut annotation_jobs = Vec::new();
+        let mut pending_class_data = Vec::new();
+        for (class_src_idx, class) in classes.iter().enumerate() {
             let class_idx = pools
                 .type_index(&class.name.as_jni_type())
                 .ok_or_else(|| DexError::new("missing type index for class"))?;
@@ -767,11 +801,31 @@ impl DexLayoutPlan {
                 &mut data_builder,
                 data_base,
             )? {
-                data_builder.add_class_data(plan_idx, &class_data);
                 class_defs[plan_idx].class_data = Some(class_data);
+                pending_class_data.push(plan_idx);
             }
+            annotation_jobs.push((class_src_idx, plan_idx));
+            collect_array_data_chunks(class, &mut array_data_entries)?;
+        }
+        for entry in &mut array_data_entries {
+            let bytes = std::mem::take(&mut entry.bytes);
+            data_builder.push_chunk(DataChunk {
+                owner: DataChunkOwner::ArrayData(entry.label.clone()),
+                kind: DataChunkKind::ArrayData,
+                align: 4,
+                offset: 0,
+                bytes,
+                fixups: Vec::new(),
+            });
+        }
+        for (class_src_idx, plan_idx) in annotation_jobs {
+            let class = &classes[class_src_idx];
             build_class_annotations(class, plan_idx, &pools, &mut data_builder)?;
-            collect_array_data_chunks(class, &mut data_builder, &mut array_data_entries)?;
+        }
+        for plan_idx in pending_class_data {
+            if let Some(class_data) = &class_defs[plan_idx].class_data {
+                data_builder.add_class_data(plan_idx, class_data);
+            }
         }
         let mut data_section = data_builder.finish();
 
@@ -780,12 +834,10 @@ impl DexLayoutPlan {
 
         data_section.apply_fixups(data_base);
         let mut array_data_offsets = HashMap::new();
-        for entry in array_data_entries {
-            let chunk = data_section
-                .chunks()
-                .get(entry.chunk_index)
-                .ok_or_else(|| DexError::new("array data chunk missing"))?;
-            array_data_offsets.insert(entry.label, data_base + chunk.offset);
+        for chunk in data_section.chunks() {
+            if let DataChunkOwner::ArrayData(label) = &chunk.owner {
+                array_data_offsets.insert(label.clone(), data_base + chunk.offset);
+            }
         }
 
         let string_data_offsets = data_section.collect_string_offsets(ids.strings.len(), data_base);
@@ -1334,7 +1386,9 @@ impl DexPoolBuilder {
 
         let mut methods = Vec::with_capacity(self.method_keys.len());
         let mut method_index_map = HashMap::with_capacity(self.method_keys.len());
-        for key in self.method_keys.into_iter() {
+        let mut method_keys = self.method_keys;
+        method_keys.sort();
+        for key in method_keys.into_iter() {
             let class_idx = *type_index
                 .get(key.class_descriptor())
                 .ok_or_else(|| DexError::new("missing type for method class"))?;
@@ -2296,7 +2350,6 @@ fn build_class_annotations(
 
 fn collect_array_data_chunks(
     class: &SmaliClass,
-    builder: &mut DataSectionBuilder,
     plans: &mut Vec<ArrayDataPlanEntry>,
 ) -> Result<(), DexError> {
     for method in &class.methods {
@@ -2309,18 +2362,7 @@ fn collect_array_data_chunks(
                         .clone()
                         .ok_or_else(|| DexError::new(".array-data directive missing label"))?;
                     let bytes = encode_array_data_payload(array)?;
-                    let chunk_idx = builder.push_chunk(DataChunk {
-                        owner: DataChunkOwner::ArrayData(label.clone()),
-                        kind: DataChunkKind::ArrayData,
-                        align: 4,
-                        offset: 0,
-                        bytes,
-                        fixups: Vec::new(),
-                    });
-                    plans.push(ArrayDataPlanEntry {
-                        label,
-                        chunk_index: chunk_idx,
-                    });
+                    plans.push(ArrayDataPlanEntry { label, bytes });
                 }
                 _ => {}
             }
@@ -2346,6 +2388,8 @@ fn patch_debug_info_pointer(chunk: &mut DataChunk, code_off: u32) -> Result<(), 
     Ok(())
 }
 
+const EMIT_DEBUG_INFO: bool = false;
+
 fn assemble_concrete_method(
     class_desc: &str,
     method: &SmaliMethod,
@@ -2354,7 +2398,11 @@ fn assemble_concrete_method(
 ) -> Result<CodeItem, DexError> {
     let assembly = assembler.assemble_method(class_desc, method)?;
     let (tries, handlers) = build_try_items(method, &assembly.label_offsets, pools)?;
-    let debug_info = build_debug_info(method, pools, &assembly)?;
+    let debug_info = if EMIT_DEBUG_INFO {
+        build_debug_info(method, pools, &assembly)?
+    } else {
+        None
+    };
     Ok(CodeItem::new(
         assembly.registers_size,
         assembly.ins_size,
@@ -2838,6 +2886,7 @@ fn encode_annotation_payload(
         let value = encode_annotation_value(&element.value, pools, expected_type)?;
         elements.push(DexAnnotationElement { name_idx, value });
     }
+    elements.sort_by_key(|el| el.name_idx);
     Ok(EncodedAnnotation { type_idx, elements })
 }
 

@@ -575,6 +575,7 @@ pub fn parse_method(smali: &str) -> IResult<&str, SmaliMethod> {
         modifiers,
         signature: ms,
         locals: 0, // Will be set later
+        registers: None,
         params: vec![],
         annotations: vec![],
         ops: vec![],
@@ -616,6 +617,7 @@ pub fn parse_method(smali: &str) -> IResult<&str, SmaliMethod> {
         if let IResult::Ok((o, _)) = ws(tag::<&str, &str, Error<&str>>(".locals")).parse(input) {
             let (o, local_count) = take_until_eol(o)?;
             method.locals = local_count.trim().parse::<u32>().unwrap();
+            method.registers = None;
             input = o;
             found = true;
         }
@@ -680,7 +682,8 @@ pub fn parse_method(smali: &str) -> IResult<&str, SmaliMethod> {
 
         // Other directives to skip (e.g., .registers)
         if let IResult::Ok((o, _)) = ws(tag::<&str, &str, Error<&str>>(".registers")).parse(input) {
-            let (o, _) = take_until_eol(o)?;
+            let (o, reg_count) = take_until_eol(o)?;
+            method.registers = Some(reg_count.trim().parse::<u32>().unwrap());
             input = o;
             found = true;
         }

@@ -879,6 +879,8 @@ pub struct SmaliMethod {
     pub signature: MethodSignature,
     /// Number of local variables required by the operations
     pub locals: u32,
+    /// Optional explicit register count declared via `.registers`
+    pub registers: Option<u32>,
     /// Method params
     pub params: Vec<SmaliParam>,
     /// Any method level annotations

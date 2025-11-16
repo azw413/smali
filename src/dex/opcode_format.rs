@@ -318,7 +318,26 @@ pub mod assemble {
     impl MethodRegisterLayout {
         fn new(method: &SmaliMethod) -> Result<Self, DexError> {
             let ins_size = compute_ins_size(method);
-            let locals = method.locals as u32;
+            if cfg!(debug_assertions) {
+                eprintln!(
+                    "assembling {} registers={:?} locals={} ins={}",
+                    method.name,
+                    method.registers,
+                    method.locals,
+                    ins_size
+                );
+            }
+            let locals = if let Some(total_regs) = method.registers {
+                let total = total_regs as u32;
+                if total < ins_size as u32 {
+                    return Err(DexError::new(
+                        ".registers count is smaller than parameter register requirement",
+                    ));
+                }
+                total - ins_size as u32
+            } else {
+                method.locals as u32
+            };
             if locals > u16::MAX as u32 {
                 return Err(DexError::new("method locals exceed register limit"));
             }
@@ -341,6 +360,7 @@ pub mod assemble {
         pending_labels: Vec<String>,
         line_events: Vec<LineEvent>,
         debug_events: Vec<DebugDirectiveEvent>,
+        max_out_regs: u16,
     }
 
     impl MethodAssemblyState {
@@ -353,6 +373,7 @@ pub mod assemble {
                 pending_labels: Vec::new(),
                 line_events: Vec::new(),
                 debug_events: Vec::new(),
+                max_out_regs: 0,
             }
         }
 
@@ -389,6 +410,7 @@ pub mod assemble {
         fn push_instruction(&mut self, mut inst: LoweredInstruction, consume_labels: bool) {
             inst.offset_cu = self.current_offset_cu;
             self.current_offset_cu += inst.size_cu();
+            self.note_outs_from_kind(&inst.kind);
             self.instructions.push(inst);
             if consume_labels {
                 self.pending_labels.clear();
@@ -398,6 +420,23 @@ pub mod assemble {
                         *entry = self.current_offset_cu;
                     }
                 }
+            }
+        }
+
+        fn note_outs_from_kind(&mut self, kind: &LoweredKind) {
+            let count = match kind {
+                LoweredKind::Format35c { count, .. }
+                | LoweredKind::Format35mi { count, .. }
+                | LoweredKind::Format35ms { count, .. }
+                | LoweredKind::Format45cc { count, .. } => *count as u16,
+                LoweredKind::Format3rc { count, .. }
+                | LoweredKind::Format3rmi { count, .. }
+                | LoweredKind::Format3rms { count, .. }
+                | LoweredKind::Format4rcc { count, .. } => *count,
+                _ => 0,
+            };
+            if count > self.max_out_regs {
+                self.max_out_regs = count;
             }
         }
 
@@ -484,7 +523,7 @@ pub mod assemble {
                 return Ok(MethodAssemblyResult {
                     registers_size: self.layout.registers_size,
                     ins_size: self.layout.ins_size,
-                    outs_size: 0,
+                    outs_size: self.max_out_regs,
                     tries_size: 0,
                     encoded_code_units: code,
                     label_offsets,

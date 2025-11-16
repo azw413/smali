@@ -1448,6 +1448,7 @@ impl DexFile {
                     constructor,
                     signature,
                     locals,
+                    registers: None,
                     params,
                     annotations,
                     ops,
