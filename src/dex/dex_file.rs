@@ -587,7 +587,12 @@ impl crate::dex::dex_file::CodeItem {
     }
 
     // Written to the data section
-    pub fn write(&self, bytes: &mut Vec<u8>, code_item_base: u32) -> Result<usize, DexError> {
+    fn write_inner(
+        &self,
+        bytes: &mut Vec<u8>,
+        include_debug_info: bool,
+        code_item_base: u32,
+    ) -> Result<usize, DexError> {
         let mut c = 0;
         let start = bytes.len();
         c += write_u2(bytes, self.registers_size);
@@ -596,7 +601,7 @@ impl crate::dex::dex_file::CodeItem {
         let tries_len = self.tries.len() as u16;
         c += write_u2(bytes, tries_len);
 
-        // Reserve space for debug_info_off; we'll patch it after writing the debug block
+        // Reserve space for debug_info_off; we'll patch it if needed.
         let debug_off_pos = bytes.len();
         c += write_u4(bytes, 0);
 
@@ -662,19 +667,28 @@ impl crate::dex::dex_file::CodeItem {
             }
         }
 
-        // Patch debug_info_off and append the debug block (if any)
-        if let Some(di) = &self.debug_info {
-            let debug_info_start = bytes.len();
-            let absolute = code_item_base
-                .checked_add((debug_info_start - start) as u32)
-                .ok_or_else(|| DexError::new("debug_info offset overflow"))?;
-            let mut tmp = Vec::with_capacity(4);
-            write_u4(&mut tmp, absolute);
-            bytes[debug_off_pos..debug_off_pos + 4].copy_from_slice(&tmp);
-            c += di.write(bytes);
+        if include_debug_info {
+            if let Some(di) = &self.debug_info {
+                let debug_info_start = bytes.len();
+                let absolute = code_item_base
+                    .checked_add((debug_info_start - start) as u32)
+                    .ok_or_else(|| DexError::new("debug_info offset overflow"))?;
+                let mut tmp = Vec::with_capacity(4);
+                write_u4(&mut tmp, absolute);
+                bytes[debug_off_pos..debug_off_pos + 4].copy_from_slice(&tmp);
+                c += di.write(bytes);
+            }
         }
 
         Ok(c)
+    }
+
+    pub fn write(&self, bytes: &mut Vec<u8>, code_item_base: u32) -> Result<usize, DexError> {
+        self.write_inner(bytes, true, code_item_base)
+    }
+
+    pub fn write_without_debug_info(&self, bytes: &mut Vec<u8>) -> Result<usize, DexError> {
+        self.write_inner(bytes, false, 0)
     }
 }
 
@@ -1446,7 +1460,8 @@ impl DexFile {
                     let mut catch_plans: Vec<CatchPlan> = Vec::new();
                     if !ci.tries.is_empty() {
                         #[cfg(test)]
-                        if class_desc == "Lkotlinx/coroutines/internal/FastServiceLoader;"
+                        if std::env::var_os("SMALI_TRACE_FAST_LOADER").is_some()
+                            && class_desc == "Lkotlinx/coroutines/internal/FastServiceLoader;"
                             && name == "loadMainDispatcherFactory$kotlinx_coroutines_core"
                         {
                             let mut prefix_buf = Vec::new();
@@ -2096,7 +2111,7 @@ mod tests {
         ix = 0;
         let decoded = Header::read(encoded_bytes.as_slice(), &mut ix).unwrap();
 
-        println!("{:x?}", header);
+        //println!("{:x?}", header);
 
         assert_eq!(encoded_bytes.len(), 0x70);
         assert_eq!(header, decoded);
@@ -2108,7 +2123,7 @@ mod tests {
         let dex_bytes = read(dex_path).expect("Failed to read DEX file");
         let mut ix = 0;
         let dex = DexFile::read(dex_bytes.as_slice(), &mut ix).expect("Failed read");
-        println!(
+        /* println!(
             "Strings: {:} [header: {:}]",
             dex.strings.len(),
             dex.header.string_ids_size
@@ -2138,6 +2153,7 @@ mod tests {
             dex.class_defs.len(),
             dex.header.class_defs_size
         );
+         */
 
         let smali = dex.to_smali().expect("Failed to generate smali");
     }

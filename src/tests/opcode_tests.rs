@@ -117,7 +117,7 @@ mod tests {
         ];
         let ops = decode(bc.as_slice(), 33, 0).unwrap();
 
-        println!("{:?}", ops);
+        //println!("{:?}", ops);
     }
 
     #[test]
@@ -127,7 +127,7 @@ mod tests {
         ];
         let ops = decode(bc.as_slice(), 33, 0).unwrap();
 
-        println!("{:?}", ops);
+        //println!("{:?}", ops);
     }
 
     #[test]

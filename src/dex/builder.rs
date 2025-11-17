@@ -48,6 +48,7 @@ const TYPE_ANNOTATION_ITEM: u16 = 0x2004;
 const TYPE_ANNOTATIONS_DIRECTORY_ITEM: u16 = 0x2006;
 const TYPE_ENCODED_ARRAY_ITEM: u16 = 0x2005;
 const TYPE_CODE_ITEM: u16 = 0x2001;
+const TYPE_DEBUG_INFO_ITEM: u16 = 0x2003;
 
 const DEFAULT_API_LEVEL: i32 = 33;
 const DEFAULT_ART_VERSION: i32 = 200;
@@ -232,6 +233,7 @@ enum DataChunkKind {
     StringData,
     TypeList,
     EncodedArray,
+    DebugInfo,
     ClassData,
     AnnotationItem,
     AnnotationSet,
@@ -250,6 +252,10 @@ enum DataChunkOwner {
     AnnotationItem,
     AnnotationSet,
     AnnotationSetRefList,
+    DebugInfo {
+        class_idx: usize,
+        method_idx: usize,
+    },
     ClassAnnotations {
         class_idx: usize,
         directory_rel_offset: u32,
@@ -627,7 +633,8 @@ impl DataSectionBuilder {
             DataChunkKind::AnnotationSet => 5,
             DataChunkKind::AnnotationsDirectory => 6,
             DataChunkKind::CodeItem => 7,
-            DataChunkKind::ClassData => 8,
+            DataChunkKind::DebugInfo => 8,
+            DataChunkKind::ClassData => 9,
         }
     }
 
@@ -756,7 +763,7 @@ impl DataSectionBuilder {
         code_item: &CodeItem,
     ) -> Result<usize, DexError> {
         let mut bytes = Vec::new();
-        code_item.write(&mut bytes, 0)?;
+        code_item.write_without_debug_info(&mut bytes)?;
         let chunk_idx = self.push_chunk(DataChunk {
             owner: DataChunkOwner::MethodCode {
                 class_idx,
@@ -768,6 +775,27 @@ impl DataSectionBuilder {
             bytes,
             fixups: Vec::new(),
         });
+        if let Some(debug_info) = code_item.debug_info() {
+            let mut debug_bytes = Vec::new();
+            debug_info.write(&mut debug_bytes);
+            let debug_chunk_idx = self.push_chunk(DataChunk {
+                owner: DataChunkOwner::DebugInfo {
+                    class_idx,
+                    method_idx,
+                },
+                kind: DataChunkKind::DebugInfo,
+                align: 1,
+                offset: 0,
+                bytes: debug_bytes,
+                fixups: Vec::new(),
+            });
+            if let Some(chunk) = self.chunks.get_mut(chunk_idx) {
+                chunk.fixups.push(ChunkFixup {
+                    position: 8,
+                    target_chunk: debug_chunk_idx,
+                });
+            }
+        }
         Ok(chunk_idx)
     }
 
@@ -1055,6 +1083,15 @@ fn build_map_items(plan: &DexLayoutPlan, map_off: u32) -> Vec<MapItem> {
             TYPE_CODE_ITEM,
             code_item_count,
             code_item_offset.unwrap(),
+        ));
+    }
+
+    let (debug_count, debug_offset) = chunk_stats_by_kind(&plan, DataChunkKind::DebugInfo);
+    if debug_count > 0 {
+        rest.push(MapItem::new(
+            TYPE_DEBUG_INFO_ITEM,
+            debug_count,
+            debug_offset.unwrap(),
         ));
     }
 
@@ -2431,7 +2468,7 @@ fn patch_debug_info_pointer(chunk: &mut DataChunk, code_off: u32) -> Result<(), 
     Ok(())
 }
 
-const EMIT_DEBUG_INFO: bool = false;
+const EMIT_DEBUG_INFO: bool = true;
 
 fn assemble_concrete_method(
     class_desc: &str,

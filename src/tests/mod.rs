@@ -36,6 +36,6 @@ mod tests {
 
         // Attempt to parse the output
         let dex = SmaliClass::from_smali(&smali).unwrap();
-        println!("{}\n", dex.to_smali());
+        //println!("{}\n", dex.to_smali());
     }
 }

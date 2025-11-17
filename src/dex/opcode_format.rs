@@ -318,7 +318,7 @@ pub mod assemble {
     impl MethodRegisterLayout {
         fn new(method: &SmaliMethod) -> Result<Self, DexError> {
             let ins_size = compute_ins_size(method);
-            if cfg!(debug_assertions) {
+            if cfg!(debug_assertions) && std::env::var_os("SMALI_TRACE_ASSEMBLY").is_some() {
                 eprintln!(
                     "assembling {} registers={:?} locals={} ins={}",
                     method.name,

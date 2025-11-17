@@ -1,8 +1,11 @@
 use crate::dex::DexFile;
 use crate::types::SmaliClass;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+const SDK_35_DEXDUMP: &str = "/Users/andrew/Library/Android/sdk/build-tools/35.0.0/dexdump";
 
 const CASES: &[(&str, &[&str])] = &[
     (
@@ -238,18 +241,50 @@ fn temp_dex_path(label: &str, name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("smali-test-{}-{label}-{name}.dex", std::process::id()))
 }
 
-fn run_dexdump(path: &Path, name: &str) {
-    let output = Command::new("dexdump")
-        .arg(path)
-        .output()
-        .unwrap_or_else(|err| panic!("failed to spawn dexdump for {name}: {err}"));
+fn dexdump_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(explicit) = std::env::var_os("DEXDUMP") {
+        candidates.push(PathBuf::from(explicit));
+    }
+    candidates.push(PathBuf::from("dexdump"));
+    candidates.push(PathBuf::from(SDK_35_DEXDUMP));
+    candidates
+}
 
-    assert!(
-        output.status.success(),
-        "{name}: dexdump failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+fn run_dexdump(path: &Path, name: &str) {
+    let mut not_found_error = None;
+    for candidate in dexdump_candidates() {
+        let output = Command::new(&candidate).arg(path).output();
+        match output {
+            Ok(output) => {
+                assert!(
+                    output.status.success(),
+                    "{name}: dexdump failed\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                return;
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                not_found_error = Some((candidate, err));
+                continue;
+            }
+            Err(err) => panic!(
+                "failed to spawn dexdump '{:?}' for {name}: {err}",
+                candidate
+            ),
+        }
+    }
+
+    if let Some((candidate, err)) = not_found_error {
+        panic!(
+            "dexdump not available (last tried {}): {}",
+            candidate.display(),
+            err
+        );
+    } else {
+        panic!("dexdump not available on PATH and no fallback candidates succeeded");
+    }
 }
 
 fn run_case(name: &str, smali: &[&str]) {
