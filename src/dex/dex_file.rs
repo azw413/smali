@@ -379,7 +379,7 @@ impl EncodedCatchHandler {
         for _ in 0..count {
             pairs.push(EncodedTypeAddrPair::read(bytes, ix)?);
         }
-        let catch_all_addr = if size < 0 {
+        let catch_all_addr = if size <= 0 {
             Some(read_uleb128(bytes, ix)? as u32)
         } else {
             None
@@ -1493,7 +1493,6 @@ impl DexFile {
                                     t.handler_idx
                                 );
                             }
-                            continue;
                         }
                         for try_item in &ci.tries {
                             let start = try_item.start_addr;
