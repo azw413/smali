@@ -190,7 +190,7 @@ impl EncodedValue {
                 Ok(EncodedValue::Char(val as u16))
             }
             0x04 => {
-                let val = read_var_u32(bytes, ix, size)? as i32;
+                let val = read_var_i32(bytes, ix, size)?;
                 Ok(EncodedValue::Int(val))
             }
             0x06 => {
@@ -359,6 +359,18 @@ fn read_var_u32(bytes: &[u8], ix: &mut usize, size: usize) -> Result<u32, DexErr
         result |= (byte as u32) << (8 * i);
     }
 
+    Ok(result)
+}
+
+fn read_var_i32(bytes: &[u8], ix: &mut usize, size: usize) -> Result<i32, DexError> {
+    let mut result = 0i32;
+    for i in 0..size {
+        let byte = read_u1(bytes, ix)?;
+        result |= (byte as i32) << (8 * i);
+    }
+    if size < 4 && (result & (1 << (8 * size - 1))) != 0 {
+        result |= !((1 << (8 * size)) - 1);
+    }
     Ok(result)
 }
 
@@ -539,6 +551,23 @@ mod tests {
         let bytes_written = encoded_value.write(&mut output_bytes);
         assert_eq!(bytes_written, 5);
         assert_eq!(output_bytes, bytes);
+    }
+
+    #[test]
+    fn test_encoded_value_int_negative() {
+        // value = -1 should be encoded with 1 byte payload and sign-extend on read.
+        let bytes = vec![0x04, 0xff];
+        let mut ix = 0;
+        let encoded_value =
+            EncodedValue::read(&bytes, &mut ix).expect("Failed to read EncodedValue");
+        match encoded_value {
+            EncodedValue::Int(val) => assert_eq!(val, -1),
+            _ => panic!("Unexpected variant"),
+        }
+        let mut out = Vec::new();
+        let written = encoded_value.write(&mut out);
+        assert_eq!(written, bytes.len());
+        assert_eq!(out, bytes);
     }
 
     #[test]
