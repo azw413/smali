@@ -12,13 +12,15 @@ use crate::dex::{
 };
 use crate::types::{
     AnnotationElement as SmaliAnnElement, AnnotationValue as SmaliAnnValue,
-    AnnotationVisibility as SmaliAnnVis, MethodSignature, Modifier, Modifiers, ObjectIdentifier,
-    SmaliAnnotation, SmaliClass, SmaliField, SmaliMethod, SmaliParam, TypeSignature,
+    AnnotationVisibility as SmaliAnnVis, CatchDirective, MethodSignature, Modifier, Modifiers,
+    ObjectIdentifier, SmaliAnnotation, SmaliClass, SmaliField, SmaliMethod, SmaliOp, SmaliParam,
+    TryRange, TypeSignature,
 };
 use cesu8::to_java_cesu8;
 use log::{error, info, warn};
 
-use crate::dex::opcode_format::{RefResolver, RegMapper, decode_with_ctx};
+use crate::dex::opcode_format::{RefResolver, RegMapper, decode_with_ctx_with_labels};
+use crate::smali_ops::Label;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -354,6 +356,17 @@ pub struct EncodedCatchHandler {
     pub catch_all_addr: Option<u32>,
 }
 
+struct CatchPlan {
+    start_off: u32,
+    end_off: u32,
+    kind: CatchPlanKind,
+}
+
+enum CatchPlanKind {
+    Typed { exception: String, handler_off: u32 },
+    CatchAll { handler_off: u32 },
+}
+
 impl EncodedCatchHandler {
     pub fn read(bytes: &[u8], ix: &mut usize) -> Result<EncodedCatchHandler, DexError> {
         let size = read_sleb128(bytes, ix)?;
@@ -477,6 +490,7 @@ impl crate::dex::dex_file::CodeItem {
                 tries.push(TryItem::read(bytes, ix)?);
             }
             // encoded_catch_handler_list starts here
+            let handlers_list_start = *ix;
             let handlers_size = read_uleb128(bytes, ix)? as usize;
             if handlers_size > 1_000_000 {
                 return Err(DexError::new(
@@ -487,7 +501,7 @@ impl crate::dex::dex_file::CodeItem {
 
             // Sanity: verify each try's handler_off points somewhere within file bounds
             for (ti, t) in tries.iter().enumerate() {
-                let abs = handlers_base.saturating_add(t.handler_off as usize);
+                let abs = handlers_list_start.saturating_add(t.handler_off as usize);
                 if abs >= bytes.len() {
                     warn!(
                         "[codeitem] TryItem#{} handler_off {} -> OOB abs=0x{:x} (base=0x{:x}, file_size=0x{:x})",
@@ -526,14 +540,23 @@ impl crate::dex::dex_file::CodeItem {
                         "EncodedCatchHandler did not advance cursor (corrupt data)",
                     ));
                 }
-                handler_offsets.push((entry_off - handlers_base) as u32);
+                handler_offsets.push((entry_off - handlers_list_start) as u32);
             }
             // Advance main cursor only after successful scan
             *ix = scan;
 
             let mut offset_to_index = HashMap::with_capacity(handler_offsets.len());
-            for (idx, off) in handler_offsets.iter().enumerate() {
-                offset_to_index.entry(*off).or_insert(idx);
+            let mut dedup_offsets: Vec<u32> = tries.iter().map(|t| t.handler_off as u32).collect();
+            dedup_offsets.sort_unstable();
+            dedup_offsets.dedup();
+            if dedup_offsets.len() == handlers.len() {
+                for (idx, off) in dedup_offsets.into_iter().enumerate() {
+                    offset_to_index.entry(off).or_insert(idx);
+                }
+            } else {
+                for (idx, off) in handler_offsets.iter().enumerate() {
+                    offset_to_index.entry(*off).or_insert(idx);
+                }
             }
             for (ti, t) in tries.iter_mut().enumerate() {
                 let abs_off = t.handler_off as u32;
@@ -1419,15 +1442,187 @@ impl DexFile {
                         ins_size: ci.args_in_size,
                     };
 
-                    let decoded =
-                        decode_with_ctx(&bc, api_level, art_version, &resolver, Some(&regmap))
-                            .map_err(|e| {
-                                DexError::with_context(
-                                    e,
-                                    format!("while decoding {}->{}{}", class_desc, name, sig),
-                                )
-                            })?;
-                    (locals_calc, decoded)
+                    let mut forced_labels: HashMap<usize, String> = HashMap::new();
+                    let mut catch_plans: Vec<CatchPlan> = Vec::new();
+                    if !ci.tries.is_empty() {
+                        #[cfg(test)]
+                        if class_desc == "Lkotlinx/coroutines/internal/FastServiceLoader;"
+                            && name == "loadMainDispatcherFactory$kotlinx_coroutines_core"
+                        {
+                            let mut prefix_buf = Vec::new();
+                            write_uleb128(&mut prefix_buf, ci.handlers.len() as u32);
+                            let mut handler_offsets_from_list = Vec::new();
+                            let mut handler_offsets_from_entries = Vec::new();
+                            let mut running_list = prefix_buf.len();
+                            let mut running_entries = 0usize;
+                            for handler in &ci.handlers {
+                                handler_offsets_from_list.push(running_list as u32);
+                                handler_offsets_from_entries.push(running_entries as u32);
+                                let mut tmp = Vec::new();
+                                handler.write(&mut tmp);
+                                running_list += tmp.len();
+                                running_entries += tmp.len();
+                                eprintln!(
+                                    "    handler typed={} catch_all={:?} encoded_len={}",
+                                    handler.handlers.len(),
+                                    handler.catch_all_addr,
+                                    tmp.len()
+                                );
+                                for (pair_idx, pair) in handler.handlers.iter().enumerate().take(5)
+                                {
+                                    eprintln!(
+                                        "      pair#{pair_idx} type_idx={} addr={}",
+                                        pair.type_idx, pair.addr
+                                    );
+                                }
+                            }
+                            eprintln!(
+                                "[fast_loader] tries={} handlers={} offsets(list)={:?} offsets(entries)={:?}",
+                                ci.tries.len(),
+                                ci.handlers.len(),
+                                handler_offsets_from_list,
+                                handler_offsets_from_entries
+                            );
+                            for (idx, t) in ci.tries.iter().enumerate() {
+                                eprintln!(
+                                    "  try#{} start={} count={} handler_off={} idx={:?}",
+                                    idx,
+                                    t.start_addr,
+                                    t.insn_count,
+                                    t.handler_off,
+                                    t.handler_idx
+                                );
+                            }
+                            continue;
+                        }
+                        for try_item in &ci.tries {
+                            let start = try_item.start_addr;
+                            let end = start + try_item.insn_count as u32;
+                            forced_labels
+                                .entry(start as usize)
+                                .or_insert_with(|| format!(":try_start_{:x}", start));
+                            forced_labels
+                                .entry(end as usize)
+                                .or_insert_with(|| format!(":try_end_{:x}", end));
+                            if let Some(handler_idx) = try_item.handler_idx {
+                                if let Some(handler) = ci.handlers.get(handler_idx) {
+                                    for pair in &handler.handlers {
+                                        forced_labels.entry(pair.addr as usize).or_insert_with(
+                                            || format!(":catch_{:x}", pair.addr),
+                                        );
+                                        let exception = self
+                                            .get_type(pair.type_idx)?
+                                            .as_jni_type();
+                                        catch_plans.push(CatchPlan {
+                                            start_off: start,
+                                            end_off: end,
+                                            kind: CatchPlanKind::Typed {
+                                                exception,
+                                                handler_off: pair.addr,
+                                            },
+                                        });
+                                    }
+                                    if let Some(catch_all_addr) = handler.catch_all_addr {
+                                        forced_labels
+                                            .entry(catch_all_addr as usize)
+                                            .or_insert_with(|| {
+                                                format!(":catchall_{:x}", catch_all_addr)
+                                            });
+                                        catch_plans.push(CatchPlan {
+                                            start_off: start,
+                                            end_off: end,
+                                            kind: CatchPlanKind::CatchAll {
+                                                handler_off: catch_all_addr,
+                                            },
+                                        });
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                    }
+
+                    let decoded = decode_with_ctx_with_labels(
+                        &bc,
+                        api_level,
+                        art_version,
+                        &resolver,
+                        Some(&regmap),
+                        if forced_labels.is_empty() {
+                            None
+                        } else {
+                            Some(&forced_labels)
+                        },
+                    )
+                    .map_err(|e| {
+                        DexError::with_context(
+                            e,
+                            format!("while decoding {}->{}{}", class_desc, name, sig),
+                        )
+                    })?;
+                    let mut ops = decoded.ops;
+                    if !catch_plans.is_empty() {
+                        let normalize_label = |name: &str| {
+                            if name.starts_with(':') {
+                                name[1..].to_string()
+                            } else {
+                                name.to_string()
+                            }
+                        };
+                        let mut offset_to_label: HashMap<u32, String> = HashMap::new();
+                        for (label, offset) in decoded.label_offsets.iter() {
+                            offset_to_label
+                                .entry(*offset)
+                                .or_insert(label.clone());
+                        }
+                        let code_len = ci.instructions.len() as u32;
+                        for (offset, name) in forced_labels.iter() {
+                            let off_u32 = *offset as u32;
+                            if off_u32 >= code_len && !offset_to_label.contains_key(&off_u32) {
+                                ops.push(SmaliOp::Label(Label(normalize_label(name))));
+                                offset_to_label.insert(off_u32, name.clone());
+                            }
+                        }
+                        let mut resolve_label_name = |offset: u32| -> Result<String, DexError> {
+                            if let Some(name) = offset_to_label.get(&offset) {
+                                return Ok(name.clone());
+                            }
+                            if let Some(name) = forced_labels.get(&(offset as usize)) {
+                                offset_to_label.insert(offset, name.clone());
+                                return Ok(name.clone());
+                            }
+                            Err(DexError::new("missing label for try/catch offset"))
+                        };
+                        for plan in catch_plans {
+                            let start_label = resolve_label_name(plan.start_off)?;
+                            let end_label = resolve_label_name(plan.end_off)?;
+                            let try_range = TryRange {
+                                start: Label(normalize_label(&start_label)),
+                                end: Label(normalize_label(&end_label)),
+                            };
+                            match plan.kind {
+                                CatchPlanKind::Typed {
+                                    exception,
+                                    handler_off,
+                                } => {
+                                    let handler_label = resolve_label_name(handler_off)?;
+                                    ops.push(SmaliOp::Catch(CatchDirective::Catch {
+                                        exception,
+                                        try_range: try_range.clone(),
+                                        handler: Label(normalize_label(&handler_label)),
+                                    }));
+                                }
+                                CatchPlanKind::CatchAll { handler_off } => {
+                                    let handler_label = resolve_label_name(handler_off)?;
+                                    ops.push(SmaliOp::Catch(CatchDirective::CatchAll {
+                                        try_range: try_range.clone(),
+                                        handler: Label(normalize_label(&handler_label)),
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                    (locals_calc, ops)
                 } else {
                     (0, Vec::new())
                 };

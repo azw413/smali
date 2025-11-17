@@ -5236,13 +5236,29 @@ fn format_instruction_line(
     }
 }
 
-pub fn decode_with_ctx(
+pub struct DecodedMethod {
+    pub ops: Vec<SmaliOp>,
+    pub label_offsets: HashMap<String, u32>,
+}
+
+pub fn decode_with_ctx_full(
     bytecode: &[u8],
     api: i32,
     art_version: i32,
     res: &impl RefResolver,
     regmap: Option<&RegMapper>,
-) -> Result<Vec<SmaliOp>, DexError> {
+) -> Result<DecodedMethod, DexError> {
+    decode_with_ctx_with_labels(bytecode, api, art_version, res, regmap, None)
+}
+
+pub fn decode_with_ctx_with_labels(
+    bytecode: &[u8],
+    api: i32,
+    art_version: i32,
+    res: &impl RefResolver,
+    regmap: Option<&RegMapper>,
+    extra_labels: Option<&HashMap<usize, String>>,
+) -> Result<DecodedMethod, DexError> {
     // Fetch (or build once) the opcode map for this API/ART
     let opcode_cache = get_opcode_map(api, art_version);
 
@@ -5256,6 +5272,11 @@ pub fn decode_with_ctx(
 
     // First pass: collect labels and payload kinds
     let (mut labels, payloads, payload_base) = collect_labels_and_payloads(&code, &opcode_cache);
+    if let Some(extra) = extra_labels {
+        for (offset, name) in extra {
+            labels.entry(*offset).or_insert_with(|| name.clone());
+        }
+    }
 
     let mut output: Vec<SmaliOp> = Vec::new();
     let mut pc: usize = 0;
@@ -5498,7 +5519,24 @@ pub fn decode_with_ctx(
         pc += size_cu.max(1);
     }
 
-    Ok(output)
+    let mut label_offsets = HashMap::new();
+    for (offset, name) in labels {
+        label_offsets.entry(name.clone()).or_insert(offset as u32);
+    }
+    Ok(DecodedMethod {
+        ops: output,
+        label_offsets,
+    })
+}
+
+pub fn decode_with_ctx(
+    bytecode: &[u8],
+    api: i32,
+    art_version: i32,
+    res: &impl RefResolver,
+    regmap: Option<&RegMapper>,
+) -> Result<Vec<SmaliOp>, DexError> {
+    decode_with_ctx_full(bytecode, api, art_version, res, regmap).map(|decoded| decoded.ops)
 }
 
 pub fn decode_with_resolver(

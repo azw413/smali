@@ -2555,6 +2555,7 @@ fn build_try_items(
         });
     }
 
+    tries.sort_by_key(|t| t.start_addr);
     Ok((tries, handlers))
 }
 
