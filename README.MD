@@ -1,60 +1,88 @@
 # Smali Crate
 
-A pure rust implementation of a parser, writer and set of types for the smali file format and a dex file reader and writer(not yet implemented).
+A pure rust implementation of a parser, writer and set of types for the smali file format and a dex file reader and writer.
 
 Smali is used in the Android reversing community to examine and modify Android APK files. It's a human readable text format that represents the complete structure of a Dex VM class including all of its instructions. 
 The serialization and deserialization aim to be 100% compatible with Jesus Freke's Smali/Baksmali implementation.
 
-The examples folder contains two examples :- 
+The examples folder contains three examples :- 
 
-1. rootbeer.rs which uses apktool to unpack an APK and then parses all of the smali into this crate's representation which is then used to search for rootbeer's classes and patches them to disable the root check. It then calls apktool to rebuild the apk file. 
+1. rootbeer.rs which uses ApkFile to unpack any APK using Rootbeer, disassemble the dex files, find the rootbeer classes, patch the methods to disable the detection, recompile the dex and repackage the APK (it just needs re-signin afterwards). 
 2. dex2smali.rs which takes a dex file and writes each contained class into the out directory in a package directory heirarchy.
+3. smali2dex.rs which is the opposite, takes a directory of smali files and builds a working dex file. 
 
-With this crate you can use it to disassemble, analyse and patch Android DEX files. Currently writing of dex files is not implemented so if you want to roundtrip then you'll need to use apktool or the Java smali library to rebuild the dex file.
+With this crate you can use it to disassemble, analyse and patch Android APK and DEX files. It is completely self-contained and does not rely on any Java based dependencies.
 
-Here's the simple example from rootbeer.rs illustrating patching with apktool :-
+Here's the simple example from rootbeer.rs illustrating patching the APK file :-
 
 ```rust
-/* Expand the APK and patch RootBeer */
-fn process_apk(apk_file: &str) -> Result<(), Box<dyn Error>>
-{
-    // Call apktool to unpack the APK
-    execute_command("apktool", &["decode", "-f", apk_file, "-o", "out"])?;
+fn process_apk(apk_path: &str) -> Result<(), Box<dyn Error>> {
+    let mut apk = ApkFile::from_file(apk_path)?;
+    let dex_entries: Vec<String> = apk
+        .entry_names()
+        .filter(|name| name.ends_with(".dex"))
+        .map(|s| s.to_string())
+        .collect();
+    if dex_entries.is_empty() {
+        return Err("No classes*.dex files found in APK".into());
+    }
 
-    // Load all the smali classes
-    let mut p = PathBuf::from_str("out")?;
-    p.push("smali");
-    let mut classes = find_smali_files(&p)?;
-    println!("{:} smali classes loaded.", classes.len());
+    let mut patched = false;
+    for entry_name in dex_entries {
+        if patch_dex_entry(&mut apk, &entry_name)? {
+            println!("Patched {entry_name}");
+            patched = true;
+        }
+    }
 
-    // Search for the RootBeer class
-    for c in classes.iter_mut()
-    {
-        if is_rootbeer_class(&c)
-        {
-            // Patch all the methods returning a boolean
-            for m in c.methods.iter_mut()
-            {
-                if m.signature.result == TypeSignature::Bool && m.signature.args.len() == 0
-                {
-                    let mut new_instructions = vec![];
-                    new_instructions.push(Op(DexOp::Const4 { dest: v(0), value: 0 }));  // "const/4 v0, 0x0" - Set v0 to false
-                    new_instructions.push(Op(DexOp::Return { src: v(0) }));  //  "return v0" - return v0
+    if !patched {
+        println!("No RootBeer detections found; writing original APK");
+    }
+
+    apk.write_to_file("out.apk")?;
+    println!("Wrote patched APK to out.apk");
+    Ok(())
+}
+
+fn patch_dex_entry(apk: &mut ApkFile, entry_name: &str) -> Result<bool, Box<dyn Error>> {
+    let entry = apk
+        .entry(entry_name)
+        .ok_or_else(|| SmaliError::new(&format!("missing {entry_name}")))?;
+    let dex = DexFile::from_bytes(&entry.data)?;
+    let mut classes = dex.to_smali()?;
+    let mut touched = false;
+
+    for c in classes.iter_mut() {
+        if is_rootbeer_class(c) {
+            touched = true;
+            for m in c.methods.iter_mut() {
+                if m.signature.result == TypeSignature::Bool && m.signature.args.is_empty() {
+                    let mut new_instructions = vec![
+                        Op(DexOp::Const4 {
+                            dest: v(0),
+                            value: 0,
+                        }),
+                        Op(DexOp::Return { src: v(0) }),
+                    ];
                     m.ops = new_instructions;
                     m.locals = 1;
-                    println!("{} method {} successfully patched.", c.name.as_java_type(), &m.name);
+                    println!(
+                        "{} method {} successfully patched.",
+                        c.name.as_java_type(),
+                        &m.name
+                    );
                 }
             }
         }
-        // Save all classes, even unmodified so we can thoroughly test parser and writer
-        c.save()?;
     }
- 
-    // Repack the APK
-    execute_command("apktool", &["build", "out", "-o", "out.apk"])?;
 
-    Ok(())
+    if touched {
+        let rebuilt = DexFile::from_smali(&classes)?;
+        apk.replace_entry(entry_name, rebuilt.to_bytes().to_vec())?;
+    }
+
+    Ok(touched)
 }
 ```
 
-Take a look at dex2smali.rs on how to use DexFile to deserialise into smali.
+Take a look at the full examples for a better idea. 

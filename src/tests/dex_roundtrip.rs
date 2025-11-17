@@ -28,9 +28,41 @@ fn rebuilds_rootbeer_dex_roundtrip() {
     let original_map = class_smali_map(&classes);
     let rebuilt_map = class_smali_map(&rebuilt_classes);
 
-    assert_eq!(
-        original_map, rebuilt_map,
-        "smali text mismatch after rebuild"
+    let mut sample = Vec::new();
+    let mut diff_count = 0usize;
+    for (desc, original) in &original_map {
+        match rebuilt_map.get(desc) {
+            Some(rebuilt) if rebuilt == original => {}
+            Some(rebuilt) => {
+                diff_count += 1;
+                if sample.len() < 5 {
+                    sample.push(format!(
+                        "{desc} (original {} bytes vs rebuilt {} bytes)",
+                        original.len(),
+                        rebuilt.len()
+                    ));
+                }
+            }
+            None => {
+                diff_count += 1;
+                if sample.len() < 5 {
+                    sample.push(format!("{desc} missing from rebuilt output"));
+                }
+            }
+        }
+    }
+    for desc in rebuilt_map.keys() {
+        if !original_map.contains_key(desc) {
+            diff_count += 1;
+            if sample.len() < 5 {
+                sample.push(format!("{desc} missing from original output"));
+            }
+        }
+    }
+    assert!(
+        diff_count == 0,
+        "smali text mismatch after rebuild: {diff_count} differing classes (examples: {})",
+        sample.join(", ")
     );
 }
 

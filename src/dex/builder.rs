@@ -2567,8 +2567,6 @@ fn build_try_items(
             let addr = resolve_label_offset(&handler_label, label_offsets, "catch handler")?;
             typed_pairs.push(EncodedTypeAddrPair { type_idx, addr });
         }
-        typed_pairs.sort_by_key(|pair| pair.type_idx);
-
         let catch_all_addr = if let Some(label) = acc.catch_all {
             Some(resolve_label_offset(
                 &label,
