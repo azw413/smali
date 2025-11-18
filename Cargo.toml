@@ -7,7 +7,7 @@ description = "A library to read and write Android disassembly smali files."
 readme = "README.MD"
 repository = "https://github.com/azw413/smali"
 keywords = ["android", "dex", "dalvik", "smali", "manifest"]
-exclude = [ ".gitignore", ".idea/*" ]
+exclude = [ ".gitignore", ".idea/*", "tests/*" ]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
