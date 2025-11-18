@@ -152,6 +152,10 @@ impl StringPool {
         Ok(StringPool { strings })
     }
 
+    fn strings(&self) -> &[String] {
+        &self.strings
+    }
+
     fn get(&self, idx: u32) -> Option<&str> {
         if idx == NO_ENTRY_INDEX {
             return None;
@@ -190,6 +194,15 @@ impl StringPoolBuilder {
             strings: Vec::new(),
             indices: BTreeMap::new(),
         }
+    }
+
+    fn with_strings(strings: Vec<String>) -> Self {
+        let mut builder = StringPoolBuilder::new();
+        for (idx, value) in strings.into_iter().enumerate() {
+            builder.indices.insert(value.clone(), idx as u32);
+            builder.strings.push(value);
+        }
+        builder
     }
 
     fn intern(&mut self, value: impl AsRef<str>) -> u32 {
@@ -646,7 +659,9 @@ impl From<u32> for ManifestValue {
 pub struct ManifestAttribute {
     pub namespace_prefix: Option<String>,
     pub namespace_uri: Option<String>,
-    pub resource_id: Option<u32>,
+    pub stored_type: Option<u8>,
+    pub stored_data: Option<u32>,
+    pub raw_value: Option<String>,
     pub name: String,
     pub value: ManifestValue,
 }
@@ -657,7 +672,9 @@ impl ManifestAttribute {
         ManifestAttribute {
             namespace_prefix: None,
             namespace_uri: None,
-            resource_id: None,
+            stored_type: None,
+            stored_data: None,
+            raw_value: None,
             name: name.into(),
             value: value.into(),
         }
@@ -672,7 +689,9 @@ impl ManifestAttribute {
         ManifestAttribute {
             namespace_prefix: Some(namespace.into()),
             namespace_uri: None,
-            resource_id: None,
+            stored_type: None,
+            stored_data: None,
+            raw_value: None,
             name: name.into(),
             value: value.into(),
         }
@@ -688,10 +707,19 @@ impl ManifestAttribute {
         ManifestAttribute {
             namespace_prefix: Some(prefix.into()),
             namespace_uri: Some(uri.into()),
-            resource_id: None,
+            stored_type: None,
+            stored_data: None,
+            raw_value: None,
             name: name.into(),
             value: value.into(),
         }
+    }
+
+    fn encoded_type(&self, pool: &StringPoolBuilder) -> BinaryXmlResult<(u8, u32)> {
+        if let (Some(t), Some(data)) = (self.stored_type, self.stored_data) {
+            return Ok((t, data));
+        }
+        encode_typed_value(&self.value, pool)
     }
 }
 
@@ -881,6 +909,9 @@ fn collect_element_strings(element: &ManifestElement, pool: &mut StringPoolBuild
         if let Some(raw) = raw_value_text(&attr.value) {
             pool.intern_cow(raw);
         }
+        if let Some(raw) = &attr.raw_value {
+            pool.intern(raw);
+        }
     }
     for child in &element.children {
         collect_element_strings(child, pool);
@@ -995,13 +1026,15 @@ fn build_manifest_attribute(
         .prefix
         .as_deref()
         .and_then(|prefix| lookup_namespace_uri(ns_stack, Some(prefix)));
-    ManifestAttribute {
-        namespace_prefix: attr.prefix,
-        namespace_uri,
-        resource_id: None,
-        name: attr.local_name,
-        value: parse_manifest_value(&attr.value),
-    }
+        ManifestAttribute {
+            namespace_prefix: attr.prefix,
+            namespace_uri,
+            stored_type: None,
+            stored_data: None,
+            raw_value: Some(attr.value.clone()),
+            name: attr.local_name,
+            value: parse_manifest_value(&attr.value),
+        }
 }
 
 fn write_namespace_chunk(
@@ -1015,7 +1048,7 @@ fn write_namespace_chunk(
     } else {
         RES_XML_END_NAMESPACE_TYPE
     };
-    let chunk_start = begin_chunk(buf, chunk_type, 24);
+    let chunk_start = begin_chunk(buf, chunk_type, 16);
     write_u32(buf, 0);
     write_u32(buf, NO_ENTRY_INDEX);
     let prefix_idx = pool
@@ -1051,7 +1084,7 @@ fn write_start_element(
     element: &ManifestElement,
     pool: &StringPoolBuilder,
 ) -> BinaryXmlResult<()> {
-    let chunk_start = begin_chunk(buf, RES_XML_START_ELEMENT_TYPE, 36);
+    let chunk_start = begin_chunk(buf, RES_XML_START_ELEMENT_TYPE, 16);
     write_u32(buf, 0);
     write_u32(buf, NO_ENTRY_INDEX);
     let ns_idx = if let Some(uri) = &element.namespace_uri {
@@ -1084,7 +1117,7 @@ fn write_end_element(
     element: &ManifestElement,
     pool: &StringPoolBuilder,
 ) -> BinaryXmlResult<()> {
-    let chunk_start = begin_chunk(buf, RES_XML_END_ELEMENT_TYPE, 24);
+    let chunk_start = begin_chunk(buf, RES_XML_END_ELEMENT_TYPE, 16);
     write_u32(buf, 0);
     write_u32(buf, NO_ENTRY_INDEX);
     let ns_idx = if let Some(uri) = &element.namespace_uri {
@@ -1119,6 +1152,15 @@ fn write_cdata(buf: &mut Vec<u8>, text: &str, pool: &StringPoolBuilder) -> Binar
     Ok(())
 }
 
+fn write_resource_map(buf: &mut Vec<u8>, ids: &[u32]) -> BinaryXmlResult<()> {
+    let chunk_start = begin_chunk(buf, RES_XML_RESOURCE_MAP_TYPE, 8);
+    for &id in ids {
+        write_u32(buf, id);
+    }
+    finalize_chunk(buf, chunk_start);
+    Ok(())
+}
+
 fn write_attribute(
     buf: &mut Vec<u8>,
     attr: &ManifestAttribute,
@@ -1134,14 +1176,18 @@ fn write_attribute(
     let name_idx = pool
         .index_of(&attr.name)
         .ok_or_else(|| BinaryXmlError::MalformedDocument("Missing attribute name string".into()))?;
-    let raw = raw_value_text(&attr.value);
+    let raw = attr
+        .raw_value
+        .as_deref()
+        .map(Cow::Borrowed)
+        .or_else(|| raw_value_text(&attr.value));
     let raw_idx = if let Some(text) = raw.as_ref() {
         pool.index_of(text.as_ref())
             .ok_or_else(|| BinaryXmlError::MalformedDocument("Missing raw attribute string".into()))?
     } else {
         NO_ENTRY_INDEX
     };
-    let (data_type, data_value) = encode_typed_value(&attr.value, pool)?;
+    let (data_type, data_value) = attr.encoded_type(pool)?;
     write_u32(buf, ns_idx);
     write_u32(buf, name_idx);
     write_u32(buf, raw_idx);
@@ -1172,7 +1218,10 @@ fn write_element_xml(
     }
     for attr in &element.attributes {
         let name = qualified_name(attr.namespace_prefix.as_deref(), &attr.name);
-        let value = manifest_value_to_text(&attr.value);
+        let value = attr
+            .raw_value
+            .clone()
+            .unwrap_or_else(|| manifest_value_to_text(&attr.value));
         attr_storage.push((name, value));
     }
     let mut start = BytesStart::new(element_name.as_str());
@@ -1218,7 +1267,8 @@ fn encode_typed_value(
 #[derive(Clone, Debug)]
 pub struct AndroidManifest {
     root: ManifestElement,
-    attribute_resource_map: BTreeMap<(Option<String>, String), u32>,
+    resource_map: Vec<u32>,
+    string_pool: Vec<String>,
 }
 
 impl PartialEq for AndroidManifest {
@@ -1234,7 +1284,8 @@ impl AndroidManifest {
     pub fn new() -> Self {
         AndroidManifest {
             root: ManifestElement::new("manifest"),
-            attribute_resource_map: BTreeMap::new(),
+            resource_map: Vec::new(),
+            string_pool: Vec::new(),
         }
     }
 
@@ -1242,7 +1293,8 @@ impl AndroidManifest {
     pub fn from_root(root: ManifestElement) -> Self {
         AndroidManifest {
             root,
-            attribute_resource_map: BTreeMap::new(),
+            resource_map: Vec::new(),
+            string_pool: Vec::new(),
         }
     }
 
@@ -1416,7 +1468,8 @@ impl AndroidManifest {
 
         Ok(AndroidManifest {
             root,
-            attribute_resource_map: BTreeMap::new(),
+            resource_map: Vec::new(),
+            string_pool: Vec::new(),
         })
     }
 
@@ -1445,8 +1498,8 @@ impl AndroidManifest {
         reader.seek(xml_header.start + xml_header.header_size as usize)?;
 
         let mut resource_map = Vec::new();
-        let mut attribute_resource_map: BTreeMap<(Option<String>, String), u32> = BTreeMap::new();
         let mut string_pool: Option<StringPool> = None;
+        let mut string_pool_strings = Vec::new();
         let mut namespaces: Vec<NamespaceFrame> = Vec::new();
         let mut element_stack: Vec<ManifestElement> = Vec::new();
         let mut root: Option<ManifestElement> = None;
@@ -1457,6 +1510,9 @@ impl AndroidManifest {
             match chunk_header.chunk_type {
                 RES_STRING_POOL_TYPE => {
                     string_pool = Some(StringPool::parse(&mut reader, &chunk_header)?);
+                    if let Some(pool) = &string_pool {
+                        string_pool_strings = pool.strings().to_vec();
+                    }
                 }
                 RES_XML_RESOURCE_MAP_TYPE => {
                     let mut ids = Vec::new();
@@ -1545,20 +1601,12 @@ impl AndroidManifest {
                         let attr_namespace =
                             resolve_prefix(&namespaces, attr_namespace_uri.as_deref());
                         let value = decode_value(pool, raw_value_idx, data_type, data)?;
-                        let resource_id = resource_map
-                            .get(attr_name_idx as usize)
-                            .copied()
-                            .filter(|id| *id != 0);
-                        if let Some(id) = resource_id {
-                            attribute_resource_map.insert(
-                                (attr_namespace_uri.clone(), attr_name.clone()),
-                                id,
-                            );
-                        }
                         attributes.push(ManifestAttribute {
                             namespace_prefix: attr_namespace,
                             namespace_uri: attr_namespace_uri,
-                            resource_id,
+                            stored_type: Some(data_type),
+                            stored_data: Some(data),
+                            raw_value: pool.get(raw_value_idx).map(|s| s.to_string()),
                             name: attr_name,
                             value,
                         });
@@ -1636,14 +1684,15 @@ impl AndroidManifest {
 
         Ok(AndroidManifest {
             root,
-            attribute_resource_map,
+            resource_map,
+            string_pool: string_pool_strings,
         })
     }
 
     /// Serializes the manifest DOM into AXML suitable for reinserting into an APK.
     pub fn to_bytes(&self) -> BinaryXmlResult<Vec<u8>> {
         let namespaces = collect_namespace_declarations(&self.root);
-        let mut pool_builder = StringPoolBuilder::new();
+        let mut pool_builder = StringPoolBuilder::with_strings(self.string_pool.clone());
         for decl in &namespaces {
             pool_builder.intern(&decl.prefix);
             pool_builder.intern(&decl.uri);
@@ -1652,6 +1701,9 @@ impl AndroidManifest {
         let string_chunk = pool_builder.to_chunk();
 
         let mut body = Vec::new();
+        if !self.resource_map.is_empty() {
+            write_resource_map(&mut body, &self.resource_map)?;
+        }
         for decl in &namespaces {
             write_namespace_chunk(&mut body, &pool_builder, decl, true)?;
         }
@@ -1718,6 +1770,8 @@ mod tests {
             Some("com.scottyab.rootbeer.sample")
         );
 
+        println!("original: {}", manifest.to_string().expect("converted"));
+
         let application = manifest.application().expect("application element");
         let app_name = application
             .attribute_value("android:name")
@@ -1743,7 +1797,11 @@ mod tests {
         }
 
         let rebuilt = manifest.to_bytes().expect("serialize manifest");
+
         let reparsed = AndroidManifest::from_bytes(&rebuilt).expect("roundtrip manifest");
+
+        println!("reparsed: {}", reparsed.to_string().expect("converted"));
+
         assert_eq!(manifest.package_name(), reparsed.package_name());
         let original_app = manifest.application().expect("original app node");
         let roundtrip_app = reparsed.application().expect("roundtrip app node");
