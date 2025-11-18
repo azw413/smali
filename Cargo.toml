@@ -25,3 +25,4 @@ sha1 = "0.10"
 crc32fast = "1.3"
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+quick-xml = "0.32"
