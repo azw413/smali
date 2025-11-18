@@ -1,3 +1,4 @@
+use smali::android::binary_xml::{AndroidManifest, ManifestAttribute, ManifestValue};
 use smali::android::zip::ApkFile;
 use smali::dex::DexFile;
 use smali::smali_ops::{DexOp, v};
@@ -27,6 +28,7 @@ fn main() {
 
 fn process_apk(apk_path: &str) -> Result<(), Box<dyn Error>> {
     let mut apk = ApkFile::from_file(apk_path)?;
+    enable_manifest_debuggable(&mut apk)?;
     let dex_entries: Vec<String> = apk
         .entry_names()
         .filter(|name| name.ends_with(".dex"))
@@ -91,6 +93,23 @@ fn patch_dex_entry(apk: &mut ApkFile, entry_name: &str) -> Result<bool, Box<dyn 
     }
 
     Ok(touched)
+}
+
+fn enable_manifest_debuggable(apk: &mut ApkFile) -> Result<(), Box<dyn Error>> {
+    let entry = apk
+        .entry("AndroidManifest.xml")
+        .ok_or_else(|| SmaliError::new("missing AndroidManifest.xml"))?;
+    let mut manifest = AndroidManifest::from_apk_entry(entry)?;
+    let application = manifest.ensure_application();
+    application.set_attribute(ManifestAttribute::with_namespace_and_uri(
+        "android",
+        "http://schemas.android.com/apk/res/android",
+        "debuggable",
+        ManifestValue::Boolean(true),
+    ));
+    let updated = manifest.to_apk_entry(Some(entry))?;
+    apk.replace_entry_with("AndroidManifest.xml", updated)?;
+    Ok(())
 }
 
 // Matches the known field / method signatures for the RootBeer.class (remember this could be renamed)

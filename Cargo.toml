@@ -1,12 +1,12 @@
 [package]
 name = "smali"
-version = "0.3.4"
+version = "0.4.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "A library to read and write Android disassembly smali files."
 readme = "README.MD"
 repository = "https://github.com/azw413/smali"
-keywords = ["android", "dex", "dalvik", "java", "smali"]
+keywords = ["android", "dex", "dalvik", "smali", "manifest"]
 exclude = [ ".gitignore", ".idea/*" ]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

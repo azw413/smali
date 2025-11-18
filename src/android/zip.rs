@@ -215,6 +215,13 @@ impl ApkFile {
         Ok(())
     }
 
+    /// Replace an entry while preserving metadata from [`ApkEntry`].
+    pub fn replace_entry_with(&mut self, name: impl AsRef<str>, entry: ApkEntry) -> ApkZipResult<()> {
+        let normalized = normalize_entry_name(name.as_ref())?;
+        self.entries.insert(normalized, entry);
+        Ok(())
+    }
+
     /// Remove an entry by name.
     pub fn remove_entry(&mut self, name: &str) -> bool {
         self.entries.remove(name).is_some()

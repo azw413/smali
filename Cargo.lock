@@ -241,7 +241,7 @@ checksum = "d66dc143e6b11c1eddc06d5c423cfc97062865baf299914ab64caa38182078fe"
 
 [[package]]
 name = "smali"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "adler",
  "bitflags",

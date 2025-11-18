@@ -11,7 +11,7 @@ The examples folder contains three examples :-
 2. dex2smali.rs which takes a dex file and writes each contained class into the out directory in a package directory heirarchy.
 3. smali2dex.rs which is the opposite, takes a directory of smali files and builds a working dex file. 
 
-With this crate you can use it to disassemble, analyse and patch Android APK and DEX files. It is completely self-contained and does not rely on any Java based dependencies.
+With this crate you can use it to disassemble, analyse and patch Android APK, manifest and DEX files. It is completely self-contained and does not rely on any Java based dependencies.
 
 Here's the simple example from rootbeer.rs illustrating patching the APK file :-
 
@@ -85,4 +85,4 @@ fn patch_dex_entry(apk: &mut ApkFile, entry_name: &str) -> Result<bool, Box<dyn 
 }
 ```
 
-Take a look at the full examples for a better idea. 
+Take a look at the full examples for a better idea and also an example of how to update the Android manifest file.  

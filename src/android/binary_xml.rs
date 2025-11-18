@@ -538,6 +538,8 @@ fn finalize_chunk(buf: &mut Vec<u8>, chunk_start: usize) {
 
 
 /// Result alias for binary XML operations.
+///
+/// All parsing/serialization utilities return [`BinaryXmlError`] when they fail.
 pub type BinaryXmlResult<T> = Result<T, BinaryXmlError>;
 
 /// Errors surfaced by the binary XML helpers.
@@ -578,6 +580,9 @@ impl From<AttrError> for BinaryXmlError {
 }
 
 /// Typed attribute values inside the manifest DOM representation.
+///
+/// These variants capture the common `Res_value` types emitted by Android's manifest
+/// compiler so we can serialize back to binary XML without leaking precision.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ManifestValue {
     String(String),
@@ -634,6 +639,9 @@ impl From<u32> for ManifestValue {
 }
 
 /// A single attribute attached to a manifest element.
+///
+/// Attributes retain both namespace prefix and URI so that conversions between binary XML
+/// and text XML remain lossless, even without inspecting `resources.arsc`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManifestAttribute {
     pub namespace_prefix: Option<String>,
@@ -644,6 +652,7 @@ pub struct ManifestAttribute {
 }
 
 impl ManifestAttribute {
+    /// Create an attribute without a namespace (e.g., `package`).
     pub fn new(name: impl Into<String>, value: impl Into<ManifestValue>) -> Self {
         ManifestAttribute {
             namespace_prefix: None,
@@ -654,6 +663,7 @@ impl ManifestAttribute {
         }
     }
 
+    /// Create a namespaced attribute given only the namespace prefix.
     pub fn with_namespace(
         namespace: impl Into<String>,
         name: impl Into<String>,
@@ -668,6 +678,7 @@ impl ManifestAttribute {
         }
     }
 
+    /// Create a namespaced attribute and capture the fully-qualified URI.
     pub fn with_namespace_and_uri(
         prefix: impl Into<String>,
         uri: impl Into<String>,
@@ -685,6 +696,9 @@ impl ManifestAttribute {
 }
 
 /// DOM-style element node for the binary XML tree.
+///
+/// Elements model the subset of Android manifest tags that can appear inside binary XML and
+/// provide helpers for manipulating attributes/children ergonomically.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManifestElement {
     pub namespace_prefix: Option<String>,
@@ -696,6 +710,7 @@ pub struct ManifestElement {
 }
 
 impl ManifestElement {
+    /// Construct a tag without namespace metadata.
     pub fn new(tag: impl Into<String>) -> Self {
         ManifestElement {
             namespace_prefix: None,
@@ -707,6 +722,7 @@ impl ManifestElement {
         }
     }
 
+    /// Construct a tag with the given namespace prefix.
     pub fn with_namespace(tag: impl Into<String>, namespace: impl Into<String>) -> Self {
         ManifestElement {
             namespace_prefix: Some(namespace.into()),
@@ -715,6 +731,7 @@ impl ManifestElement {
         }
     }
 
+    /// Construct a tag while also recording the namespace URI.
     pub fn with_namespace_and_uri(
         tag: impl Into<String>,
         prefix: impl Into<String>,
@@ -727,6 +744,7 @@ impl ManifestElement {
         }
     }
 
+    /// Returns an immutable view of the requested attribute (supports `prefix:name`).
     pub fn attribute_value(&self, name: &str) -> Option<&ManifestValue> {
         let (namespace, local) = split_attribute_query(name);
         self.attributes
@@ -735,6 +753,7 @@ impl ManifestElement {
             .map(|attr| &attr.value)
     }
 
+    /// Returns a mutable handle to the requested attribute (supports `prefix:name`).
     pub fn attribute_value_mut(&mut self, name: &str) -> Option<&mut ManifestValue> {
         let (namespace, local) = split_attribute_query(name);
         self.attributes
@@ -743,6 +762,7 @@ impl ManifestElement {
             .map(|attr| &mut attr.value)
     }
 
+    /// Inserts or replaces an attribute on this node.
     pub fn set_attribute(&mut self, attribute: ManifestAttribute) {
         if let Some(existing) = self
             .attributes
@@ -758,6 +778,7 @@ impl ManifestElement {
         }
     }
 
+    /// Removes an attribute and returns it when present.
     pub fn remove_attribute(
         &mut self,
         name: &str,
@@ -772,18 +793,22 @@ impl ManifestElement {
         }
     }
 
+    /// Appends a child element.
     pub fn append_child(&mut self, child: ManifestElement) {
         self.children.push(child);
     }
 
+    /// Returns the first child with the requested tag name.
     pub fn find_child(&self, tag: &str) -> Option<&ManifestElement> {
         self.children.iter().find(|child| child.tag == tag)
     }
 
+    /// Returns a mutable child reference when the tag matches.
     pub fn find_child_mut(&mut self, tag: &str) -> Option<&mut ManifestElement> {
         self.children.iter_mut().find(|child| child.tag == tag)
     }
 
+    /// Removes all children with the provided tag name.
     pub fn remove_children(&mut self, tag: &str) {
         self.children.retain(|child| child.tag != tag);
     }
@@ -1187,6 +1212,9 @@ fn encode_typed_value(
 }
 
 /// High-level representation of `AndroidManifest.xml`.
+///
+/// This façade exposes both binary and textual manifest conversions plus helpers for
+/// common metadata manipulations.
 #[derive(Clone, Debug)]
 pub struct AndroidManifest {
     root: ManifestElement,
@@ -1202,6 +1230,7 @@ impl PartialEq for AndroidManifest {
 impl Eq for AndroidManifest {}
 
 impl AndroidManifest {
+    /// Construct an empty manifest rooted at `<manifest>`.
     pub fn new() -> Self {
         AndroidManifest {
             root: ManifestElement::new("manifest"),
@@ -1209,6 +1238,7 @@ impl AndroidManifest {
         }
     }
 
+    /// Wrap an existing DOM tree as a manifest.
     pub fn from_root(root: ManifestElement) -> Self {
         AndroidManifest {
             root,
@@ -1216,42 +1246,51 @@ impl AndroidManifest {
         }
     }
 
+    /// Returns the root element.
     pub fn root(&self) -> &ManifestElement {
         &self.root
     }
 
+    /// Returns a mutable handle to the root.
     pub fn root_mut(&mut self) -> &mut ManifestElement {
         &mut self.root
     }
 
+    /// Convenience accessor for the `package` attribute.
     pub fn package_name(&self) -> Option<&str> {
         self.root.attribute_value("package").and_then(|value| value.as_str())
     }
 
+    /// Sets the top-level package attribute.
     pub fn set_package_name(&mut self, package: impl Into<String>) {
         let attr = ManifestAttribute::new("package", ManifestValue::from(package.into()));
         self.root.set_attribute(attr);
     }
 
+    /// Returns the `android:versionName` value.
     pub fn version_name(&self) -> Option<&str> {
         self.root
             .attribute_value("versionName")
             .and_then(|value| value.as_str())
     }
 
+    /// Sets `android:versionName` on the root manifest element.
     pub fn set_version_name(&mut self, version: impl Into<String>) {
         let attr = ManifestAttribute::new("versionName", version.into());
         self.root.set_attribute(attr);
     }
 
+    /// Returns the `<application>` node if present.
     pub fn application(&self) -> Option<&ManifestElement> {
         self.root.find_child("application")
     }
 
+    /// Returns a mutable `<application>` node if present.
     pub fn application_mut(&mut self) -> Option<&mut ManifestElement> {
         self.root.find_child_mut("application")
     }
 
+    /// Ensures the manifest contains an `<application>` node and returns it.
     pub fn ensure_application(&mut self) -> &mut ManifestElement {
         if self.root.find_child("application").is_none() {
             self.root.append_child(ManifestElement::new("application"));
@@ -1259,6 +1298,7 @@ impl AndroidManifest {
         self.root.find_child_mut("application").expect("application node exists")
     }
 
+    /// Returns all `<uses-permission>` nodes.
     pub fn uses_permissions(&self) -> Vec<&ManifestElement> {
         self.root
             .children
@@ -1267,6 +1307,7 @@ impl AndroidManifest {
             .collect()
     }
 
+    /// Adds a `<uses-permission android:name="…"/>` node.
     pub fn add_permission(&mut self, name: impl Into<String>) {
         let mut node = ManifestElement::new("uses-permission");
         node.set_attribute(ManifestAttribute::with_namespace_and_uri(
@@ -1278,6 +1319,7 @@ impl AndroidManifest {
         self.root.append_child(node);
     }
 
+    /// Parses a conventional text XML manifest into the DOM representation.
     pub fn from_string(xml: &str) -> BinaryXmlResult<Self> {
         let mut reader = Reader::from_str(xml);
         reader.config_mut().trim_text(true);
@@ -1378,6 +1420,7 @@ impl AndroidManifest {
         })
     }
 
+    /// Emits a human-readable XML manifest string complete with namespace declarations.
     pub fn to_string(&self) -> BinaryXmlResult<String> {
         let mut writer = Writer::new(Vec::new());
         writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("utf-8"), None)))?;
@@ -1388,6 +1431,7 @@ impl AndroidManifest {
             .map_err(|err| BinaryXmlError::MalformedDocument(err.to_string()))
     }
 
+    /// Parses Android's binary XML format (AXML) into a manifest DOM.
     pub fn from_bytes(bytes: &[u8]) -> BinaryXmlResult<Self> {
         let mut reader = BinaryReader::new(bytes);
         let xml_header = read_chunk_header(&mut reader)?;
@@ -1596,6 +1640,7 @@ impl AndroidManifest {
         })
     }
 
+    /// Serializes the manifest DOM into AXML suitable for reinserting into an APK.
     pub fn to_bytes(&self) -> BinaryXmlResult<Vec<u8>> {
         let namespaces = collect_namespace_declarations(&self.root);
         let mut pool_builder = StringPoolBuilder::new();
@@ -1623,10 +1668,12 @@ impl AndroidManifest {
         Ok(document)
     }
 
+    /// Convenience helper that parses a manifest from an [`ApkEntry`].
     pub fn from_apk_entry(entry: &ApkEntry) -> BinaryXmlResult<Self> {
         Self::from_bytes(&entry.data)
     }
 
+    /// Serializes the manifest into an [`ApkEntry`], optionally copying metadata from a template entry.
     pub fn to_apk_entry(&self, template: Option<&ApkEntry>) -> BinaryXmlResult<ApkEntry> {
         let data = self.to_bytes()?;
         let mut entry = ApkEntry::new(data);
