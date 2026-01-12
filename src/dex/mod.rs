@@ -57,13 +57,17 @@ pub(crate) fn read_uleb128p1(bytes: &[u8], ix: &mut usize) -> Result<i32, DexErr
 }
 
 pub(crate) fn read_x(bytes: &[u8], ix: &mut usize, length: usize) -> Result<Vec<u8>, DexError> {
-    if bytes.len() - *ix >= length {
-        let mut v = Vec::with_capacity(length + 1);
-        v.extend_from_slice(&bytes[*ix..*ix + length]);
-        *ix += length;
-        Ok(v)
+    if let Some(remaining) = bytes.len().checked_sub(*ix) {
+        if remaining >= length {
+            let mut v = Vec::with_capacity(length + 1);
+            v.extend_from_slice(&bytes[*ix..*ix + length]);
+            *ix += length;
+            Ok(v)
+        } else {
+            Err(DexError::new("buffer too short for array read"))
+        }
     } else {
-        Err(DexError::new("buffer too short for array read"))
+        Err(DexError::new("buffer index out of range for array read"))
     }
 }
 

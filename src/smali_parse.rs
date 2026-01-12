@@ -651,9 +651,14 @@ pub fn parse_method(smali: &str) -> IResult<&str, SmaliMethod> {
         // .local directive
         if let IResult::Ok((o, _)) = ws(tag::<&str, &str, Error<&str>>(".local")).parse(input) {
             let (o, rest) = take_until_eol(o)?;
-            let directive =
-                parse_local_directive(rest).unwrap_or_else(|| panic!("invalid .local: {rest}"));
-            method.ops.push(directive);
+            if let Some(directive) = parse_local_directive(rest) {
+                method.ops.push(directive);
+            } else {
+                return IResult::Err(Failure(Error {
+                    input: rest,
+                    code: ErrorKind::Fail,
+                }));
+            }
             input = o;
             continue;
         }
@@ -699,9 +704,10 @@ pub fn parse_method(smali: &str) -> IResult<&str, SmaliMethod> {
 
         // If nothing was parsed, show error with context
         if !found {
-            let next_lines = input.lines().take(3).collect::<Vec<_>>();
-            let context = next_lines.join("\n");
-            panic!("parse_method: unable to parse method body at:\n{context}");
+            return IResult::Err(Failure(Error {
+                input,
+                code: ErrorKind::Fail,
+            }));
         }
     }
 }

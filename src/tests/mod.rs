@@ -38,4 +38,40 @@ mod tests {
         let dex = SmaliClass::from_smali(&smali).unwrap();
         //println!("{}\n", dex.to_smali());
     }
+
+    #[test]
+    fn roundtrip_registers_directive() {
+        let smali = r#"
+.class public Lcom/example/Test;
+.super Ljava/lang/Object;
+
+.method public foo(I)V
+    .registers 2
+    return-void
+.end method
+"#;
+        let class = SmaliClass::from_smali(smali).unwrap();
+        let out = class.to_smali();
+        assert!(out.contains(".registers 2"));
+        assert!(!out.contains(".locals"));
+        let _ = SmaliClass::from_smali(&out).unwrap();
+    }
+
+    #[test]
+    fn roundtrip_param_name_only() {
+        let smali = r#"
+.class public Lcom/example/Test;
+.super Ljava/lang/Object;
+
+.method public foo(I)V
+    .registers 2
+    .param p1, "value"
+    return-void
+.end method
+"#;
+        let class = SmaliClass::from_smali(smali).unwrap();
+        let out = class.to_smali();
+        assert!(out.contains(".param p1, \"value\""));
+        let _ = SmaliClass::from_smali(&out).unwrap();
+    }
 }

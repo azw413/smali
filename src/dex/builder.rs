@@ -4,8 +4,8 @@ use crate::dex::dex_file::{
     DBG_END_SEQUENCE, DBG_FIRST_SPECIAL, DBG_LINE_BASE, DBG_LINE_RANGE, DBG_RESTART_LOCAL,
     DBG_SET_EPILOGUE_BEGIN, DBG_SET_PROLOGUE_END, DBG_START_LOCAL, DBG_START_LOCAL_EXTENDED,
     DEX_FILE_MAGIC, DebugInfo, DexString, ENDIAN_CONSTANT, EncodedCatchHandler, EncodedField,
-    EncodedMethod, EncodedTypeAddrPair, FieldItem, Header, MethodItem, NO_INDEX, PrototypeItem,
-    TryItem, TypeList,
+    EncodedMethod, EncodedTypeAddrPair, FieldItem, Header, MethodHandle, MethodItem, NO_INDEX,
+    PrototypeItem, TryItem, TypeList,
 };
 use crate::dex::encoded_values::{
     AnnotationElement as DexAnnotationElement, EncodedAnnotation, EncodedValue, write_encoded_array,
@@ -38,6 +38,8 @@ const TYPE_PROTO_ID_ITEM: u16 = 0x0003;
 const TYPE_FIELD_ID_ITEM: u16 = 0x0004;
 const TYPE_METHOD_ID_ITEM: u16 = 0x0005;
 const TYPE_CLASS_DEF_ITEM: u16 = 0x0006;
+const TYPE_CALL_SITE_ID_ITEM: u16 = 0x0007;
+const TYPE_METHOD_HANDLE_ITEM: u16 = 0x0008;
 const TYPE_CLASS_DATA_ITEM: u16 = 0x2000;
 const TYPE_MAP_LIST: u16 = 0x1000;
 const TYPE_TYPE_LIST: u16 = 0x1001;
@@ -73,6 +75,9 @@ pub struct DexIndexPools {
 
     pub methods: Vec<MethodEntry>,
     method_index: HashMap<MethodKey, u32>,
+
+    pub method_handles: Vec<MethodHandle>,
+    method_handle_index: HashMap<MethodHandleKey, u32>,
 
     annotation_elements: HashMap<String, HashMap<String, TypeSignature>>,
 }
@@ -130,9 +135,11 @@ impl<'a> AssemblerIndexResolver for PoolIndexResolver<'a> {
     }
 
     fn method_handle_index(&self, _literal: &str) -> Result<u32, DexError> {
-        Err(DexError::new(
-            "method-handle instructions are not supported in assembler yet",
-        ))
+        let key = parse_method_handle_literal(_literal)
+            .ok_or_else(|| DexError::new("invalid method handle literal"))?;
+        self.pools
+            .method_handle_index(&key)
+            .ok_or_else(|| DexError::new("missing method handle index"))
     }
 }
 
@@ -156,6 +163,7 @@ pub struct DexLayoutPlan {
     pub class_defs: Vec<ClassDefPlan>,
     pub string_data_offsets: Vec<u32>,
     pub proto_parameter_offsets: Vec<Option<u32>>,
+    pub method_handle_offset: Option<u32>,
 }
 
 /// Build a binary DEX file from the provided classes, returning the serialized bytes.
@@ -230,6 +238,7 @@ struct PendingCodeAssignment {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DataChunkKind {
+    MethodHandleIds,
     StringData,
     TypeList,
     EncodedArray,
@@ -244,6 +253,7 @@ enum DataChunkKind {
 
 #[derive(Debug, Clone)]
 enum DataChunkOwner {
+    MethodHandleIds,
     StringData(usize),
     ProtoParameters(usize),
     ClassInterfaces(usize),
@@ -420,6 +430,10 @@ impl DexIndexPools {
         let proto = PrototypeKey::from_signature(signature);
         let key = MethodKey::new(class_desc.to_string(), name.to_string(), proto);
         self.method_index.get(&key).copied()
+    }
+
+    pub(crate) fn method_handle_index(&self, key: &MethodHandleKey) -> Option<u32> {
+        self.method_handle_index.get(key).copied()
     }
 
     fn annotation_element_type(
@@ -625,16 +639,17 @@ impl DataSectionBuilder {
 
     fn chunk_priority(kind: DataChunkKind) -> u32 {
         match kind {
-            DataChunkKind::StringData => 0,
-            DataChunkKind::TypeList => 1,
-            DataChunkKind::EncodedArray => 2,
-            DataChunkKind::AnnotationItem => 3,
-            DataChunkKind::AnnotationSetRefList => 4,
-            DataChunkKind::AnnotationSet => 5,
-            DataChunkKind::AnnotationsDirectory => 6,
-            DataChunkKind::CodeItem => 7,
-            DataChunkKind::DebugInfo => 8,
-            DataChunkKind::ClassData => 9,
+            DataChunkKind::MethodHandleIds => 0,
+            DataChunkKind::StringData => 1,
+            DataChunkKind::TypeList => 2,
+            DataChunkKind::EncodedArray => 3,
+            DataChunkKind::AnnotationItem => 4,
+            DataChunkKind::AnnotationSetRefList => 5,
+            DataChunkKind::AnnotationSet => 6,
+            DataChunkKind::AnnotationsDirectory => 7,
+            DataChunkKind::CodeItem => 8,
+            DataChunkKind::DebugInfo => 9,
+            DataChunkKind::ClassData => 10,
         }
     }
 
@@ -690,6 +705,24 @@ impl DataSectionBuilder {
                 fixups: Vec::new(),
             });
         }
+    }
+
+    fn add_method_handle_ids(&mut self, handles: &[MethodHandle]) {
+        if handles.is_empty() {
+            return;
+        }
+        let mut bytes = Vec::with_capacity(handles.len() * 8);
+        for handle in handles {
+            handle.write(&mut bytes);
+        }
+        self.chunks.push(DataChunk {
+            owner: DataChunkOwner::MethodHandleIds,
+            kind: DataChunkKind::MethodHandleIds,
+            align: 4,
+            offset: 0,
+            bytes,
+            fixups: Vec::new(),
+        });
     }
 
     fn add_proto_parameter_lists(&mut self, protos: &[PrototypeItem]) {
@@ -831,6 +864,7 @@ impl DexLayoutPlan {
         let resolver = PoolIndexResolver::new(&pools);
         let assembler = MethodAssembler::new(&resolver, DEFAULT_API_LEVEL, DEFAULT_ART_VERSION);
         let mut data_builder = DataSectionBuilder::new();
+        data_builder.add_method_handle_ids(&pools.method_handles);
         data_builder.add_string_data(&ids.strings);
         data_builder.add_proto_parameter_lists(&ids.proto_ids);
         data_builder.add_class_interface_lists(&class_defs);
@@ -918,6 +952,12 @@ impl DexLayoutPlan {
             }
         }
 
+        let method_handle_offset = data_section
+            .chunks()
+            .iter()
+            .find(|chunk| chunk.kind == DataChunkKind::MethodHandleIds)
+            .map(|chunk| data_base + chunk.offset);
+
         Ok(DexLayoutPlan {
             pools,
             ids,
@@ -926,6 +966,7 @@ impl DexLayoutPlan {
             class_defs,
             string_data_offsets,
             proto_parameter_offsets,
+            method_handle_offset,
         })
     }
 }
@@ -1046,6 +1087,16 @@ fn build_map_items(plan: &DexLayoutPlan, map_off: u32) -> Vec<MapItem> {
             plan.sections.class_defs.count,
             plan.sections.class_defs.offset,
         ));
+    }
+
+    if !plan.pools.method_handles.is_empty() {
+        if let Some(offset) = plan.method_handle_offset {
+            rest.push(MapItem::new(
+                TYPE_METHOD_HANDLE_ITEM,
+                plan.pools.method_handles.len() as u32,
+                offset,
+            ));
+        }
     }
 
     let string_count = plan.string_data_offsets.len() as u32;
@@ -1321,6 +1372,7 @@ struct DexPoolBuilder {
     field_keys: BTreeSet<FieldKey>,
     method_keys: Vec<MethodKey>,
     method_key_set: BTreeSet<MethodKey>,
+    method_handle_keys: BTreeSet<MethodHandleKey>,
     annotation_elements: HashMap<String, HashMap<String, TypeSignature>>,
     string_aliases: HashMap<String, String>,
 }
@@ -1469,6 +1521,26 @@ impl DexPoolBuilder {
             method_index_map.insert(key, idx);
         }
 
+        let mut method_handles = Vec::with_capacity(self.method_handle_keys.len());
+        let mut method_handle_index = HashMap::with_capacity(self.method_handle_keys.len());
+        for key in self.method_handle_keys.into_iter() {
+            let target_id = match &key.target {
+                MethodHandleTarget::Field(field_key) => *field_index_map
+                    .get(field_key)
+                    .ok_or_else(|| DexError::new("missing field for method handle"))?,
+                MethodHandleTarget::Method(method_key) => *method_index_map
+                    .get(method_key)
+                    .ok_or_else(|| DexError::new("missing method for method handle"))?,
+            };
+            let idx = method_handles.len() as u32;
+            method_handles.push(MethodHandle {
+                handle_type: key.handle_type,
+                unused: 0,
+                field_or_method_id: target_id,
+            });
+            method_handle_index.insert(key, idx);
+        }
+
         Ok(DexIndexPools {
             strings,
             string_index,
@@ -1480,6 +1552,8 @@ impl DexPoolBuilder {
             field_index: field_index_map,
             methods,
             method_index: method_index_map,
+            method_handles,
+            method_handle_index,
             annotation_elements: self.annotation_elements,
         })
     }
@@ -1706,6 +1780,27 @@ impl DexPoolBuilder {
                     parse_enum_literal_components(v)
                 {
                     self.register_enum_reference(&class_desc, &field_name, &field_type);
+                } else if let Some(handle_key) = parse_method_handle_literal_unquoted(v) {
+                    self.register_method_handle(handle_key);
+                } else if let Some(signature) = parse_method_type_literal_unquoted(v) {
+                    self.collect_method_type_signature(&signature);
+                } else if let Some((class_desc, name, signature)) = parse_method_literal_components(v)
+                {
+                    let method = MethodRef {
+                        class: class_desc,
+                        name,
+                        descriptor: signature.to_jni(),
+                    };
+                    self.collect_method_ref(&method);
+                } else if let Some((class_desc, name, field_type)) =
+                    parse_field_literal_components(v)
+                {
+                    let field = FieldRef {
+                        class: class_desc,
+                        name,
+                        descriptor: field_type,
+                    };
+                    self.collect_field_ref(&field);
                 } else if let Some(parsed) = parse_smali_string_literal(v) {
                     self.strings.insert(parsed);
                 } else {
@@ -1721,6 +1816,34 @@ impl DexPoolBuilder {
                         parse_enum_literal_components(v)
                     {
                         self.register_enum_reference(&class_desc, &field_name, &field_type);
+                        continue;
+                    }
+                    if let Some(handle_key) = parse_method_handle_literal_unquoted(v) {
+                        self.register_method_handle(handle_key);
+                        continue;
+                    }
+                    if let Some(signature) = parse_method_type_literal_unquoted(v) {
+                        self.collect_method_type_signature(&signature);
+                        continue;
+                    }
+                    if let Some((class_desc, name, signature)) = parse_method_literal_components(v) {
+                        let method = MethodRef {
+                            class: class_desc,
+                            name,
+                            descriptor: signature.to_jni(),
+                        };
+                        self.collect_method_ref(&method);
+                        continue;
+                    }
+                    if let Some((class_desc, name, field_type)) =
+                        parse_field_literal_components(v)
+                    {
+                        let field = FieldRef {
+                            class: class_desc,
+                            name,
+                            descriptor: field_type,
+                        };
+                        self.collect_field_ref(&field);
                         continue;
                     }
                     if let Some(parsed) = parse_smali_string_literal(v) {
@@ -1742,12 +1865,39 @@ impl DexPoolBuilder {
     }
 
     fn collect_method_handle_literal(&mut self, literal: &str) {
-        if let Some(parsed) = parse_method_handle_descriptor(literal) {
+        if let Some(key) = parse_method_handle_literal(literal) {
+            self.register_method_handle(key);
+        } else if let Some(parsed) = parse_method_handle_descriptor(literal) {
             match parsed {
                 ParsedMemberRef::Method(method) => self.collect_parsed_method(&method),
                 ParsedMemberRef::Field(field) => self.collect_parsed_field(&field),
             }
         }
+    }
+
+    fn collect_method_type_signature(&mut self, signature: &MethodSignature) {
+        let proto_key = PrototypeKey::from_signature(signature);
+        self.register_proto_components(&proto_key);
+        self.proto_keys.insert(proto_key);
+    }
+
+    fn register_method_handle(&mut self, key: MethodHandleKey) {
+        match &key.target {
+            MethodHandleTarget::Field(field_key) => {
+                self.insert_type_descriptor(field_key.class_descriptor());
+                self.insert_type_descriptor(field_key.type_descriptor());
+                self.strings.insert(field_key.name());
+                self.field_keys.insert(field_key.clone());
+            }
+            MethodHandleTarget::Method(method_key) => {
+                self.insert_type_descriptor(method_key.class_descriptor());
+                self.strings.insert(method_key.name());
+                self.register_proto_components(method_key.prototype());
+                self.proto_keys.insert(method_key.prototype().clone());
+                self.insert_method_key(method_key.clone());
+            }
+        }
+        self.method_handle_keys.insert(key);
     }
 
     fn collect_call_site_literal(&mut self, literal: &str) {
@@ -2042,6 +2192,18 @@ impl MethodKey {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+enum MethodHandleTarget {
+    Field(FieldKey),
+    Method(MethodKey),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+struct MethodHandleKey {
+    handle_type: u16,
+    target: MethodHandleTarget,
+}
+
 fn shorty_char(sig: &TypeSignature) -> char {
     match sig {
         TypeSignature::Void => 'V',
@@ -2130,6 +2292,89 @@ fn parse_method_handle_descriptor(literal: &str) -> Option<ParsedMemberRef> {
         }
     }
     None
+}
+
+fn parse_method_type_literal(literal: &str) -> Option<MethodSignature> {
+    let trimmed = literal.trim().trim_matches('"');
+    if !trimmed.starts_with('(') {
+        return None;
+    }
+    let (rest, signature) = parse_methodsignature(trimmed).ok()?;
+    if rest.trim().is_empty() {
+        Some(signature)
+    } else {
+        None
+    }
+}
+
+fn parse_method_type_literal_unquoted(literal: &str) -> Option<MethodSignature> {
+    let trimmed = literal.trim();
+    if trimmed.starts_with('"') && trimmed.ends_with('"') {
+        return None;
+    }
+    parse_method_type_literal(literal)
+}
+
+fn parse_method_handle_literal(literal: &str) -> Option<MethodHandleKey> {
+    const KINDS: [(&str, u16); 9] = [
+        ("static-put", 0x00),
+        ("static-get", 0x01),
+        ("instance-put", 0x02),
+        ("instance-get", 0x03),
+        ("invoke-static", 0x04),
+        ("invoke-instance", 0x05),
+        ("invoke-direct", 0x06),
+        ("invoke-constructor", 0x07),
+        ("invoke-interface", 0x08),
+    ];
+    let trimmed = literal.trim().trim_matches('"');
+    let mut handle_type = None;
+    let mut rest = trimmed;
+    for (name, kind) in KINDS {
+        if trimmed.starts_with(name) {
+            handle_type = Some(kind);
+            rest = trimmed[name.len()..].trim();
+            break;
+        }
+    }
+    let handle_type = handle_type?;
+    if let Some(at_pos) = rest.find('@') {
+        rest = rest[at_pos + 1..].trim();
+    }
+    if let Some(comma_pos) = rest.find(',') {
+        rest = rest[comma_pos + 1..].trim();
+    }
+    let member_start = rest.find('L').map(|pos| &rest[pos..])?;
+    let member = parse_member_ref_literal(member_start)?;
+    let target = match member {
+        ParsedMemberRef::Field(field) => {
+            if handle_type > 0x03 {
+                return None;
+            }
+            let key = FieldKey::new(field.class_desc, field.name, field.type_desc);
+            MethodHandleTarget::Field(key)
+        }
+        ParsedMemberRef::Method(method) => {
+            if handle_type <= 0x03 {
+                return None;
+            }
+            let proto_key = PrototypeKey::from_signature(&method.proto);
+            let key = MethodKey::new(method.class_desc, method.name, proto_key);
+            MethodHandleTarget::Method(key)
+        }
+    };
+    Some(MethodHandleKey {
+        handle_type,
+        target,
+    })
+}
+
+fn parse_method_handle_literal_unquoted(literal: &str) -> Option<MethodHandleKey> {
+    let trimmed = literal.trim();
+    if trimmed.starts_with('"') && trimmed.ends_with('"') {
+        return None;
+    }
+    parse_method_handle_literal(literal)
 }
 
 fn parse_call_site_descriptor(literal: &str) -> Option<CallSiteDescriptor> {
@@ -3037,6 +3282,30 @@ fn encode_annotation_literal(
             .ok_or_else(|| DexError::new("missing enum field index"))?;
         return Ok(EncodedValue::Enum(field_idx));
     }
+    if let Some(handle_key) = parse_method_handle_literal_unquoted(trimmed) {
+        let idx = pools
+            .method_handle_index(&handle_key)
+            .ok_or_else(|| DexError::new("missing method handle index"))?;
+        return Ok(EncodedValue::MethodHandle(idx));
+    }
+    if let Some(signature) = parse_method_type_literal_unquoted(trimmed) {
+        let idx = pools
+            .proto_index(&signature)
+            .ok_or_else(|| DexError::new("missing proto index for method type"))?;
+        return Ok(EncodedValue::MethodType(idx));
+    }
+    if let Some((class_desc, field_name, signature)) = parse_method_literal_components(trimmed) {
+        let method_idx = pools
+            .method_index(&class_desc, &field_name, &signature)
+            .ok_or_else(|| DexError::new("missing method index"))?;
+        return Ok(EncodedValue::Method(method_idx));
+    }
+    if let Some((class_desc, field_name, field_type)) = parse_field_literal_components(trimmed) {
+        let field_idx = pools
+            .field_index(&class_desc, &field_name, &field_type)
+            .ok_or_else(|| DexError::new("missing field index"))?;
+        return Ok(EncodedValue::Field(field_idx));
+    }
 
     let has_float_suffix = trimmed.ends_with('f') || trimmed.ends_with('F');
     let has_double_suffix = trimmed.ends_with('d') || trimmed.ends_with('D');
@@ -3110,6 +3379,44 @@ fn parse_enum_literal_components(literal: &str) -> Option<(String, String, Strin
         class_part.trim().to_string(),
         name_part.trim().to_string(),
         type_part.trim().to_string(),
+    ))
+}
+
+fn parse_method_literal_components(literal: &str) -> Option<(String, String, MethodSignature)> {
+    let trimmed = literal.trim();
+    let (class_part, remainder) = trimmed.split_once("->")?;
+    if !class_part.trim_start().starts_with('L') {
+        return None;
+    }
+    let open_paren = remainder.find('(')?;
+    let name_part = &remainder[..open_paren];
+    let descriptor_part = &remainder[open_paren..];
+    let (rest, signature) = parse_methodsignature(descriptor_part).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some((
+        class_part.trim().to_string(),
+        name_part.trim().to_string(),
+        signature,
+    ))
+}
+
+fn parse_field_literal_components(literal: &str) -> Option<(String, String, String)> {
+    let trimmed = literal.trim();
+    let (class_part, remainder) = trimmed.split_once("->")?;
+    if !class_part.trim_start().starts_with('L') {
+        return None;
+    }
+    let (name_part, descriptor_part) = remainder.split_once(':')?;
+    let (rest, type_sig) = parse_typesignature(descriptor_part.trim()).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some((
+        class_part.trim().to_string(),
+        name_part.trim().to_string(),
+        type_sig.to_jni(),
     ))
 }
 
@@ -3354,6 +3661,25 @@ fn literal_to_encoded_value(
             }
         }
         TypeSignature::Object(_) | TypeSignature::Array(_) => {
+            if let TypeSignature::Object(obj) = signature {
+                let desc = canonical_object_descriptor(obj);
+                if desc == "Ljava/lang/invoke/MethodType;" {
+                    if let Some(sig) = parse_method_type_literal_unquoted(trimmed) {
+                        let idx = pools
+                            .proto_index(&sig)
+                            .ok_or_else(|| DexError::new("missing proto index for method type"))?;
+                        return Ok(Some(EncodedValue::MethodType(idx)));
+                    }
+                }
+                if desc == "Ljava/lang/invoke/MethodHandle;" {
+                    if let Some(handle_key) = parse_method_handle_literal_unquoted(trimmed) {
+                        let idx = pools.method_handle_index(&handle_key).ok_or_else(|| {
+                            DexError::new("missing method handle index")
+                        })?;
+                        return Ok(Some(EncodedValue::MethodHandle(idx)));
+                    }
+                }
+            }
             if trimmed.eq_ignore_ascii_case("null") {
                 return Ok(Some(EncodedValue::Null));
             }
@@ -3738,6 +4064,29 @@ mod tests {
 .end method
 "#;
 
+    const ANNOTATION_LITERAL_CLASS: &str = r#"
+.class public Lcom/example/Outer;
+.super Ljava/lang/Object;
+
+.annotation system Ldalvik/annotation/EnclosingMethod;
+    value = Lcom/example/Outer;->doubleAdapter(Z)Lcom/google/gson/TypeAdapter;
+.end annotation
+
+.annotation system Lcom/example/HandleAnn;
+    value = invoke-static@Lcom/example/Outer;->doubleAdapter(Z)Lcom/google/gson/TypeAdapter;
+.end annotation
+
+.annotation system Lcom/example/TypeAnn;
+    value = (Z)Lcom/google/gson/TypeAdapter;
+.end annotation
+
+.method public doubleAdapter(Z)Lcom/google/gson/TypeAdapter;
+    .locals 1
+    const/4 v0, 0x0
+    return-object v0
+.end method
+"#;
+
     #[test]
     fn plans_annotation_offsets_and_chunks() {
         let class = SmaliClass::from_smali(ANNOTATED_CLASS).expect("parse class");
@@ -3769,6 +4118,22 @@ mod tests {
                 .iter()
                 .any(|k| matches!(k, DataChunkKind::AnnotationsDirectory))
         );
+    }
+
+    #[test]
+    fn roundtrips_annotation_method_and_field_literals() {
+        let class = SmaliClass::from_smali(ANNOTATION_LITERAL_CLASS).expect("parse class");
+        let dex = DexFile::from_smali(&[class]).expect("build dex");
+        let classes = dex.to_smali().expect("dex to smali");
+        assert_eq!(classes.len(), 1);
+        let smali = classes[0].to_smali();
+        assert!(smali.contains(
+            "Lcom/example/Outer;->doubleAdapter(Z)Lcom/google/gson/TypeAdapter;"
+        ));
+        assert!(smali.contains(
+            "invoke-static@Lcom/example/Outer;->doubleAdapter(Z)Lcom/google/gson/TypeAdapter;"
+        ));
+        assert!(smali.contains("value = (Z)Lcom/google/gson/TypeAdapter;"));
     }
 
     #[test]

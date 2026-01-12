@@ -30,6 +30,9 @@ pub const ENDIAN_CONSTANT: u32 = 0x12345678;
 pub const REVERSE_ENDIAN_CONSTANT: u32 = 0x78563412;
 pub const NO_INDEX: usize = 0xffffffff;
 
+const TYPE_CALL_SITE_ID_ITEM: u16 = 0x0007;
+const TYPE_METHOD_HANDLE_ITEM: u16 = 0x0008;
+
 /* Access flags */
 pub const ACC_PUBLIC: u32 = 0x1;
 pub const ACC_PRIVATE: u32 = 0x2;
@@ -926,14 +929,55 @@ impl ClassDefItem {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct CallSiteId {
     // The call_site_id_item struct
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct MethodHandle {
-    // The method_handle_item struct
+    pub handle_type: u16,
+    pub unused: u16,
+    pub field_or_method_id: u32,
+}
+
+impl MethodHandle {
+    pub fn read(bytes: &[u8], ix: &mut usize) -> Result<MethodHandle, DexError> {
+        Ok(MethodHandle {
+            handle_type: read_u2(bytes, ix)?,
+            unused: read_u2(bytes, ix)?,
+            field_or_method_id: read_u4(bytes, ix)?,
+        })
+    }
+
+    pub fn write(&self, bytes: &mut Vec<u8>) -> usize {
+        let mut c = 0;
+        c += write_u2(bytes, self.handle_type);
+        c += write_u2(bytes, self.unused);
+        c += write_u4(bytes, self.field_or_method_id);
+        c
+    }
+}
+
+#[derive(Debug)]
+struct MapItem {
+    type_code: u16,
+    size: u32,
+    offset: u32,
+}
+
+impl MapItem {
+    fn read(bytes: &[u8], ix: &mut usize) -> Result<MapItem, DexError> {
+        let type_code = read_u2(bytes, ix)?;
+        let _unused = read_u2(bytes, ix)?;
+        let size = read_u4(bytes, ix)?;
+        let offset = read_u4(bytes, ix)?;
+        Ok(MapItem {
+            type_code,
+            size,
+            offset,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -1024,7 +1068,36 @@ impl DexFile {
             dex.class_defs.push(ClassDefItem::read(bytes, ix)?);
         }
 
+        // Optional map list (for method handles / call sites in newer DEX versions)
+        if dex.header.map_off != 0 {
+            let map_items = DexFile::read_map_items(bytes, dex.header.map_off as usize)?;
+            for item in map_items {
+                if item.type_code == TYPE_METHOD_HANDLE_ITEM && item.size > 0 {
+                    let mut mh_ix = item.offset as usize;
+                    for _ in 0..item.size {
+                        dex.method_handles.push(MethodHandle::read(bytes, &mut mh_ix)?);
+                    }
+                }
+                if item.type_code == TYPE_CALL_SITE_ID_ITEM && item.size > 0 {
+                    dex.call_site_ids.resize(item.size as usize, CallSiteId {});
+                }
+            }
+        }
+
         Ok(dex)
+    }
+
+    fn read_map_items(bytes: &[u8], offset: usize) -> Result<Vec<MapItem>, DexError> {
+        if offset >= bytes.len() {
+            return Err(DexError::new("map offset out of bounds"));
+        }
+        let mut ix = offset;
+        let count = read_u4(bytes, &mut ix)? as usize;
+        let mut items = Vec::with_capacity(count);
+        for _ in 0..count {
+            items.push(MapItem::read(bytes, &mut ix)?);
+        }
+        Ok(items)
     }
 
     fn get_string(&self, id: StringId) -> Result<String, DexError> {
@@ -1111,6 +1184,57 @@ impl DexFile {
                     Ok(format!("{}->{}:{}", class_desc, name, ty_desc))
                 } else {
                     Ok(format!("enum@{}", field_idx))
+                }
+            }
+            EV::Field(field_idx) => {
+                if let Some(fi) = self.fields.get(*field_idx as usize) {
+                    let class_desc = self.type_desc(fi.class_idx)?;
+                    let name = self.get_string(fi.name_idx)?;
+                    let ty_desc = self.type_desc(fi.type_idx)?;
+                    Ok(format!("{}->{}:{}", class_desc, name, ty_desc))
+                } else {
+                    Ok(format!("field@{}", field_idx))
+                }
+            }
+            EV::Method(method_idx) => {
+                if let Some(mi) = self.methods.get(*method_idx as usize) {
+                    let class_desc = self.type_desc(mi.class_idx)?;
+                    let name = self.get_string(mi.name_idx)?;
+                    let proto = if mi.proto_idx < self.prototypes.len() {
+                        let proto = &self.prototypes[mi.proto_idx];
+                        let mut desc = String::from("(");
+                        for &t in &proto.parameters.0 {
+                            desc.push_str(&self.type_desc(t)?);
+                        }
+                        desc.push(')');
+                        desc.push_str(&self.type_desc(proto.return_type_idx)?);
+                        desc
+                    } else {
+                        String::from("()V")
+                    };
+                    Ok(format!("{}->{}{}", class_desc, name, proto))
+                } else {
+                    Ok(format!("method@{}", method_idx))
+                }
+            }
+            EV::MethodType(proto_idx) => {
+                if let Some(proto) = self.prototypes.get(*proto_idx as usize) {
+                    let mut desc = String::from("(");
+                    for &t in &proto.parameters.0 {
+                        desc.push_str(&self.type_desc(t)?);
+                    }
+                    desc.push(')');
+                    desc.push_str(&self.type_desc(proto.return_type_idx)?);
+                    Ok(desc)
+                } else {
+                    Ok(format!("proto@{}", proto_idx))
+                }
+            }
+            EV::MethodHandle(handle_idx) => {
+                if let Some(literal) = self.method_handle_literal(*handle_idx) {
+                    Ok(literal)
+                } else {
+                    Ok(format!("handle@{}", handle_idx))
                 }
             }
 
@@ -1228,6 +1352,47 @@ impl DexFile {
             annotation_type: ann_type,
             elements,
         })
+    }
+
+    fn method_handle_literal(&self, idx: u32) -> Option<String> {
+        let handle = self.method_handles.get(idx as usize)?;
+        let kind = match handle.handle_type {
+            0x00 => "static-put",
+            0x01 => "static-get",
+            0x02 => "instance-put",
+            0x03 => "instance-get",
+            0x04 => "invoke-static",
+            0x05 => "invoke-instance",
+            0x06 => "invoke-direct",
+            0x07 => "invoke-constructor",
+            0x08 => "invoke-interface",
+            _ => return None,
+        };
+        let member = if handle.handle_type <= 0x03 {
+            let field = self.fields.get(handle.field_or_method_id as usize)?;
+            let class_desc = self.type_desc(field.class_idx).ok()?;
+            let name = self.get_string(field.name_idx).ok()?;
+            let ty_desc = self.type_desc(field.type_idx).ok()?;
+            format!("{}->{}:{}", class_desc, name, ty_desc)
+        } else {
+            let method = self.methods.get(handle.field_or_method_id as usize)?;
+            let class_desc = self.type_desc(method.class_idx).ok()?;
+            let name = self.get_string(method.name_idx).ok()?;
+            let proto = if method.proto_idx < self.prototypes.len() {
+                let proto = &self.prototypes[method.proto_idx];
+                let mut desc = String::from("(");
+                for &t in &proto.parameters.0 {
+                    desc.push_str(&self.type_desc(t).ok()?);
+                }
+                desc.push(')');
+                desc.push_str(&self.type_desc(proto.return_type_idx).ok()?);
+                desc
+            } else {
+                String::from("()V")
+            };
+            format!("{}->{}{}", class_desc, name, proto)
+        };
+        Some(format!("{kind}@{member}"))
     }
 
     pub fn to_smali(&self) -> Result<Vec<SmaliClass>, DexError> {
@@ -1931,7 +2096,11 @@ impl RefResolver for DexRefResolver<'_> {
         format!("callsite@{}", idx)
     }
     fn method_handle(&self, idx: u32) -> String {
-        format!("handle@{}", idx)
+        if let Some(literal) = self.dex.method_handle_literal(idx) {
+            format!("\"{}\"", literal)
+        } else {
+            format!("handle@{}", idx)
+        }
     }
     fn proto(&self, idx: u32) -> String {
         self.proto_desc(idx as usize)

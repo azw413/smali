@@ -82,21 +82,23 @@ fn write_annotation(ann: &SmaliAnnotation, subannotation: bool, indented: bool) 
 fn write_param(param: &SmaliParam) -> String {
     let mut output = String::new();
 
-    // Handle only if annotations if present
+    if param.annotations.is_empty() && param.name.is_none() {
+        return output;
+    }
+
+    // Start the .param directive
+    output.push_str(".param ");
+    output.push_str(&param.register);
+
+    // Add name if present
+    if let Some(name) = &param.name {
+        output.push_str(", \"");
+        output.push_str(name);
+        output.push('"');
+    }
+
     if !param.annotations.is_empty() {
-        // Start the .param directive
-        output.push_str(".param ");
-        output.push_str(&param.register);
-
-        // Add name if present
-        if let Some(name) = &param.name {
-            output.push_str(", \"");
-            output.push_str(name);
-            output.push('"');
-        }
-
         output.push('\n');
-
         // Write each annotation
         for annotation in &param.annotations {
             output.push_str(&write_annotation(annotation, false, true));
@@ -132,7 +134,9 @@ pub(crate) fn write_method(method: &SmaliMethod) -> String {
         out.push_str(&write_annotation(a, false, true));
     }
 
-    if !method.ops.is_empty() {
+    if let Some(registers) = method.registers {
+        out.push_str(&format!("    .registers {registers}\n"));
+    } else if !method.ops.is_empty() {
         out.push_str(&format!("    .locals {:}\n", method.locals));
     }
 

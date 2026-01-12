@@ -29,23 +29,41 @@ pub mod types;
 pub fn find_smali_files(dir: &PathBuf) -> Result<Vec<SmaliClass>, SmaliError> {
     let mut results = vec![];
 
-    for p in dir.read_dir().unwrap() {
-        if let Ok(p) = p {
-            // Directory: recurse sub-directory
-            if let Ok(f) = p.file_type() {
-                if f.is_dir() {
-                    let mut new_dir = dir.clone();
-                    new_dir.push(p.file_name());
-                    let dir_hs = find_smali_files(&new_dir)?;
-                    results.extend(dir_hs);
-                } else {
-                    // It's a smali file
-                    if p.file_name().to_str().unwrap().ends_with(".smali") {
-                        let dex_file = SmaliClass::read_from_file(&p.path())?;
-                        results.push(dex_file);
-                    }
-                }
+    let entries = dir.read_dir().map_err(|e| {
+        SmaliError::new(&format!(
+            "Error reading directory {}: {e}",
+            dir.to_string_lossy()
+        ))
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            SmaliError::new(&format!(
+                "Error reading directory entry in {}: {e}",
+                dir.to_string_lossy()
+            ))
+        })?;
+        let file_type = entry.file_type().map_err(|e| {
+            SmaliError::new(&format!(
+                "Error reading file type for {}: {e}",
+                entry.path().to_string_lossy()
+            ))
+        })?;
+        if file_type.is_dir() {
+            let mut new_dir = dir.clone();
+            new_dir.push(entry.file_name());
+            let dir_hs = find_smali_files(&new_dir)?;
+            results.extend(dir_hs);
+        } else if let Some(name) = entry.file_name().to_str() {
+            if name.ends_with(".smali") {
+                let dex_file = SmaliClass::read_from_file(&entry.path())?;
+                results.push(dex_file);
             }
+        } else {
+            return Err(SmaliError::new(&format!(
+                "Non-UTF8 file name in {}",
+                entry.path().to_string_lossy()
+            )));
         }
     }
 

@@ -1807,7 +1807,7 @@ mod tests {
         let roundtrip_app = reparsed.application().expect("roundtrip app node");
         assert_eq!(original_app.attributes.len(), roundtrip_app.attributes.len());
 
-        let xml_text = fs::read_to_string("tests/rootbeer/AndroidManifest.xml")
+        let xml_text = fs::read_to_string("tests/RootbeerManifest.xml")
             .expect("read textual manifest");
         let text_manifest = AndroidManifest::from_string(&xml_text).expect("parse xml text");
         assert_eq!(
