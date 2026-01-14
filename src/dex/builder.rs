@@ -2,15 +2,16 @@ use crate::dex::annotations::AnnotationItem;
 use crate::dex::dex_file::{
     ClassDataItem, ClassDefItem, CodeItem, DBG_ADVANCE_LINE, DBG_ADVANCE_PC, DBG_END_LOCAL,
     DBG_END_SEQUENCE, DBG_FIRST_SPECIAL, DBG_LINE_BASE, DBG_LINE_RANGE, DBG_RESTART_LOCAL,
-    DBG_SET_EPILOGUE_BEGIN, DBG_SET_PROLOGUE_END, DBG_START_LOCAL, DBG_START_LOCAL_EXTENDED,
-    DEX_FILE_MAGIC, DebugInfo, DexString, ENDIAN_CONSTANT, EncodedCatchHandler, EncodedField,
-    EncodedMethod, EncodedTypeAddrPair, FieldItem, Header, MethodHandle, MethodItem, NO_INDEX,
-    PrototypeItem, TryItem, TypeList,
+    DBG_SET_EPILOGUE_BEGIN, DBG_SET_FILE, DBG_SET_PROLOGUE_END, DBG_START_LOCAL,
+    DBG_START_LOCAL_EXTENDED, DEX_FILE_MAGIC, DebugInfo, DexString, ENDIAN_CONSTANT,
+    EncodedCatchHandler, EncodedField, EncodedMethod, EncodedTypeAddrPair, FieldItem, Header,
+    MethodHandle, MethodItem, NO_INDEX, PrototypeItem, TryItem, TypeList,
 };
 use crate::dex::encoded_values::{
     AnnotationElement as DexAnnotationElement, EncodedAnnotation, EncodedValue, write_encoded_array,
 };
 use crate::dex::error::DexError;
+use crate::dex::leb::{decode_sleb128, decode_uleb128, decode_uleb128p1};
 use crate::dex::opcode_format::assemble::{
     AssemblerIndexResolver, DebugDirective, DebugDirectiveEvent, LineEvent, MethodAssembler,
     MethodAssemblyResult,
@@ -25,7 +26,7 @@ use crate::types::{
 };
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::convert::TryFrom;
 
 use adler::adler32_slice;
@@ -852,8 +853,9 @@ impl DexLayoutPlan {
     pub fn from_classes(classes: &[SmaliClass]) -> Result<Self, DexError> {
         let pools = DexIndexPools::from_classes(classes)?;
         let ids = pools.build_id_tables();
+        let order = topo_sort_class_indices(classes);
 
-        let mut class_defs = build_class_def_plans(classes, &pools)?;
+        let mut class_defs = build_class_def_plans_order(classes, &order, &pools)?;
         let mut class_plan_by_idx = HashMap::new();
         for (i, plan) in class_defs.iter().enumerate() {
             class_plan_by_idx.insert(plan.class_idx, i);
@@ -871,7 +873,8 @@ impl DexLayoutPlan {
         let mut annotation_jobs = Vec::new();
         let mut pending_class_data = Vec::new();
         let mut pending_code_assignments = Vec::new();
-        for (class_src_idx, class) in classes.iter().enumerate() {
+        for &class_src_idx in &order {
+            let class = &classes[class_src_idx];
             let class_idx = pools
                 .type_index(&class.name.as_jni_type())
                 .ok_or_else(|| DexError::new("missing type index for class"))?;
@@ -970,6 +973,21 @@ impl DexLayoutPlan {
         })
     }
 }
+
+pub(crate) fn debug_info_offsets_by_method(plan: &DexLayoutPlan) -> HashMap<usize, u32> {
+    let mut offsets = HashMap::new();
+    let base = plan.sections.data_off;
+    for chunk in plan.data_section.chunks() {
+        if chunk.kind != DataChunkKind::DebugInfo {
+            continue;
+        }
+        if let DataChunkOwner::DebugInfo { method_idx, .. } = chunk.owner {
+            offsets.insert(method_idx, base + chunk.offset);
+        }
+    }
+    offsets
+}
+
 
 fn emit_dex_file(plan: DexLayoutPlan) -> Result<Vec<u8>, DexError> {
     let mut data_bytes = plan.data_section.emit_bytes();
@@ -1962,13 +1980,15 @@ impl DexPoolBuilder {
     }
 }
 
-fn build_class_def_plans(
+fn build_class_def_plans_order(
     classes: &[SmaliClass],
+    order: &[usize],
     pools: &DexIndexPools,
 ) -> Result<Vec<ClassDefPlan>, DexError> {
     let mut plans = Vec::with_capacity(classes.len());
 
-    for class in classes {
+    for &idx in order {
+        let class = &classes[idx];
         let class_desc = class.name.as_jni_type();
         let class_idx = pools
             .type_index(&class_desc)
@@ -2021,6 +2041,72 @@ fn build_class_def_plans(
     }
 
     Ok(plans)
+}
+
+fn topo_sort_class_indices(classes: &[SmaliClass]) -> Vec<usize> {
+    let mut index_by_desc = HashMap::with_capacity(classes.len());
+    for (idx, class) in classes.iter().enumerate() {
+        index_by_desc.insert(class.name.as_jni_type(), idx);
+    }
+
+    let mut edges = vec![Vec::<usize>::new(); classes.len()];
+    let mut indegree = vec![0usize; classes.len()];
+
+    let mut add_edge = |from: usize, to: usize| {
+        if from == to {
+            return;
+        }
+        if edges[from].iter().any(|&existing| existing == to) {
+            return;
+        }
+        edges[from].push(to);
+        indegree[to] += 1;
+    };
+
+    for (idx, class) in classes.iter().enumerate() {
+        let super_desc = class.super_class.as_jni_type();
+        if let Some(&super_idx) = index_by_desc.get(&super_desc) {
+            add_edge(super_idx, idx);
+        }
+        for interface in &class.implements {
+            let interface_desc = interface.as_jni_type();
+            if let Some(&iface_idx) = index_by_desc.get(&interface_desc) {
+                add_edge(iface_idx, idx);
+            }
+        }
+    }
+
+    let mut queue = VecDeque::new();
+    for (idx, &deg) in indegree.iter().enumerate() {
+        if deg == 0 {
+            queue.push_back(idx);
+        }
+    }
+
+    let mut order = Vec::with_capacity(classes.len());
+    while let Some(idx) = queue.pop_front() {
+        order.push(idx);
+        for &child in &edges[idx] {
+            indegree[child] -= 1;
+            if indegree[child] == 0 {
+                queue.push_back(child);
+            }
+        }
+    }
+
+    if order.len() < classes.len() {
+        let mut seen = vec![false; classes.len()];
+        for &idx in &order {
+            seen[idx] = true;
+        }
+        for idx in 0..classes.len() {
+            if !seen[idx] {
+                order.push(idx);
+            }
+        }
+    }
+
+    order
 }
 
 fn type_idx_usize(pools: &DexIndexPools, desc: &str) -> Result<usize, DexError> {
@@ -2441,6 +2527,20 @@ fn align_to(value: u32, alignment: u32) -> u32 {
     (value + mask) & !mask
 }
 
+fn default_encoded_value(signature: &TypeSignature) -> EncodedValue {
+    match signature {
+        TypeSignature::Bool => EncodedValue::Boolean(false),
+        TypeSignature::Byte => EncodedValue::Byte(0),
+        TypeSignature::Short => EncodedValue::Short(0),
+        TypeSignature::Char => EncodedValue::Char(0),
+        TypeSignature::Int => EncodedValue::Int(0),
+        TypeSignature::Long => EncodedValue::Long(0),
+        TypeSignature::Float => EncodedValue::Float(0.0),
+        TypeSignature::Double => EncodedValue::Double(0.0),
+        _ => EncodedValue::Null,
+    }
+}
+
 fn ensure_len(buf: &mut Vec<u8>, target: usize) {
     if buf.len() > target {
         panic!("buffer advanced past target offset");
@@ -2459,7 +2559,7 @@ fn build_static_value_array(
     class: &SmaliClass,
     pools: &DexIndexPools,
 ) -> Result<Option<Vec<EncodedValue>>, DexError> {
-    let mut entries = Vec::new();
+    let mut entries: Vec<(u32, Option<EncodedValue>, TypeSignature)> = Vec::new();
     let class_desc = class.name.as_jni_type();
     for field in &class.fields {
         if !field
@@ -2470,20 +2570,49 @@ fn build_static_value_array(
             continue;
         }
         if let Some(init) = &field.initial_value {
-            if let Some(value) = literal_to_encoded_value(init, &field.signature, pools)? {
-                let field_type = canonical_type_descriptor(&field.signature);
-                let field_idx = pools
-                    .field_index(&class_desc, &field.name, &field_type)
-                    .ok_or_else(|| DexError::new("missing field index for static value"))?;
-                entries.push((field_idx, value));
-            }
+            let value = literal_to_encoded_value(init, &field.signature, pools)?.ok_or_else(|| {
+                DexError::new(&format!(
+                    "invalid static field initial value for {}->{}:{} = {}",
+                    class_desc,
+                    field.name,
+                    canonical_type_descriptor(&field.signature),
+                    init
+                ))
+            })?;
+            let field_type = canonical_type_descriptor(&field.signature);
+            let field_idx = pools
+                .field_index(&class_desc, &field.name, &field_type)
+                .ok_or_else(|| DexError::new("missing field index for static value"))?;
+            entries.push((field_idx, Some(value), field.signature.clone()));
+        } else {
+            let field_type = canonical_type_descriptor(&field.signature);
+            let field_idx = pools
+                .field_index(&class_desc, &field.name, &field_type)
+                .ok_or_else(|| DexError::new("missing field index for static value"))?;
+            entries.push((field_idx, None, field.signature.clone()));
         }
     }
     if entries.is_empty() {
         return Ok(None);
     }
-    entries.sort_by_key(|(idx, _)| *idx);
-    Ok(Some(entries.into_iter().map(|(_, value)| value).collect()))
+    entries.sort_by_key(|(idx, _, _)| *idx);
+
+    let last_with_value = entries
+        .iter()
+        .rposition(|(_, value, _)| value.is_some());
+    let Some(last_index) = last_with_value else {
+        return Ok(None);
+    };
+
+    let mut values = Vec::with_capacity(last_index + 1);
+    for (_, value, signature) in entries.into_iter().take(last_index + 1) {
+        if let Some(value) = value {
+            values.push(value);
+        } else {
+            values.push(default_encoded_value(&signature));
+        }
+    }
+    Ok(Some(values))
 }
 
 fn build_class_data_item(
@@ -2724,7 +2853,7 @@ fn assemble_concrete_method(
     let assembly = assembler.assemble_method(class_desc, method)?;
     let (tries, handlers) = build_try_items(method, &assembly.label_offsets, pools)?;
     let debug_info = if EMIT_DEBUG_INFO {
-        build_debug_info(method, pools, &assembly)?
+        build_debug_info(class_desc, method, pools, &assembly)?
     } else {
         None
     };
@@ -2853,6 +2982,7 @@ fn resolve_label_offset(
 }
 
 fn build_debug_info(
+    class_desc: &str,
     method: &SmaliMethod,
     pools: &DexIndexPools,
     assembly: &MethodAssemblyResult,
@@ -2897,12 +3027,190 @@ fn build_debug_info(
     }
 
     let debug_opcodes = encode_debug_opcodes(line_start, &line_events, &debug_events, pools)?;
+    validate_debug_opcodes(&debug_opcodes, pools, class_desc, method)?;
 
     Ok(Some(DebugInfo {
         line_start,
         parameter_names,
         debug_opcodes,
     }))
+}
+
+fn validate_debug_opcodes(
+    opcodes: &[u8],
+    pools: &DexIndexPools,
+    class_desc: &str,
+    method: &SmaliMethod,
+) -> Result<(), DexError> {
+    let method_sig = method.signature.to_jni();
+    let method_id = format!("{class_desc}->{}{}", method.name, method_sig);
+    let mut ix = 0usize;
+    while ix < opcodes.len() {
+        let opcode = opcodes[ix];
+        ix += 1;
+        match opcode {
+            DBG_END_SEQUENCE => return Ok(()),
+            DBG_ADVANCE_PC => {
+                read_uleb128_checked(opcodes, &mut ix, "advance_pc", &method_id)?;
+            }
+            DBG_ADVANCE_LINE => {
+                read_sleb128_checked(opcodes, &mut ix, "advance_line", &method_id)?;
+            }
+            DBG_START_LOCAL => {
+                read_uleb128_checked(opcodes, &mut ix, "start_local register", &method_id)?;
+                let name_idx =
+                    read_uleb128p1_checked(opcodes, &mut ix, "start_local name", &method_id)?;
+                validate_string_index(pools, name_idx, "local name", &method_id)?;
+                let type_idx =
+                    read_uleb128p1_checked(opcodes, &mut ix, "start_local type", &method_id)?;
+                validate_type_index(pools, type_idx, "local type", &method_id)?;
+            }
+            DBG_START_LOCAL_EXTENDED => {
+                read_uleb128_checked(opcodes, &mut ix, "start_local_ext register", &method_id)?;
+                let name_idx = read_uleb128p1_checked(
+                    opcodes,
+                    &mut ix,
+                    "start_local_ext name",
+                    &method_id,
+                )?;
+                validate_string_index(pools, name_idx, "local name", &method_id)?;
+                let type_idx = read_uleb128p1_checked(
+                    opcodes,
+                    &mut ix,
+                    "start_local_ext type",
+                    &method_id,
+                )?;
+                validate_type_index(pools, type_idx, "local type", &method_id)?;
+                let sig_idx = read_uleb128p1_checked(
+                    opcodes,
+                    &mut ix,
+                    "start_local_ext signature",
+                    &method_id,
+                )?;
+                validate_string_index(pools, sig_idx, "local signature", &method_id)?;
+            }
+            DBG_END_LOCAL | DBG_RESTART_LOCAL => {
+                read_uleb128_checked(opcodes, &mut ix, "local register", &method_id)?;
+            }
+            DBG_SET_PROLOGUE_END | DBG_SET_EPILOGUE_BEGIN => {}
+            DBG_SET_FILE => {
+                let idx = read_uleb128p1_checked(opcodes, &mut ix, "set_file", &method_id)?;
+                validate_string_index(pools, idx, "source file", &method_id)?;
+            }
+            other => {
+                if other >= DBG_FIRST_SPECIAL {
+                    // no payload
+                } else {
+                    return Err(DexError::new(&format!(
+                        "unknown debug opcode 0x{other:02x} in {method_id}"
+                    )));
+                }
+            }
+        }
+    }
+    // The writer always appends DBG_END_SEQUENCE, so allow missing terminator here.
+    Ok(())
+}
+
+fn read_uleb128_checked(
+    bytes: &[u8],
+    ix: &mut usize,
+    context: &str,
+    method_id: &str,
+) -> Result<u32, DexError> {
+    if *ix >= bytes.len() {
+        return Err(DexError::new(&format!(
+            "debug info truncated reading {context} in {method_id}"
+        )));
+    }
+    let (val, size) = decode_uleb128(&bytes[*ix..]);
+    if size == 0 || *ix + size > bytes.len() {
+        return Err(DexError::new(&format!(
+            "debug info invalid uleb128 for {context} in {method_id}"
+        )));
+    }
+    *ix += size;
+    Ok(val)
+}
+
+fn read_sleb128_checked(
+    bytes: &[u8],
+    ix: &mut usize,
+    context: &str,
+    method_id: &str,
+) -> Result<i32, DexError> {
+    if *ix >= bytes.len() {
+        return Err(DexError::new(&format!(
+            "debug info truncated reading {context} in {method_id}"
+        )));
+    }
+    let (val, size) = decode_sleb128(&bytes[*ix..]);
+    if size == 0 || *ix + size > bytes.len() {
+        return Err(DexError::new(&format!(
+            "debug info invalid sleb128 for {context} in {method_id}"
+        )));
+    }
+    *ix += size;
+    Ok(val)
+}
+
+fn read_uleb128p1_checked(
+    bytes: &[u8],
+    ix: &mut usize,
+    context: &str,
+    method_id: &str,
+) -> Result<i32, DexError> {
+    if *ix >= bytes.len() {
+        return Err(DexError::new(&format!(
+            "debug info truncated reading {context} in {method_id}"
+        )));
+    }
+    let (val, size) = decode_uleb128p1(&bytes[*ix..]);
+    if size == 0 || *ix + size > bytes.len() {
+        return Err(DexError::new(&format!(
+            "debug info invalid uleb128p1 for {context} in {method_id}"
+        )));
+    }
+    *ix += size;
+    Ok(val)
+}
+
+fn validate_string_index(
+    pools: &DexIndexPools,
+    idx: i32,
+    context: &str,
+    method_id: &str,
+) -> Result<(), DexError> {
+    if idx < 0 {
+        return Ok(());
+    }
+    let idx = idx as usize;
+    if idx >= pools.strings.len() {
+        return Err(DexError::new(&format!(
+            "debug info {context} index out of range in {method_id}: {idx} >= {}",
+            pools.strings.len()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_type_index(
+    pools: &DexIndexPools,
+    idx: i32,
+    context: &str,
+    method_id: &str,
+) -> Result<(), DexError> {
+    if idx < 0 {
+        return Ok(());
+    }
+    let idx = idx as usize;
+    if idx >= pools.types.len() {
+        return Err(DexError::new(&format!(
+            "debug info {context} index out of range in {method_id}: {idx} >= {}",
+            pools.types.len()
+        )));
+    }
+    Ok(())
 }
 
 fn encode_debug_position_opcodes(events: &[LineEvent]) -> Vec<u8> {
@@ -2926,9 +3234,7 @@ fn encode_debug_position_opcodes(events: &[LineEvent]) -> Vec<u8> {
         last_pc = event.offset_cu;
         last_line = event.line;
     }
-    if ops.last().copied() != Some(DBG_END_SEQUENCE) {
-        ops.push(DBG_END_SEQUENCE);
-    }
+    ops.push(DBG_END_SEQUENCE);
     ops
 }
 
@@ -3006,9 +3312,7 @@ fn encode_debug_opcodes(
         }
     }
 
-    if ops.last().copied() != Some(DBG_END_SEQUENCE) {
-        ops.push(DBG_END_SEQUENCE);
-    }
+    ops.push(DBG_END_SEQUENCE);
     Ok(ops)
 }
 
@@ -3746,7 +4050,11 @@ fn parse_double_literal(literal: &str) -> Option<f64> {
 }
 
 fn trim_numeric_literal_suffix(literal: &str) -> &str {
-    literal.trim_end_matches(|c: char| {
+    let trimmed = literal.trim();
+    if trimmed.starts_with("0x") || trimmed.starts_with("0X") {
+        return trimmed.trim_end_matches(|c: char| matches!(c, 't' | 'T' | 's' | 'S' | 'l' | 'L'));
+    }
+    trimmed.trim_end_matches(|c: char| {
         matches!(c, 't' | 'T' | 's' | 'S' | 'l' | 'L' | 'f' | 'F' | 'd' | 'D')
     })
 }
@@ -3800,6 +4108,14 @@ mod tests {
 
         let proto = &pools.protos[0];
         assert_eq!(proto.parameters.len(), 1);
+    }
+
+    #[test]
+    fn trim_numeric_literal_suffix_preserves_hex_digits() {
+        assert_eq!(trim_numeric_literal_suffix("0xd"), "0xd");
+        assert_eq!(trim_numeric_literal_suffix("0x1L"), "0x1");
+        assert_eq!(trim_numeric_literal_suffix("42d"), "42");
+        assert_eq!(trim_numeric_literal_suffix("17"), "17");
     }
 
     #[test]
@@ -4134,6 +4450,76 @@ mod tests {
             "invoke-static@Lcom/example/Outer;->doubleAdapter(Z)Lcom/google/gson/TypeAdapter;"
         ));
         assert!(smali.contains("value = (Z)Lcom/google/gson/TypeAdapter;"));
+    }
+
+    #[test]
+    fn orders_superclasses_before_subclasses() {
+        let parent = r#"
+.class public Lcom/example/Parent;
+.super Ljava/lang/Object;
+"#;
+        let child = r#"
+.class public Lcom/example/Child;
+.super Lcom/example/Parent;
+"#;
+        let parent_class = SmaliClass::from_smali(parent).expect("parse parent");
+        let child_class = SmaliClass::from_smali(child).expect("parse child");
+        let dex = DexFile::from_smali(&[child_class, parent_class]).expect("build dex");
+
+        let parent_idx = dex.class_defs[0].class_idx;
+        let child_idx = dex.class_defs[1].class_idx;
+        let parent_desc = dex.strings[dex.types[parent_idx]].to_string().expect("parent desc");
+        let child_desc = dex.strings[dex.types[child_idx]].to_string().expect("child desc");
+        assert_eq!(parent_desc, "Lcom/example/Parent;");
+        assert_eq!(child_desc, "Lcom/example/Child;");
+    }
+
+    #[test]
+    fn orders_interfaces_before_implementers() {
+        let iface = r#"
+.class public interface abstract Lcom/example/Marker;
+.super Ljava/lang/Object;
+"#;
+        let impl_class = r#"
+.class public Lcom/example/Impl;
+.super Ljava/lang/Object;
+.implements Lcom/example/Marker;
+"#;
+        let iface_class = SmaliClass::from_smali(iface).expect("parse interface");
+        let impl_class = SmaliClass::from_smali(impl_class).expect("parse class");
+        let dex = DexFile::from_smali(&[impl_class, iface_class]).expect("build dex");
+
+        let iface_idx = dex.class_defs[0].class_idx;
+        let impl_idx = dex.class_defs[1].class_idx;
+        let iface_desc = dex.strings[dex.types[iface_idx]].to_string().expect("iface desc");
+        let impl_desc = dex.strings[dex.types[impl_idx]].to_string().expect("impl desc");
+        assert_eq!(iface_desc, "Lcom/example/Marker;");
+        assert_eq!(impl_desc, "Lcom/example/Impl;");
+    }
+
+    #[test]
+    fn static_values_align_with_missing_initializers() {
+        let smali = r#"
+.class public Lcom/example/Statics;
+.super Ljava/lang/Object;
+
+.field public static A:Ljava/lang/String;
+.field public static M:I = 0x2
+.field public static Z:Z
+"#;
+        let class = SmaliClass::from_smali(smali).expect("parse class");
+        let dex = DexFile::from_smali(&[class]).expect("build dex");
+        let class_def = &dex.class_defs[0];
+        let values = class_def.static_values.as_ref().expect("static values");
+        assert_eq!(values.len(), 2);
+        match values[0] {
+            EncodedValue::Null => {}
+            _ => panic!("expected null default for A"),
+        }
+        match values[1] {
+            EncodedValue::Int(v) => assert_eq!(v, 2),
+            _ => panic!("expected int value for M"),
+        }
     }
 
     #[test]

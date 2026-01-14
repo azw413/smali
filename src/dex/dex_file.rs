@@ -6,6 +6,7 @@ use crate::dex::annotations::{
 use crate::dex::builder::build_dex_file_bytes;
 use crate::dex::encoded_values::{EncodedValue, read_encoded_array};
 use crate::dex::error::DexError;
+use crate::dex::leb::{decode_sleb128, decode_uleb128, decode_uleb128p1};
 use crate::dex::{
     read_sleb128, read_u1, read_u2, read_u4, read_uleb128, read_uleb128p1, read_x, write_sleb128,
     write_u1, write_u2, write_u4, write_uleb128, write_uleb128p1, write_x,
@@ -254,11 +255,102 @@ impl crate::dex::dex_file::DebugInfo {
         }
 
         c += write_x(bytes, &self.debug_opcodes);
-        if self.debug_opcodes.last().copied() != Some(DBG_END_SEQUENCE) {
+        if !debug_opcodes_terminated(&self.debug_opcodes) {
             c += write_u1(bytes, DBG_END_SEQUENCE);
         }
         c
     }
+}
+
+fn debug_opcodes_terminated(opcodes: &[u8]) -> bool {
+    let mut ix = 0usize;
+    while ix < opcodes.len() {
+        let opcode = opcodes[ix];
+        ix += 1;
+        match opcode {
+            DBG_END_SEQUENCE => return ix == opcodes.len(),
+            DBG_ADVANCE_PC => {
+                let (_, size) = decode_uleb128(&opcodes[ix..]);
+                if size == 0 || ix + size > opcodes.len() {
+                    return false;
+                }
+                ix += size;
+            }
+            DBG_ADVANCE_LINE => {
+                let (_, size) = decode_sleb128(&opcodes[ix..]);
+                if size == 0 || ix + size > opcodes.len() {
+                    return false;
+                }
+                ix += size;
+            }
+            DBG_START_LOCAL => {
+                if !skip_uleb128(opcodes, &mut ix) {
+                    return false;
+                }
+                if !skip_uleb128p1(opcodes, &mut ix) {
+                    return false;
+                }
+                if !skip_uleb128p1(opcodes, &mut ix) {
+                    return false;
+                }
+            }
+            DBG_START_LOCAL_EXTENDED => {
+                if !skip_uleb128(opcodes, &mut ix) {
+                    return false;
+                }
+                if !skip_uleb128p1(opcodes, &mut ix) {
+                    return false;
+                }
+                if !skip_uleb128p1(opcodes, &mut ix) {
+                    return false;
+                }
+                if !skip_uleb128p1(opcodes, &mut ix) {
+                    return false;
+                }
+            }
+            DBG_END_LOCAL | DBG_RESTART_LOCAL => {
+                if !skip_uleb128(opcodes, &mut ix) {
+                    return false;
+                }
+            }
+            DBG_SET_PROLOGUE_END | DBG_SET_EPILOGUE_BEGIN => {}
+            DBG_SET_FILE => {
+                if !skip_uleb128p1(opcodes, &mut ix) {
+                    return false;
+                }
+            }
+            other => {
+                if other < DBG_FIRST_SPECIAL {
+                    return false;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn skip_uleb128(bytes: &[u8], ix: &mut usize) -> bool {
+    if *ix >= bytes.len() {
+        return false;
+    }
+    let (_, size) = decode_uleb128(&bytes[*ix..]);
+    if size == 0 || *ix + size > bytes.len() {
+        return false;
+    }
+    *ix += size;
+    true
+}
+
+fn skip_uleb128p1(bytes: &[u8], ix: &mut usize) -> bool {
+    if *ix >= bytes.len() {
+        return false;
+    }
+    let (_, size) = decode_uleb128p1(&bytes[*ix..]);
+    if size == 0 || *ix + size > bytes.len() {
+        return false;
+    }
+    *ix += size;
+    true
 }
 
 fn skip_debug_stream(bytes: &[u8], ix: &mut usize) -> Result<(), DexError> {
