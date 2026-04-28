@@ -46,7 +46,7 @@ fn process_dex(dex_file: &str) -> Result<(), Box<dyn Error>> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let text = format!("{}", sc.to_smali());
+        let text = sc.to_smali().to_string();
         fs::write(&path, text)?;
     }
 

@@ -677,7 +677,7 @@ pub struct SmaliField {
 
 impl fmt::Display for SmaliField {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", write_field(&self))
+        write!(f, "{}", write_field(self))
     }
 }
 
@@ -891,7 +891,7 @@ pub struct SmaliMethod {
 
 impl fmt::Display for SmaliMethod {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", write_method(&self))
+        write!(f, "{}", write_method(self))
     }
 }
 
@@ -946,7 +946,7 @@ impl Hash for SmaliClass {
 
 impl fmt::Display for SmaliClass {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", write_class(&self))
+        write!(f, "{}", write_class(self))
     }
 }
 

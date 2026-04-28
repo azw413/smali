@@ -18,17 +18,16 @@ use crate::types::{
     TryRange, TypeSignature,
 };
 use cesu8::to_java_cesu8;
-use log::{error, info, warn};
+use log::{error, warn};
 
 use crate::dex::opcode_format::{RefResolver, RegMapper, decode_with_ctx_with_labels};
-use crate::smali_ops::Label;
+use crate::smali_ops::{Label, SmaliRegister};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 /* Constants */
 pub const DEX_FILE_MAGIC: [u8; 8] = [0x64, 0x65, 0x78, 0x0a, 0x30, 0x33, 0x39, 0x00];
 pub const ENDIAN_CONSTANT: u32 = 0x12345678;
-pub const REVERSE_ENDIAN_CONSTANT: u32 = 0x78563412;
 pub const NO_INDEX: usize = 0xffffffff;
 
 const TYPE_CALL_SITE_ID_ITEM: u16 = 0x0007;
@@ -329,6 +328,12 @@ fn debug_opcodes_terminated(opcodes: &[u8]) -> bool {
     false
 }
 
+#[derive(Debug)]
+struct DebugOpEvent {
+    offset_cu: u32,
+    op: SmaliOp,
+}
+
 fn skip_uleb128(bytes: &[u8], ix: &mut usize) -> bool {
     if *ix >= bytes.len() {
         return false;
@@ -508,10 +513,8 @@ pub struct CodeItem {
     registers_size: u16,
     args_in_size: u16,
     args_out_size: u16,
-    tries_size: u16,
     debug_info: Option<DebugInfo>,
     instructions: Vec<u16>,
-    padding: u16,
     // New: actual data for try blocks and catch handlers
     tries: Vec<TryItem>,
     handlers: Vec<EncodedCatchHandler>,
@@ -520,6 +523,21 @@ pub struct CodeItem {
 impl crate::dex::dex_file::CodeItem {
     pub fn debug_info(&self) -> Option<&DebugInfo> {
         self.debug_info.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn instructions(&self) -> &[u16] {
+        &self.instructions
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tries(&self) -> &[TryItem] {
+        &self.tries
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handlers(&self) -> &[EncodedCatchHandler] {
+        &self.handlers
     }
 
     pub fn new(
@@ -535,10 +553,8 @@ impl crate::dex::dex_file::CodeItem {
             registers_size,
             args_in_size,
             args_out_size,
-            tries_size: tries.len() as u16,
             debug_info,
             instructions,
-            padding: 0,
             tries,
             handlers,
         }
@@ -577,7 +593,7 @@ impl crate::dex::dex_file::CodeItem {
                 warn!(
                     "[codeitem] non-zero padding 0x{:04x} at 0x{:x} (code_item_start=0x{:x})",
                     padding,
-                    *ix as usize - 2,
+                    *ix - 2,
                     code_item_start
                 );
             }
@@ -672,10 +688,8 @@ impl crate::dex::dex_file::CodeItem {
             registers_size,
             args_in_size,
             args_out_size,
-            tries_size,
             debug_info,
             instructions,
-            padding,
             tries,
             handlers,
         })
@@ -762,17 +776,15 @@ impl crate::dex::dex_file::CodeItem {
             }
         }
 
-        if include_debug_info {
-            if let Some(di) = &self.debug_info {
-                let debug_info_start = bytes.len();
-                let absolute = code_item_base
-                    .checked_add((debug_info_start - start) as u32)
-                    .ok_or_else(|| DexError::new("debug_info offset overflow"))?;
-                let mut tmp = Vec::with_capacity(4);
-                write_u4(&mut tmp, absolute);
-                bytes[debug_off_pos..debug_off_pos + 4].copy_from_slice(&tmp);
-                c += di.write(bytes);
-            }
+        if include_debug_info && let Some(di) = &self.debug_info {
+            let debug_info_start = bytes.len();
+            let absolute = code_item_base
+                .checked_add((debug_info_start - start) as u32)
+                .ok_or_else(|| DexError::new("debug_info offset overflow"))?;
+            let mut tmp = Vec::with_capacity(4);
+            write_u4(&mut tmp, absolute);
+            bytes[debug_off_pos..debug_off_pos + 4].copy_from_slice(&tmp);
+            c += di.write(bytes);
         }
 
         Ok(c)
@@ -1212,6 +1224,190 @@ impl DexFile {
         self.strings[self.types[type_idx]].to_string()
     }
 
+    fn map_debug_register(
+        registers_size: u16,
+        ins_size: u16,
+        raw: u16,
+    ) -> SmaliRegister {
+        let params_base = registers_size.saturating_sub(ins_size);
+        if raw >= params_base {
+            SmaliRegister::Parameter(raw - params_base)
+        } else {
+            SmaliRegister::Local(raw)
+        }
+    }
+
+    fn decode_debug_info_ops(
+        &self,
+        debug_info: &DebugInfo,
+        registers_size: u16,
+        ins_size: u16,
+    ) -> Result<Vec<DebugOpEvent>, DexError> {
+        let mut events = Vec::new();
+        let mut ix = 0usize;
+        let mut addr: u32 = 0;
+        let mut line: i32 = debug_info.line_start as i32;
+        let opcodes = &debug_info.debug_opcodes;
+
+        while ix < opcodes.len() {
+            let opcode = opcodes[ix];
+            ix += 1;
+            match opcode {
+                DBG_END_SEQUENCE => break,
+                DBG_ADVANCE_PC => {
+                    let delta = read_uleb128(opcodes, &mut ix)?;
+                    addr = addr.saturating_add(delta);
+                }
+                DBG_ADVANCE_LINE => {
+                    let delta = read_sleb128(opcodes, &mut ix)?;
+                    line = line.saturating_add(delta);
+                }
+                DBG_START_LOCAL => {
+                    let reg = read_uleb128(opcodes, &mut ix)?;
+                    let name_idx = read_uleb128p1(opcodes, &mut ix)?;
+                    let type_idx = read_uleb128p1(opcodes, &mut ix)?;
+                    let reg = u16::try_from(reg)
+                        .map_err(|_| DexError::new("debug local register out of range"))?;
+                    let name = if name_idx < 0 {
+                        None
+                    } else {
+                        Some(self.get_string(name_idx as usize)?)
+                    };
+                    let descriptor = if type_idx < 0 {
+                        None
+                    } else {
+                        Some(self.type_desc(type_idx as usize)?)
+                    };
+                    events.push(DebugOpEvent {
+                        offset_cu: addr,
+                        op: SmaliOp::Local {
+                            register: Self::map_debug_register(registers_size, ins_size, reg),
+                            name,
+                            descriptor,
+                            signature: None,
+                        },
+                    });
+                }
+                DBG_START_LOCAL_EXTENDED => {
+                    let reg = read_uleb128(opcodes, &mut ix)?;
+                    let name_idx = read_uleb128p1(opcodes, &mut ix)?;
+                    let type_idx = read_uleb128p1(opcodes, &mut ix)?;
+                    let sig_idx = read_uleb128p1(opcodes, &mut ix)?;
+                    let reg = u16::try_from(reg)
+                        .map_err(|_| DexError::new("debug local register out of range"))?;
+                    let name = if name_idx < 0 {
+                        None
+                    } else {
+                        Some(self.get_string(name_idx as usize)?)
+                    };
+                    let descriptor = if type_idx < 0 {
+                        None
+                    } else {
+                        Some(self.type_desc(type_idx as usize)?)
+                    };
+                    let signature = if sig_idx < 0 {
+                        None
+                    } else {
+                        Some(self.get_string(sig_idx as usize)?)
+                    };
+                    events.push(DebugOpEvent {
+                        offset_cu: addr,
+                        op: SmaliOp::Local {
+                            register: Self::map_debug_register(registers_size, ins_size, reg),
+                            name,
+                            descriptor,
+                            signature,
+                        },
+                    });
+                }
+                DBG_END_LOCAL => {
+                    let reg = read_uleb128(opcodes, &mut ix)?;
+                    let reg = u16::try_from(reg)
+                        .map_err(|_| DexError::new("debug local register out of range"))?;
+                    events.push(DebugOpEvent {
+                        offset_cu: addr,
+                        op: SmaliOp::EndLocal {
+                            register: Self::map_debug_register(registers_size, ins_size, reg),
+                        },
+                    });
+                }
+                DBG_RESTART_LOCAL => {
+                    let reg = read_uleb128(opcodes, &mut ix)?;
+                    let reg = u16::try_from(reg)
+                        .map_err(|_| DexError::new("debug local register out of range"))?;
+                    events.push(DebugOpEvent {
+                        offset_cu: addr,
+                        op: SmaliOp::RestartLocal {
+                            register: Self::map_debug_register(registers_size, ins_size, reg),
+                        },
+                    });
+                }
+                DBG_SET_PROLOGUE_END => {
+                    events.push(DebugOpEvent {
+                        offset_cu: addr,
+                        op: SmaliOp::Prologue,
+                    });
+                }
+                DBG_SET_EPILOGUE_BEGIN => {
+                    events.push(DebugOpEvent {
+                        offset_cu: addr,
+                        op: SmaliOp::Epilogue,
+                    });
+                }
+                DBG_SET_FILE => {
+                    read_uleb128p1(opcodes, &mut ix)?;
+                }
+                other => {
+                    if other < DBG_FIRST_SPECIAL {
+                        return Err(DexError::new(&format!(
+                            "unknown debug opcode 0x{other:02x}"
+                        )));
+                    }
+                    let adj = other - DBG_FIRST_SPECIAL;
+                    let addr_inc = (adj / DBG_LINE_RANGE) as u32;
+                    let line_inc = DBG_LINE_BASE + (adj % DBG_LINE_RANGE) as i32;
+                    addr = addr.saturating_add(addr_inc);
+                    line = line.saturating_add(line_inc);
+                    let line_u32 = u32::try_from(line).unwrap_or(0);
+                    events.push(DebugOpEvent {
+                        offset_cu: addr,
+                        op: SmaliOp::Line(line_u32),
+                    });
+                }
+            }
+        }
+
+        Ok(events)
+    }
+
+    fn merge_debug_ops(
+        &self,
+        ops: Vec<SmaliOp>,
+        op_offsets: Vec<u32>,
+        debug_events: Vec<DebugOpEvent>,
+    ) -> Vec<SmaliOp> {
+        if ops.len() != op_offsets.len() {
+            return ops;
+        }
+        let mut merged = Vec::with_capacity(ops.len() + debug_events.len());
+        let mut debug_iter = debug_events.into_iter().peekable();
+        for (op, offset) in ops.into_iter().zip(op_offsets.into_iter()) {
+            while let Some(event) = debug_iter.peek() {
+                if event.offset_cu <= offset {
+                    let event = debug_iter.next().expect("event peeked");
+                    merged.push(event.op);
+                } else {
+                    break;
+                }
+            }
+            merged.push(op);
+        }
+        for event in debug_iter {
+            merged.push(event.op);
+        }
+        merged
+    }
+
     // Helper: read all AnnotationItem at a set offset
     fn read_annotation_set_items(&self, off: u32) -> Result<Vec<AnnotationItem>, DexError> {
         if off == 0 {
@@ -1273,7 +1469,7 @@ impl DexFile {
                     let class_desc = self.type_desc(fi.class_idx)?;
                     let name = self.get_string(fi.name_idx)?;
                     let ty_desc = self.type_desc(fi.type_idx)?;
-                    Ok(format!("{}->{}:{}", class_desc, name, ty_desc))
+                    Ok(format!(".enum {}->{}:{}", class_desc, name, ty_desc))
                 } else {
                     Ok(format!("enum@{}", field_idx))
                 }
@@ -1521,14 +1717,14 @@ impl DexFile {
             }
 
             // Class annotations
-            if let Some(dir) = &c.annotations {
-                if dir.class_annotations_off != 0 {
-                    let items = self.read_annotation_set_items(dir.class_annotations_off)?;
-                    smali.annotations = items
-                        .iter()
-                        .map(|it| self.convert_annotation(it))
-                        .collect::<Result<_, _>>()?;
-                }
+            if let Some(dir) = &c.annotations
+                && dir.class_annotations_off != 0
+            {
+                let items = self.read_annotation_set_items(dir.class_annotations_off)?;
+                smali.annotations = items
+                    .iter()
+                    .map(|it| self.convert_annotation(it))
+                    .collect::<Result<_, _>>()?;
             }
 
             if let Some(class_data) = &c.class_data {
@@ -1552,7 +1748,24 @@ impl DexFile {
 
                     smali.fields.push(SmaliField {
                         name: self.get_string(dex_field.name_idx)?,
-                        modifiers: Modifiers::from_u32(f.access_flags),
+                        modifiers: {
+                            let mut modifiers = Modifiers::from_u32(f.access_flags);
+                            modifiers.retain(|modif| {
+                                matches!(
+                                    modif,
+                                    Modifier::Public
+                                        | Modifier::Private
+                                        | Modifier::Protected
+                                        | Modifier::Static
+                                        | Modifier::Final
+                                        | Modifier::Volatile
+                                        | Modifier::Transient
+                                        | Modifier::Synthetic
+                                        | Modifier::Enum
+                                )
+                            });
+                            modifiers
+                        },
                         signature: TypeSignature::from_jni(
                             &self.get_string(self.types[dex_field.type_idx])?,
                         ),
@@ -1580,7 +1793,7 @@ impl DexFile {
                 }
 
                 // Instance fields
-                for (_i, f) in class_data.instance_fields.iter().enumerate() {
+                for f in &class_data.instance_fields {
                     let dex_field = &self.fields[f.field_idx];
 
                     let mut field_annotations = vec![];
@@ -1599,7 +1812,24 @@ impl DexFile {
 
                     smali.fields.push(SmaliField {
                         name: self.get_string(dex_field.name_idx)?,
-                        modifiers: Modifiers::from_u32(f.access_flags),
+                        modifiers: {
+                            let mut modifiers = Modifiers::from_u32(f.access_flags);
+                            modifiers.retain(|modif| {
+                                matches!(
+                                    modif,
+                                    Modifier::Public
+                                        | Modifier::Private
+                                        | Modifier::Protected
+                                        | Modifier::Static
+                                        | Modifier::Final
+                                        | Modifier::Volatile
+                                        | Modifier::Transient
+                                        | Modifier::Synthetic
+                                        | Modifier::Enum
+                                )
+                            });
+                            modifiers
+                        },
                         signature: TypeSignature::from_jni(
                             &self.get_string(self.types[dex_field.type_idx])?,
                         ),
@@ -1674,13 +1904,16 @@ impl DexFile {
 
                 let is_static = (m.access_flags & ACC_STATIC) != 0;
                 let mut params: Vec<SmaliParam> = Vec::with_capacity(proto.parameters.0.len());
-                for (i, _t) in proto.parameters.0.iter().enumerate() {
-                    let reg_name = format!("p{}", if is_static { i } else { i + 1 });
+                let mut next_param_reg: usize = if is_static { 0 } else { 1 };
+                for &t in &proto.parameters.0 {
+                    let reg_name = format!("p{next_param_reg}");
                     params.push(SmaliParam {
                         name: None,
                         register: reg_name,
                         annotations: vec![],
                     });
+                    let ty = self.get_string(self.types[t])?;
+                    next_param_reg += if ty == "J" || ty == "D" { 2 } else { 1 };
                 }
 
                 // Attach method annotations
@@ -1775,38 +2008,36 @@ impl DexFile {
                             forced_labels
                                 .entry(end as usize)
                                 .or_insert_with(|| format!(":try_end_{:x}", end));
-                            if let Some(handler_idx) = try_item.handler_idx {
-                                if let Some(handler) = ci.handlers.get(handler_idx) {
-                                    for pair in &handler.handlers {
-                                        forced_labels.entry(pair.addr as usize).or_insert_with(
-                                            || format!(":catch_{:x}", pair.addr),
-                                        );
-                                        let exception = self
-                                            .get_type(pair.type_idx)?
-                                            .as_jni_type();
-                                        catch_plans.push(CatchPlan {
-                                            start_off: start,
-                                            end_off: end,
-                                            kind: CatchPlanKind::Typed {
-                                                exception,
-                                                handler_off: pair.addr,
-                                            },
+                            if let Some(handler_idx) = try_item.handler_idx
+                                && let Some(handler) = ci.handlers.get(handler_idx)
+                            {
+                                for pair in &handler.handlers {
+                                    forced_labels.entry(pair.addr as usize).or_insert_with(
+                                        || format!(":catch_{:x}", pair.addr),
+                                    );
+                                    let exception = self.get_type(pair.type_idx)?.as_jni_type();
+                                    catch_plans.push(CatchPlan {
+                                        start_off: start,
+                                        end_off: end,
+                                        kind: CatchPlanKind::Typed {
+                                            exception,
+                                            handler_off: pair.addr,
+                                        },
+                                    });
+                                }
+                                if let Some(catch_all_addr) = handler.catch_all_addr {
+                                    forced_labels
+                                        .entry(catch_all_addr as usize)
+                                        .or_insert_with(|| {
+                                            format!(":catchall_{:x}", catch_all_addr)
                                         });
-                                    }
-                                    if let Some(catch_all_addr) = handler.catch_all_addr {
-                                        forced_labels
-                                            .entry(catch_all_addr as usize)
-                                            .or_insert_with(|| {
-                                                format!(":catchall_{:x}", catch_all_addr)
-                                            });
-                                        catch_plans.push(CatchPlan {
-                                            start_off: start,
-                                            end_off: end,
-                                            kind: CatchPlanKind::CatchAll {
-                                                handler_off: catch_all_addr,
-                                            },
-                                        });
-                                    }
+                                    catch_plans.push(CatchPlan {
+                                        start_off: start,
+                                        end_off: end,
+                                        kind: CatchPlanKind::CatchAll {
+                                            handler_off: catch_all_addr,
+                                        },
+                                    });
                                 }
                             }
                             continue;
@@ -1832,10 +2063,37 @@ impl DexFile {
                         )
                     })?;
                     let mut ops = decoded.ops;
+                    let op_offsets = decoded.op_offsets;
+                    if let Some(debug_info) = &ci.debug_info {
+                        for (idx, name_idx) in debug_info.parameter_names.iter().enumerate() {
+                            if idx >= params.len() {
+                                break;
+                            }
+                            if let Some(name_idx) = name_idx {
+                                params[idx].name = Some(self.get_string(*name_idx as usize)?);
+                            }
+                        }
+                        let debug_events = self
+                            .decode_debug_info_ops(
+                                debug_info,
+                                ci.registers_size,
+                                ci.args_in_size,
+                            )
+                            .map_err(|e| {
+                                DexError::with_context(
+                                    e,
+                                    format!(
+                                        "while decoding debug info {}->{}{}",
+                                        class_desc, name, sig
+                                    ),
+                                )
+                            })?;
+                        ops = self.merge_debug_ops(ops, op_offsets, debug_events);
+                    }
                     if !catch_plans.is_empty() {
                         let normalize_label = |name: &str| {
-                            if name.starts_with(':') {
-                                name[1..].to_string()
+                            if let Some(stripped) = name.strip_prefix(':') {
+                                stripped.to_string()
                             } else {
                                 name.to_string()
                             }
@@ -1899,6 +2157,25 @@ impl DexFile {
                 };
 
                 let mut modifiers = Modifiers::from_u32(m.access_flags);
+                modifiers.retain(|modif| {
+                    matches!(
+                        modif,
+                        Modifier::Public
+                            | Modifier::Private
+                            | Modifier::Protected
+                            | Modifier::Static
+                            | Modifier::Final
+                            | Modifier::Synchronized
+                            | Modifier::Bridge
+                            | Modifier::Varargs
+                            | Modifier::Native
+                            | Modifier::Abstract
+                            | Modifier::Strict
+                            | Modifier::Synthetic
+                            | Modifier::DeclaredSynchronized
+                            | Modifier::Constructor
+                    )
+                });
                 let constructor = modifiers
                     .iter()
                     .any(|modif| matches!(modif, Modifier::Constructor))
@@ -2015,8 +2292,8 @@ impl DexFile {
     }
 }
 
-struct DexRefResolver<'a> {
-    dex: &'a DexFile,
+pub(crate) struct DexRefResolver<'a> {
+    pub(crate) dex: &'a DexFile,
 }
 
 impl DexRefResolver<'_> {
@@ -2416,7 +2693,7 @@ mod tests {
         );
          */
 
-        let smali = dex.to_smali().expect("Failed to generate smali");
+        let _smali = dex.to_smali().expect("Failed to generate smali");
     }
     #[test]
     fn test_try_item_roundtrip() {
@@ -2601,14 +2878,12 @@ mod tests {
             registers_size: 2,
             args_in_size: 0,
             args_out_size: 0,
-            tries_size: 0,
             debug_info: Some(DebugInfo {
                 line_start: 1,
                 parameter_names: vec![],
                 debug_opcodes: vec![],
             }),
             instructions: vec![0x0001, 0x0002, 0x0003],
-            padding: 0,
             tries: vec![TryItem {
                 start_addr: 0,
                 insn_count: 1,

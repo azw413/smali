@@ -3,13 +3,14 @@
 //! A library for reading and writing Android smali files
 //!
 use crate::types::{SmaliClass, SmaliError};
-use std::path::PathBuf;
+use std::path::Path;
 
 pub mod android;
 pub mod dex;
 pub mod smali_ops;
 mod smali_parse;
 mod smali_write;
+#[cfg(test)]
 mod tests;
 pub mod types;
 
@@ -26,7 +27,7 @@ pub mod types;
 ///  let mut classes = find_smali_files(&p).unwrap();
 ///  println!("{:} smali classes loaded.", classes.len());
 /// ```
-pub fn find_smali_files(dir: &PathBuf) -> Result<Vec<SmaliClass>, SmaliError> {
+pub fn find_smali_files(dir: &Path) -> Result<Vec<SmaliClass>, SmaliError> {
     let mut results = vec![];
 
     let entries = dir.read_dir().map_err(|e| {
@@ -50,7 +51,7 @@ pub fn find_smali_files(dir: &PathBuf) -> Result<Vec<SmaliClass>, SmaliError> {
             ))
         })?;
         if file_type.is_dir() {
-            let mut new_dir = dir.clone();
+            let mut new_dir = dir.to_path_buf();
             new_dir.push(entry.file_name());
             let dir_hs = find_smali_files(&new_dir)?;
             results.extend(dir_hs);

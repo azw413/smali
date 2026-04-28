@@ -1,26 +1,5 @@
 use std::fmt;
 
-macro_rules! err {
-    ($base:ident, $msg:literal) => {
-        DexError::with_context($base, $msg)
-    };
-    ($base:ident, $fmtstr:literal, $($args:tt)*) => {
-        DexError::with_context($base, format!($fmtstr, $($args)*))
-    };
-    (($msg:literal), ($contextfmt:literal, $($contextargs:tt)*)) => {
-        DexError::with_context(DexError::new($msg), format!($contextfmt, $($contextargs)*))
-    };
-    (($fmtstr:literal, $($args:tt)*), ($contextfmt:literal, $($contextargs:tt)*)) => {
-        DexError::with_context(DexError::new(format!($fmtstr, $($args)*)), format!($contextfmt, $($contextargs)*))
-    };
-    ($msg:literal) => {
-        DexError::new($msg)
-    };
-    ($fmtstr:literal, $($args:tt)*) => {
-        DexError::new(format!($fmtstr, $($args)*))
-    };
-}
-
 #[macro_export]
 macro_rules! fail {
     ($msg:literal) => {

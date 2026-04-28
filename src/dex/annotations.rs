@@ -57,6 +57,7 @@ impl AnnotationSetItem {
         Ok(AnnotationSetItem { entries })
     }
 
+    #[cfg(test)]
     pub fn write(&self, bytes: &mut Vec<u8>) -> usize {
         let mut c = 0;
         c += write_u4(bytes, self.entries.len() as u32);
@@ -83,15 +84,6 @@ impl AnnotationSetRefList {
             list.push(read_u4(bytes, ix)?);
         }
         Ok(AnnotationSetRefList { list })
-    }
-
-    pub fn write(&self, bytes: &mut Vec<u8>) -> usize {
-        let mut c = 0;
-        c += write_u4(bytes, self.list.len() as u32);
-        for off in &self.list {
-            c += write_u4(bytes, *off);
-        }
-        c
     }
 }
 

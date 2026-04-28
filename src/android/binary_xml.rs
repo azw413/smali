@@ -472,7 +472,7 @@ fn write_utf16_string(buf: &mut Vec<u8>, text: &str) {
 }
 
 fn align_to_four(buf: &mut Vec<u8>) {
-    while buf.len() % 4 != 0 {
+    while !buf.len().is_multiple_of(4) {
         buf.push(0);
     }
 }
@@ -495,7 +495,7 @@ fn raw_value_text(value: &ManifestValue) -> Option<Cow<'_, str>> {
 
 fn manifest_value_to_text(value: &ManifestValue) -> String {
     raw_value_text(value)
-        .unwrap_or_else(|| Cow::Borrowed(""))
+        .unwrap_or(Cow::Borrowed(""))
         .into_owned()
 }
 
@@ -919,7 +919,7 @@ fn collect_element_strings(element: &ManifestElement, pool: &mut StringPoolBuild
 }
 
 fn attach_element(
-    stack: &mut Vec<ManifestElement>,
+    stack: &mut [ManifestElement],
     root: &mut Option<ManifestElement>,
     element: ManifestElement,
 ) -> BinaryXmlResult<()> {
@@ -1278,6 +1278,12 @@ impl PartialEq for AndroidManifest {
 }
 
 impl Eq for AndroidManifest {}
+
+impl Default for AndroidManifest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl AndroidManifest {
     /// Construct an empty manifest rooted at `<manifest>`.
@@ -1659,10 +1665,9 @@ impl AndroidManifest {
                                 None
                             }
                         })
+                    && let Some(current) = element_stack.last_mut()
                     {
-                        if let Some(current) = element_stack.last_mut() {
-                            current.text = Some(text);
-                        }
+                        current.text = Some(text);
                     }
                 }
                 _ => {

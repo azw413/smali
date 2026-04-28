@@ -311,10 +311,10 @@ fn dexdump_minimal_cases() {
     let filter = std::env::var("DEXDUMP_CASE").ok();
     let mut ran = false;
     for (name, smali) in CASES {
-        if let Some(target) = filter.as_deref() {
-            if *name != target {
-                continue;
-            }
+        if let Some(target) = filter.as_deref()
+            && *name != target
+        {
+            continue;
         }
         ran = true;
         run_case(name, smali);

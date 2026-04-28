@@ -121,7 +121,9 @@ pub mod assemble {
         SPARSE_SWITCH_SIGNATURE, opcode_by_name,
     };
     use crate::dex::error::DexError;
-    use crate::smali_ops::{FieldRef, MethodRef, RegisterRange, SmaliRegister};
+    use crate::smali_ops::{
+        FieldRef, MethodRef, RegisterRange, SmaliRegister, unescape_smali_string,
+    };
     use crate::types::{
         ArrayDataDirective, ArrayDataElement, DexOp, Label, MethodSignature, Modifier,
         PackedSwitchDirective, SmaliMethod, SmaliOp, SparseSwitchDirective, TypeSignature,
@@ -328,7 +330,7 @@ pub mod assemble {
                 );
             }
             let locals = if let Some(total_regs) = method.registers {
-                let total = total_regs as u32;
+                let total = total_regs;
                 if total < ins_size as u32 {
                     return Err(DexError::new(
                         ".registers count is smaller than parameter register requirement",
@@ -336,7 +338,7 @@ pub mod assemble {
                 }
                 total - ins_size as u32
             } else {
-                method.locals as u32
+                method.locals
             };
             if locals > u16::MAX as u32 {
                 return Err(DexError::new("method locals exceed register limit"));
@@ -473,7 +475,7 @@ pub mod assemble {
         }
 
         fn ensure_payload_alignment(&mut self, directive_name: &str) -> Result<(), DexError> {
-            if self.current_offset_cu % 2 != 0 {
+            if !self.current_offset_cu.is_multiple_of(2) {
                 let opcode = opcode_by_name("nop").ok_or_else(|| {
                     DexError::new(&format!("opcode nop not present for {}", directive_name))
                 })?;
@@ -737,7 +739,7 @@ pub mod assemble {
 
             match &self.kind {
                 LoweredKind::Format10x => {
-                    out.push(opcode_value as u16);
+                    out.push(opcode_value);
                 }
                 LoweredKind::Format11n { reg, literal } => {
                     if *reg > 0x0f {
@@ -751,57 +753,57 @@ pub mod assemble {
                             DexError::new("const/4 literal must be in signed 4-bit range").into(),
                         );
                     }
-                    let reg_bits = (reg & 0x0f) as u16;
+                    let reg_bits = reg & 0x0f;
                     let lit_bits = ((*literal as i16) & 0x0f) as u16;
                     let encoded =
-                        ((lit_bits & 0x0f) << 12) | ((reg_bits & 0x0f) << 8) | opcode_value as u16;
+                        ((lit_bits & 0x0f) << 12) | ((reg_bits & 0x0f) << 8) | opcode_value;
                     out.push(encoded);
                 }
                 LoweredKind::Format11x { reg } => {
-                    let encoded = ((*reg & 0x00ff) << 8) | opcode_value as u16;
+                    let encoded = ((*reg & 0x00ff) << 8) | opcode_value;
                     out.push(encoded);
                 }
                 LoweredKind::Format12x { dest, src } => {
-                    let encoded = (((*src & 0x0f) as u16) << 12)
-                        | (((*dest & 0x0f) as u16) << 8)
-                        | opcode_value as u16;
+                    let encoded = ((*src & 0x0f) << 12)
+                        | ((*dest & 0x0f) << 8)
+                        | opcode_value;
                     out.push(encoded);
                 }
                 LoweredKind::Format20bc { kind, index } => {
-                    let encoded = (((*kind as u16) & 0x00ff) << 8) | opcode_value as u16;
+                    let encoded = (((*kind as u16) & 0x00ff) << 8) | opcode_value;
                     out.push(encoded);
                     out.push(*index);
                 }
                 LoweredKind::Format21s { reg, literal } => {
-                    let encoded = (((*reg & 0x00ff) as u16) << 8) | opcode_value as u16;
+                    let encoded = ((*reg & 0x00ff) << 8) | opcode_value;
                     out.push(encoded);
                     out.push(*literal as u16);
                 }
                 LoweredKind::Format21ih { reg, literal } => {
-                    let encoded = (((*reg & 0x00ff) as u16) << 8) | opcode_value as u16;
+                    let encoded = ((*reg & 0x00ff) << 8) | opcode_value;
                     out.push(encoded);
                     out.push(*literal as u16);
                 }
                 LoweredKind::Format21lh { reg, literal } => {
-                    let encoded = (((*reg & 0x00ff) as u16) << 8) | opcode_value as u16;
+                    let encoded = ((*reg & 0x00ff) << 8) | opcode_value;
                     out.push(encoded);
                     out.push(*literal as u16);
                 }
                 LoweredKind::Format31i { reg, literal } => {
-                    let encoded = (((*reg & 0x00ff) as u16) << 8) | opcode_value as u16;
+                    let encoded = ((*reg & 0x00ff) << 8) | opcode_value;
                     out.push(encoded);
                     out.push((*literal & 0xffff) as u16);
                     out.push(((*literal >> 16) & 0xffff) as u16);
                 }
                 LoweredKind::Format31t { reg, label } => {
                     let delta = branch_delta(label, labels, self.offset_cu)?;
-                    let first = (((*reg & 0x00ff) as u16) << 8) | opcode_value as u16;
+                    let first = ((*reg & 0x00ff) << 8) | opcode_value;
                     out.push(first);
                     out.push((delta as u32 & 0xffff) as u16);
                     out.push(((delta as u32) >> 16) as u16);
                 }
                 LoweredKind::Format51l { reg, literal } => {
-                    let encoded = (((*reg & 0x00ff) as u16) << 8) | opcode_value as u16;
+                    let encoded = ((*reg & 0x00ff) << 8) | opcode_value;
                     out.push(encoded);
                     out.push((*literal & 0xffff) as u16);
                     out.push(((*literal >> 16) & 0xffff) as u16);
@@ -812,12 +814,12 @@ pub mod assemble {
                     if *index > u16::MAX as u32 {
                         return Err(DexError::new("reference index exceeds 16-bit range").into());
                     }
-                    let encoded = (((*reg & 0x00ff) as u16) << 8) | opcode_value as u16;
+                    let encoded = ((*reg & 0x00ff) << 8) | opcode_value;
                     out.push(encoded);
                     out.push(*index as u16);
                 }
                 LoweredKind::Format31c { reg, index } => {
-                    let encoded = (((*reg & 0x00ff) as u16) << 8) | opcode_value as u16;
+                    let encoded = ((*reg & 0x00ff) << 8) | opcode_value;
                     out.push(encoded);
                     out.push((*index & 0xffff) as u16);
                     out.push(((*index >> 16) & 0xffff) as u16);
@@ -829,7 +831,7 @@ pub mod assemble {
                             DexError::new("if-*z target offset exceeds 16-bit range").into()
                         );
                     }
-                    let encoded = (((*reg & 0x00ff) as u16) << 8) | opcode_value as u16;
+                    let encoded = ((*reg & 0x00ff) << 8) | opcode_value;
                     out.push(encoded);
                     out.push(delta as i16 as u16);
                 }
@@ -843,9 +845,9 @@ pub mod assemble {
                             DexError::new("field reference index exceeds 16-bit range").into()
                         );
                     }
-                    let encoded = (((*reg_b & 0x000f) as u16) << 12)
-                        | (((*reg_a & 0x000f) as u16) << 8)
-                        | opcode_value as u16;
+                    let encoded = ((*reg_b & 0x000f) << 12)
+                        | ((*reg_a & 0x000f) << 8)
+                        | opcode_value;
                     out.push(encoded);
                     out.push(*index as u16);
                 }
@@ -854,9 +856,9 @@ pub mod assemble {
                     reg_b,
                     index,
                 } => {
-                    let encoded = (((*reg_b & 0x000f) as u16) << 12)
-                        | (((*reg_a & 0x000f) as u16) << 8)
-                        | opcode_value as u16;
+                    let encoded = ((*reg_b & 0x000f) << 12)
+                        | ((*reg_a & 0x000f) << 8)
+                        | opcode_value;
                     out.push(encoded);
                     out.push(*index);
                 }
@@ -869,9 +871,9 @@ pub mod assemble {
                     if !(i16::MIN as i32..=i16::MAX as i32).contains(&delta) {
                         return Err(DexError::new("if-* target offset exceeds 16-bit range").into());
                     }
-                    let encoded = (((*reg_b & 0x000f) as u16) << 12)
-                        | (((*reg_a & 0x000f) as u16) << 8)
-                        | opcode_value as u16;
+                    let encoded = ((*reg_b & 0x000f) << 12)
+                        | ((*reg_a & 0x000f) << 8)
+                        | opcode_value;
                     out.push(encoded);
                     out.push(delta as i16 as u16);
                 }
@@ -879,32 +881,32 @@ pub mod assemble {
                     if *dest > u8::MAX as u16 || *src > u8::MAX as u16 {
                         return Err(DexError::new("22b register index exceeds 8-bit range").into());
                     }
-                    let first = (((*dest & 0x00ff) as u16) << 8) | opcode_value as u16;
+                    let first = ((*dest & 0x00ff) << 8) | opcode_value;
                     let second =
-                        (((*literal as i16) & 0x00ff) as u16) << 8 | ((*src & 0x00ff) as u16);
+                        (((*literal as i16) & 0x00ff) as u16) << 8 | (*src & 0x00ff);
                     out.push(first);
                     out.push(second);
                 }
                 LoweredKind::Format22s { dest, src, literal } => {
-                    let first = (((*src & 0x000f) as u16) << 12)
-                        | (((*dest & 0x000f) as u16) << 8)
-                        | opcode_value as u16;
+                    let first = ((*src & 0x000f) << 12)
+                        | ((*dest & 0x000f) << 8)
+                        | opcode_value;
                     out.push(first);
                     out.push(*literal as u16);
                 }
                 LoweredKind::Format22x { dest, src } => {
-                    let encoded = (((*dest & 0x00ff) as u16) << 8) | opcode_value as u16;
+                    let encoded = ((*dest & 0x00ff) << 8) | opcode_value;
                     out.push(encoded);
                     out.push(*src);
                 }
                 LoweredKind::Format32x { dest, src } => {
-                    out.push(opcode_value as u16);
+                    out.push(opcode_value);
                     out.push(*dest);
                     out.push(*src);
                 }
                 LoweredKind::Format23x { dest, src1, src2 } => {
-                    let first = (((*dest & 0x00ff) as u16) << 8) | opcode_value as u16;
-                    let second = (((*src2 & 0x00ff) as u16) << 8) | ((*src1 & 0x00ff) as u16);
+                    let first = ((*dest & 0x00ff) << 8) | opcode_value;
+                    let second = ((*src2 & 0x00ff) << 8) | (*src1 & 0x00ff);
                     out.push(first);
                     out.push(second);
                 }
@@ -917,7 +919,7 @@ pub mod assemble {
                     let (c, d, e, f, g) = unpack_invoke_regs(*count, regs);
                     let word0 = ((u16::from(*count) & 0x000f) << 12)
                         | ((g & 0x000f) << 8)
-                        | opcode_value as u16;
+                        | opcode_value;
                     let word1 = *index as u16;
                     let word2 = ((f & 0x000f) << 12)
                         | ((e & 0x000f) << 8)
@@ -931,7 +933,7 @@ pub mod assemble {
                     let (c, d, e, f, g) = unpack_invoke_regs(*count, regs);
                     let word0 = ((u16::from(*count) & 0x000f) << 12)
                         | ((g & 0x000f) << 8)
-                        | opcode_value as u16;
+                        | opcode_value;
                     let word1 = *index;
                     let word2 = ((f & 0x000f) << 12)
                         | ((e & 0x000f) << 8)
@@ -945,8 +947,8 @@ pub mod assemble {
                     let (c, d, e, f, g) = unpack_invoke_regs(*count, regs);
                     let word0 = ((u16::from(*count) & 0x000f) << 12)
                         | ((g & 0x000f) << 8)
-                        | opcode_value as u16;
-                    let word1 = *index as u16;
+                        | opcode_value;
+                    let word1 = *index;
                     let word2 = ((f & 0x000f) << 12)
                         | ((e & 0x000f) << 8)
                         | ((d & 0x000f) << 4)
@@ -968,7 +970,7 @@ pub mod assemble {
                     if *count > u8::MAX as u16 {
                         return Err(DexError::new("invoke/range count exceeds 8-bit range").into());
                     }
-                    out.push(((*count & 0x00ff) << 8) | opcode_value as u16);
+                    out.push(((*count & 0x00ff) << 8) | opcode_value);
                     out.push(*index as u16);
                     out.push(*first_reg);
                 }
@@ -977,7 +979,7 @@ pub mod assemble {
                     count,
                     index,
                 } => {
-                    out.push(((*count & 0x00ff) << 8) | opcode_value as u16);
+                    out.push(((*count & 0x00ff) << 8) | opcode_value);
                     out.push(*index);
                     out.push(*first_reg);
                 }
@@ -986,7 +988,7 @@ pub mod assemble {
                     count,
                     index,
                 } => {
-                    out.push(((*count & 0x00ff) << 8) | opcode_value as u16);
+                    out.push(((*count & 0x00ff) << 8) | opcode_value);
                     out.push(*index);
                     out.push(*first_reg);
                 }
@@ -1011,7 +1013,7 @@ pub mod assemble {
                     let (c, d, e, f, g) = unpack_invoke_regs(*count, regs);
                     let word0 = ((u16::from(*count) & 0x000f) << 12)
                         | ((g & 0x000f) << 8)
-                        | opcode_value as u16;
+                        | opcode_value;
                     let word1 = *index as u16;
                     let word2 = ((f & 0x000f) << 12)
                         | ((e & 0x000f) << 8)
@@ -1046,7 +1048,7 @@ pub mod assemble {
                         )
                         .into());
                     }
-                    out.push(((*count & 0x00ff) << 8) | opcode_value as u16);
+                    out.push(((*count & 0x00ff) << 8) | opcode_value);
                     out.push(*index as u16);
                     out.push(*first_reg);
                     out.push(*proto_index as u16);
@@ -1061,18 +1063,18 @@ pub mod assemble {
                                 return Err(InstructionEncodeError::BranchOutOfRange);
                             }
                             let imm = (delta as i8 as u8) as u16;
-                            let encoded = (imm << 8) | opcode_value as u16;
+                            let encoded = (imm << 8) | opcode_value;
                             out.push(encoded);
                         }
                         BranchEncoding::Format20t => {
                             if !(i16::MIN as i32..=i16::MAX as i32).contains(&delta) {
                                 return Err(InstructionEncodeError::BranchOutOfRange);
                             }
-                            out.push(opcode_value as u16);
+                            out.push(opcode_value);
                             out.push(delta as i16 as u16);
                         }
                         BranchEncoding::Format30t => {
-                            out.push(opcode_value as u16);
+                            out.push(opcode_value);
                             let lo = delta as i32 as u32 & 0xffff;
                             let hi = ((delta as i32 as u32) >> 16) & 0xffff;
                             out.push(lo as u16);
@@ -1143,7 +1145,7 @@ pub mod assemble {
             }
         }
 
-        if data_bytes.len() % 2 != 0 {
+        if !data_bytes.len().is_multiple_of(2) {
             data_bytes.push(0);
         }
         for chunk in data_bytes.chunks(2) {
@@ -1499,7 +1501,7 @@ pub mod assemble {
 
     fn parse_method_descriptor(descriptor: &str) -> Result<MethodSignature, DexError> {
         match parse_methodsignature(descriptor) {
-            Ok((rest, sig)) if rest.is_empty() => Ok(sig),
+            Ok(("", sig)) => Ok(sig),
             _ => Err(DexError::new(&format!(
                 "invalid method descriptor {}",
                 descriptor
@@ -1690,7 +1692,8 @@ pub mod assemble {
                     let opcode = opcode_by_name("const-string")
                         .ok_or_else(|| DexError::new("opcode const-string not present in table"))?;
                     let reg = ensure_reg8(resolve_register(layout, dest)?, "const-string dest")?;
-                    let index = self.resolver.string_index(value)?;
+                    let parsed = unescape_smali_string(value);
+                    let index = self.resolver.string_index(&parsed)?;
                     if index > u16::MAX as u32 {
                         let jumbo = opcode_by_name("const-string/jumbo").ok_or_else(|| {
                             DexError::new("opcode const-string/jumbo not present in table")
@@ -1711,7 +1714,8 @@ pub mod assemble {
                     })?;
                     let reg =
                         ensure_reg8(resolve_register(layout, dest)?, "const-string/jumbo dest")?;
-                    let index = self.resolver.string_index(value)?;
+                    let parsed = unescape_smali_string(value);
+                    let index = self.resolver.string_index(&parsed)?;
                     Ok(LoweredInstruction::new(
                         opcode,
                         LoweredKind::Format31c { reg, index },
@@ -3473,16 +3477,14 @@ impl Opcode {
         let mut art_version_to_value_map = RangeInclusiveMap::new();
 
         for vc in version_constraints.iter() {
-            if let Some(api_range) = &vc.api_range {
-                if !api_range.is_empty() {
+            if let Some(api_range) = &vc.api_range
+                && !api_range.is_empty() {
                     api_to_value_map.insert(api_range.clone(), vc.opcode_value);
                 }
-            }
-            if let Some(art_range) = &vc.art_version_range {
-                if !art_range.is_empty() {
+            if let Some(art_range) = &vc.art_version_range
+                && !art_range.is_empty() {
                     art_version_to_value_map.insert(art_range.clone(), vc.opcode_value);
                 }
-            }
         }
 
         Opcode {
@@ -3776,11 +3778,6 @@ fn u16_at(code: &[u16], pc: usize) -> u16 {
     code[pc]
 }
 #[inline]
-fn u16_at_opt(code: &[u16], pc: usize) -> Option<u16> {
-    code.get(pc).copied()
-}
-
-#[inline]
 fn require_cu(code: &[u16], pc: usize, need: usize, opname: &str) -> Result<(), DexError> {
     if pc + need > code.len() {
         return Err(DexError::new(&format!(
@@ -3885,7 +3882,7 @@ fn payload_len_cu(kind: PayloadKind, code: &[u16], pc: usize) -> Option<usize> {
             let size_hi = u16_at(code, pc + 3) as usize;
             let count = (size_hi << 16) | size_lo;
             let bytes_len = elem_width.checked_mul(count)?;
-            let data_cu = (bytes_len + 1) / 2; // ceil(bytes/2)
+            let data_cu = bytes_len.div_ceil(2); // ceil(bytes/2)
             Some(4 + data_cu)
         }
         PayloadKind::PackedSwitch => {
@@ -4176,7 +4173,7 @@ fn collect_labels_and_payloads(
                         opdef.name
                     );
                 }
-                if let Some(id) = code.get(tgt) {
+                if let Some(_id) = code.get(tgt) {
                     smali_trace!(
                         "[smali][collect][t] 31t payload ident at {} = 0x{:04x}",
                         tgt,
@@ -4195,7 +4192,7 @@ fn collect_labels_and_payloads(
                 } else {
                     (":sswitch_data_", PayloadKind::SparseSwitch)
                 };
-                let label = labels.entry(tgt).or_insert_with(|| {
+                let _label = labels.entry(tgt).or_insert_with(|| {
                     let idx = match kind {
                         PayloadKind::Array => {
                             let x = array_count;
@@ -4338,8 +4335,8 @@ fn parse_array_payload(code: &[u16], pc: usize) -> Result<(ArrayDataDirective, u
     let mut elements: Vec<ArrayDataElement> = Vec::with_capacity(count);
     match elem_width {
         1 => {
-            for i in 0..count {
-                elements.push(ArrayDataElement::Byte(bytes[i] as i8));
+            for &byte in bytes.iter().take(count) {
+                elements.push(ArrayDataElement::Byte(byte as i8));
             }
         }
         2 => {
@@ -4463,7 +4460,7 @@ fn parse_sparse_switch_payload(
         keys.push(((hi << 16) | lo) as i32);
     }
     // Read targets and pair with keys
-    for i in 0..size {
+    for (i, key) in keys.iter().enumerate().take(size) {
         let lo = u16_at(code, targets_start + i * 2) as u32;
         let hi = u16_at(code, targets_start + i * 2 + 1) as u32;
         let off = ((hi << 16) | lo) as i32;
@@ -4473,7 +4470,7 @@ fn parse_sparse_switch_payload(
             .cloned()
             .unwrap_or_else(|| format!(":sswitch_{:x}_{i}", case_pc));
         entries.push(SparseSwitchEntry {
-            key: keys[i],
+            key: *key,
             target: Label(canonical_label_name(&name)),
         });
     }
@@ -4567,7 +4564,10 @@ fn fmt_lit32_for(opname: &str, lit: i32) -> String {
 }
 
 // Global lazy cache for opcode maps keyed by (api, art_version)
-static OPCODE_MAP_CACHE: Lazy<Mutex<HashMap<(i32, i32), Arc<HashMap<u16, &'static Opcode>>>>> =
+type OpcodeMap = HashMap<u16, &'static Opcode>;
+type OpcodeMapCache = HashMap<(i32, i32), Arc<OpcodeMap>>;
+
+static OPCODE_MAP_CACHE: Lazy<Mutex<OpcodeMapCache>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 static OPCODE_NAME_MAP: Lazy<HashMap<&'static str, &'static Opcode>> = Lazy::new(|| {
@@ -5107,7 +5107,7 @@ fn format_instruction_line(
                 _ => format!("ref@{}", idx),
             };
             let mut regs = Vec::new();
-            for (_, r) in [c, d, e, f, g].into_iter().take(a as usize).enumerate() {
+            for r in [c, d, e, f, g].into_iter().take(a as usize) {
                 regs.push(fmt_reg(regmap, r as u16));
             }
             (
@@ -5126,7 +5126,7 @@ fn format_instruction_line(
             let d = ((inst2 >> 4) & 0x0f) as u8;
             let e = ((inst2 >> 8) & 0x0f) as u8;
             let f = ((inst2 >> 12) & 0x0f) as u8;
-            let idx = inst1 as u16;
+            let idx = inst1;
             let mut regs = Vec::new();
             for r in [c, d, e, f, g].into_iter().take(a as usize) {
                 regs.push(fmt_reg(regmap, r as u16));
@@ -5238,6 +5238,7 @@ fn format_instruction_line(
 
 pub struct DecodedMethod {
     pub ops: Vec<SmaliOp>,
+    pub op_offsets: Vec<u32>,
     pub label_offsets: HashMap<String, u32>,
 }
 
@@ -5279,6 +5280,7 @@ pub fn decode_with_ctx_with_labels(
     }
 
     let mut output: Vec<SmaliOp> = Vec::new();
+    let mut op_offsets: Vec<u32> = Vec::new();
     let mut pc: usize = 0;
     while pc < code.len() {
         if let Some(kind) = payloads.get(&pc).copied() {
@@ -5289,7 +5291,10 @@ pub fn decode_with_ctx_with_labels(
                 labelline.push('\n');
                 let parsed_label = parse_op(&labelline);
                 match parsed_label {
-                    Ok((_, op)) => output.push(op),
+                    Ok((_, op)) => {
+                        output.push(op);
+                        op_offsets.push(pc as u32);
+                    }
                     Err(e) => fail!("Error parsing label: {}, {}", labelline, e),
                 }
             }
@@ -5299,18 +5304,21 @@ pub fn decode_with_ctx_with_labels(
                 PayloadKind::Array => {
                     let (dir, consumed) = parse_array_payload(&code, pc)?;
                     output.push(SmaliOp::ArrayData(dir));
+                    op_offsets.push(pc as u32);
                     pc += consumed;
                     continue;
                 }
                 PayloadKind::PackedSwitch => {
                     let (dir, consumed) = parse_packed_switch_payload(&code, pc, base_pc, &labels)?;
                     output.push(SmaliOp::PackedSwitch(dir));
+                    op_offsets.push(pc as u32);
                     pc += consumed;
                     continue;
                 }
                 PayloadKind::SparseSwitch => {
                     let (dir, consumed) = parse_sparse_switch_payload(&code, pc, base_pc, &labels)?;
                     output.push(SmaliOp::SparseSwitch(dir));
+                    op_offsets.push(pc as u32);
                     pc += consumed;
                     continue;
                 }
@@ -5323,8 +5331,8 @@ pub fn decode_with_ctx_with_labels(
             let start = pc.saturating_sub(4);
             let end = (pc + 8).min(code.len());
             let mut hex = String::new();
-            for i in start..end {
-                hex.push_str(&format!("{:04x} ", code[i]));
+            for word in code.iter().take(end).skip(start) {
+                hex.push_str(&format!("{:04x} ", word));
             }
             // Heuristic guesses: maybe we started one/two code units late
             let mut guesses = String::new();
@@ -5340,8 +5348,8 @@ pub fn decode_with_ctx_with_labels(
                             back, gop.name, gopc, gop.format, sz
                         ));
                         let gend = (gpc + sz).min(code.len());
-                        for j in gpc..gend {
-                            guesses.push_str(&format!(" {:04x}", code[j]));
+                        for word in code.iter().take(gend).skip(gpc) {
+                            guesses.push_str(&format!(" {:04x}", word));
                         }
                         guesses.push_str(" | ");
                     } else {
@@ -5371,7 +5379,7 @@ pub fn decode_with_ctx_with_labels(
 
         // Ensure we have enough code units for this instruction before any further reads
         let mut need_cu = format_size_cu(opdef.format);
-        if need_cu <= 0 {
+        if need_cu == 0 {
             need_cu = 1;
         }
         // Quick-invoke fallback may read 3 code units even if format metadata disagrees
@@ -5496,7 +5504,10 @@ pub fn decode_with_ctx_with_labels(
             labelline.push('\n');
             let parsed_label = parse_op(&labelline);
             match parsed_label {
-                Ok((_, op)) => output.push(op),
+                Ok((_, op)) => {
+                    output.push(op);
+                    op_offsets.push(pc as u32);
+                }
                 Err(e) => fail!("Error parsing label: {}, {}", labelline, e),
             }
         }
@@ -5513,7 +5524,10 @@ pub fn decode_with_ctx_with_labels(
         line.push('\n');
         let parsed = parse_op(&line);
         match parsed {
-            Ok((_, op)) => output.push(op),
+            Ok((_, op)) => {
+                output.push(op);
+                op_offsets.push(pc as u32);
+            }
             Err(e) => fail!("Error parsing opcode: {}, {}", line, e),
         }
         pc += size_cu.max(1);
@@ -5525,6 +5539,7 @@ pub fn decode_with_ctx_with_labels(
     }
     Ok(DecodedMethod {
         ops: output,
+        op_offsets,
         label_offsets,
     })
 }

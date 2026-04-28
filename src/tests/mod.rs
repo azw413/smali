@@ -4,7 +4,7 @@ mod dexdump_cases;
 mod dex_debug;
 
 #[cfg(test)]
-mod tests {
+mod parser_tests {
     use crate::types::{MethodSignature, ObjectIdentifier, SmaliClass, TypeSignature};
     use std::path::Path;
 
@@ -36,7 +36,7 @@ mod tests {
         let smali = dex.to_smali();
 
         // Attempt to parse the output
-        let dex = SmaliClass::from_smali(&smali).unwrap();
+        let _dex = SmaliClass::from_smali(&smali).unwrap();
         //println!("{}\n", dex.to_smali());
     }
 

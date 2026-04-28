@@ -68,7 +68,7 @@ fn patch_dex_entry(apk: &mut ApkFile, entry_name: &str) -> Result<bool, Box<dyn 
             touched = true;
             for m in c.methods.iter_mut() {
                 if m.signature.result == TypeSignature::Bool && m.signature.args.is_empty() {
-                    let mut new_instructions = vec![
+                    let new_instructions = vec![
                         Op(DexOp::Const4 {
                             dest: v(0),
                             value: 0,
@@ -114,15 +114,15 @@ fn enable_manifest_debuggable(apk: &mut ApkFile) -> Result<(), Box<dyn Error>> {
 
 // Matches the known field / method signatures for the RootBeer.class (remember this could be renamed)
 fn is_rootbeer_class(c: &SmaliClass) -> bool {
-    if c.fields.len() == 2 && c.methods.len() == 25 {
-        if c.fields[0].signature == TypeSignature::Bool
-            && c.methods[1].signature.result == TypeSignature::Bool
-            && c.methods[4].signature.args.is_empty()
-            && c.methods[4].signature.result == TypeSignature::Bool
-        {
-            println!("Detected RootBeer class: {}", c.name.as_java_type());
-            return true;
-        }
+    if c.fields.len() == 2
+        && c.methods.len() == 25
+        && c.fields[0].signature == TypeSignature::Bool
+        && c.methods[1].signature.result == TypeSignature::Bool
+        && c.methods[4].signature.args.is_empty()
+        && c.methods[4].signature.result == TypeSignature::Bool
+    {
+        println!("Detected RootBeer class: {}", c.name.as_java_type());
+        return true;
     }
     false
 }

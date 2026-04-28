@@ -47,6 +47,7 @@ pub(crate) fn decode_uleb128(encoded: &[u8]) -> (u32, usize) {
     (value, count)
 }
 
+#[cfg(test)]
 pub(crate) fn encode_sleb128(value: i32) -> Vec<u8> {
     let mut result = Vec::new();
     let mut remaining = value;

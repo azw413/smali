@@ -2,7 +2,7 @@ use crate::types::{parse_methodsignature, parse_typesignature};
 use nom::Parser;
 use nom::bytes::complete::escaped;
 use nom::character::complete::{none_of, one_of};
-use nom::combinator::{map, opt};
+use nom::combinator::map;
 use nom::multi::separated_list0;
 use nom::sequence::pair;
 use nom::{
@@ -1172,10 +1172,10 @@ pub fn unescape_smali_string(value: &str) -> String {
                                 buf.push(hex);
                             }
                         }
-                        if let Ok(code) = u16::from_str_radix(&buf, 16) {
-                            if let Some(decoded) = char::from_u32(code as u32) {
-                                out.push(decoded);
-                            }
+                        if let Ok(code) = u16::from_str_radix(&buf, 16)
+                            && let Some(decoded) = char::from_u32(code as u32)
+                        {
+                            out.push(decoded);
                         }
                     }
                     _ => {

@@ -86,6 +86,12 @@ pub struct ApkFile {
     entries: BTreeMap<String, ApkEntry>,
 }
 
+impl Default for ApkFile {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ApkFile {
     pub fn new() -> Self {
         ApkFile {
@@ -139,10 +145,10 @@ impl ApkFile {
     /// Serialize the in-memory APK back to disk as a ZIP/APK file.
     pub fn write_to_file(&self, path: impl AsRef<Path>) -> ApkZipResult<()> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
         }
         let mut file_names: Vec<_> = self.entries.keys().cloned().collect();
         file_names.sort();
@@ -300,11 +306,11 @@ fn write_local_entry(
     write_u32(buf, crc32);
     write_u32(buf, compressed_bytes.len() as u32);
     write_u32(buf, entry.data.len() as u32);
-    write_u16(buf, name.as_bytes().len() as u16);
+    write_u16(buf, name.len() as u16);
     write_u16(buf, extra_len as u16);
     buf.extend_from_slice(name.as_bytes());
     if extra_len > 0 {
-        buf.extend(std::iter::repeat(0u8).take(extra_len as usize));
+        buf.extend(std::iter::repeat_n(0u8, extra_len as usize));
     }
     buf.extend_from_slice(&compressed_bytes);
 
@@ -331,7 +337,7 @@ fn write_directory_entry(buf: &mut Vec<u8>, name: &str) -> ApkZipResult<CentralD
     write_u32(buf, 0);
     write_u32(buf, 0);
     write_u32(buf, 0);
-    write_u16(buf, name.as_bytes().len() as u16);
+    write_u16(buf, name.len() as u16);
     write_u16(buf, 0);
     buf.extend_from_slice(name.as_bytes());
 

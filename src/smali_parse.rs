@@ -13,7 +13,7 @@ use nom::character::complete::{
 use nom::combinator::{opt, value};
 use nom::error::{Error, ErrorKind, ParseError};
 use nom::multi::{many0, many1, separated_list0};
-use nom::sequence::{delimited, pair, preceded, terminated};
+use nom::sequence::{delimited, pair, preceded};
 use nom::{IResult, Parser};
 
 pub fn ws<'a, O, E: ParseError<&'a str>, F>(inner: F) -> impl Parser<&'a str, Output = O, Error = E>
@@ -555,7 +555,7 @@ pub fn parse_param_block(input: &str) -> IResult<&str, SmaliParam> {
 
 pub fn parse_method(smali: &str) -> IResult<&str, SmaliMethod> {
     let (input, _) = tag(".method")(smali)?;
-    let (mut input, mut modifiers) = parse_modifiers(input)?;
+    let (input, mut modifiers) = parse_modifiers(input)?;
 
     // Constructors are represented both as a modifier token and a dedicated flag
     // on `SmaliMethod`. Capture the flag and drop the modifier so we do not
@@ -564,6 +564,15 @@ pub fn parse_method(smali: &str) -> IResult<&str, SmaliMethod> {
     if constructor {
         modifiers.retain(|m| !matches!(m, Modifier::Constructor));
     }
+
+    // Eat any whitespace between the directive/modifiers and the method name.
+    // For methods with at least one modifier this is already consumed by the
+    // trailing space in each modifier tag (`"public "`, `"private "`, ...),
+    // but a method with no access modifier (package-private) leaves the
+    // separator space intact and `take_while` would otherwise pull it into
+    // the parsed name, producing a name like " setImmersiveSticky" that
+    // never matches the runtime invoke-virtual lookup.
+    let (input, _) = multispace0.parse(input)?;
 
     let (o, name) = take_while(|c| c != '(').parse(input)?;
     let (o, ms) = parse_methodsignature(o)?;
@@ -694,12 +703,10 @@ pub fn parse_method(smali: &str) -> IResult<&str, SmaliMethod> {
         }
 
         // Try to parse operations if nothing else matches
-        if !found {
-            if let IResult::Ok((o, i)) = parse_op(input) {
-                method.ops.push(i);
-                input = o;
-                found = true;
-            }
+        if !found && let IResult::Ok((o, i)) = parse_op(input) {
+            method.ops.push(i);
+            input = o;
+            found = true;
         }
 
         // If nothing was parsed, show error with context
@@ -819,7 +826,7 @@ pub(crate) fn parse_class(smali: &str) -> IResult<&str, SmaliClass> {
 }
 
 fn strip_comment(line: &str) -> &str {
-    line.splitn(2, '#').next().map(str::trim).unwrap_or("")
+    line.split('#').next().map(str::trim).unwrap_or("")
 }
 
 fn parse_local_register(line: &str) -> Option<SmaliRegister> {
@@ -847,8 +854,8 @@ fn parse_local_directive(line: &str) -> Option<SmaliOp> {
     let (descriptor, rest) = parse_type_descriptor_segment(remaining);
     remaining = rest.trim_start();
 
-    let signature = if remaining.starts_with(',') {
-        let remaining_sig = remaining[1..].trim_start();
+    let signature = if let Some(stripped) = remaining.strip_prefix(',') {
+        let remaining_sig = stripped.trim_start();
         let (sig, rest) = parse_signature_segment(remaining_sig);
         let _ = rest;
         sig
@@ -878,7 +885,7 @@ fn parse_register_token(input: &str) -> Option<(SmaliRegister, &str)> {
     while trimmed[end..]
         .chars()
         .next()
-        .map_or(false, |ch| ch.is_ascii_digit())
+        .is_some_and(|ch| ch.is_ascii_digit())
     {
         end += 1;
         if end >= trimmed.len() {
@@ -900,10 +907,10 @@ fn parse_register_token(input: &str) -> Option<(SmaliRegister, &str)> {
 
 fn parse_local_name_segment(input: &str) -> (Option<String>, &str) {
     let trimmed = input.trim_start();
-    if trimmed.starts_with('"') {
-        if let Ok((rest, value)) = quoted::<Error<&str>>().parse(trimmed) {
-            return (Some(value.to_string()), rest);
-        }
+    if trimmed.starts_with('"')
+        && let Ok((rest, value)) = quoted::<Error<&str>>().parse(trimmed)
+    {
+        return (Some(value.to_string()), rest);
     }
     let mut end = trimmed.len();
     for (idx, ch) in trimmed.char_indices() {
@@ -934,10 +941,10 @@ fn parse_type_descriptor_segment(input: &str) -> (Option<String>, &str) {
 
 fn parse_signature_segment(input: &str) -> (Option<String>, &str) {
     let trimmed = input.trim_start();
-    if trimmed.starts_with('"') {
-        if let Ok((rest, value)) = quoted::<Error<&str>>().parse(trimmed) {
-            return (Some(value.to_string()), rest);
-        }
+    if trimmed.starts_with('"')
+        && let Ok((rest, value)) = quoted::<Error<&str>>().parse(trimmed)
+    {
+        return (Some(value.to_string()), rest);
     }
     (None, trimmed)
 }
@@ -1146,7 +1153,7 @@ mod tests {
                                     :pswitch_5
                                 .end packed-switch"#;
         let (_, ps) = parse_packed_switch(input).unwrap();
-        println!("{}", ps.to_string());
+        println!("{ps}");
     }
 
     #[test]
@@ -1166,6 +1173,25 @@ mod tests {
         assert_eq!(param.register, "p0");
         assert_eq!(param.name, Some("_this".to_string()));
         assert!(param.annotations.is_empty());
+    }
+
+    #[test]
+    fn test_method_with_no_access_modifier() {
+        // Package-private method (no access modifier in the source). The
+        // leading space between `.method` and the name must not be folded
+        // into the parsed name, otherwise the resulting DEX has a method
+        // whose name string is " setImmersiveSticky" and runtime
+        // invoke-virtual lookup of "setImmersiveSticky" never matches.
+        let smali = r#".method setImmersiveSticky()V
+    .locals 0
+    return-void
+.end method
+"#;
+        let (rem, method) = parse_method(smali).unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(method.name, "setImmersiveSticky");
+        assert_eq!(method.modifiers.len(), 0);
+        assert!(!method.constructor);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 mod tests {
 
     use crate::dex::error::DexError;
-    use crate::dex::opcode_format::assemble::{AssemblerIndexResolver, LineEvent, MethodAssembler};
+    use crate::dex::opcode_format::assemble::{AssemblerIndexResolver, MethodAssembler};
     use crate::dex::opcode_format::decode;
     use crate::smali_ops::{MethodRef, SmaliRegister};
     use crate::types::{DexOp, MethodSignature, SmaliClass, SmaliOp};
@@ -115,7 +115,7 @@ mod tests {
             2, 19, 0, 10, 1, 89, 33, 68, 26, 18, 17, 92, 33, 66, 26, 110, 16, 218, 47, 2, 0, 40,
             10, 18, 241, 89, 33, 68, 26, 18, 1, 92, 33, 66, 26, 110, 16, 219, 47, 2, 0, 17, 0,
         ];
-        let ops = decode(bc.as_slice(), 33, 0).unwrap();
+        let _ops = decode(bc.as_slice(), 33, 0).unwrap();
 
         //println!("{:?}", ops);
     }
@@ -125,7 +125,7 @@ mod tests {
         let bc: Vec<u8> = vec![
             84, 16, 75, 26, 112, 48, 253, 47, 33, 0, 111, 32, 245, 47, 33, 0, 12, 0, 17, 0,
         ];
-        let ops = decode(bc.as_slice(), 33, 0).unwrap();
+        let _ops = decode(bc.as_slice(), 33, 0).unwrap();
 
         //println!("{:?}", ops);
     }
@@ -1087,7 +1087,7 @@ mod tests {
 
         // Ensure the parser captured the full method proto descriptors.
         assert!(matches!(
-            method.ops.get(0),
+            method.ops.first(),
             Some(SmaliOp::Op(DexOp::InvokePolymorphic { proto, .. }))
                 if proto == "([Ljava/lang/Object;)V"
         ));
