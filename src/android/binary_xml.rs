@@ -17,7 +17,10 @@ const RES_XML_CDATA_TYPE: u16 = 0x0104;
 const NO_ENTRY_INDEX: u32 = 0xFFFF_FFFF;
 const STRING_FLAG_UTF8: u32 = 0x0000_0100;
 
-const ANDROID_NAMESPACE_URI: &str = "http://schemas.android.com/apk/res/android";
+/// The standard Android namespace URI used for system attributes
+/// (`android:name`, `android:value`, `android:enabled`, etc.). Stable
+/// across every Android version since 1.0.
+pub const ANDROID_NAMESPACE_URI: &str = "http://schemas.android.com/apk/res/android";
 
 const TYPE_NULL: u8 = 0x00;
 const TYPE_REFERENCE: u8 = 0x01;
@@ -1067,22 +1070,69 @@ fn write_element_recursive(
     element: &ManifestElement,
     buf: &mut Vec<u8>,
     pool: &StringPoolBuilder,
+    resource_map: &[u32],
 ) -> BinaryXmlResult<()> {
-    write_start_element(buf, element, pool)?;
+    write_start_element(buf, element, pool, resource_map)?;
     if let Some(text) = &element.text {
         write_cdata(buf, text, pool)?;
     }
     for child in &element.children {
-        write_element_recursive(child, buf, pool)?;
+        write_element_recursive(child, buf, pool, resource_map)?;
     }
     write_end_element(buf, element, pool)?;
     Ok(())
+}
+
+/// Resource_id an attribute would have when emitted: looks up the
+/// attribute's name in the string pool, then maps that pool index
+/// through the manifest's resource_map. Returns 0 when the attribute
+/// has no resource_id mapping (e.g. `package`, `xmlns:*`, custom
+/// attributes outside the system namespace).
+fn attribute_resource_id(
+    attr: &ManifestAttribute,
+    pool: &StringPoolBuilder,
+    resource_map: &[u32],
+) -> u32 {
+    pool.index_of(&attr.name)
+        .and_then(|name_idx| resource_map.get(name_idx as usize).copied())
+        .unwrap_or(0)
+}
+
+/// Compute the order in which attributes should be emitted. Android's
+/// `XmlBlock.Parser` performs a binary search on attribute resource_id
+/// when satisfying styleable lookups (e.g. the framework's
+/// `R.styleable.AndroidManifestActivity_name` query); the search
+/// silently misses every attribute past the first unsorted boundary,
+/// which surfaces during package install as "<activity> does not
+/// specify android:name" even when the attribute is plainly present.
+/// We therefore sort by ascending resource_id, with attributes that
+/// have no resource_id (resource_id == 0) appearing last — the same
+/// ordering aapt2 produces.
+fn sorted_attribute_indices(
+    attrs: &[ManifestAttribute],
+    pool: &StringPoolBuilder,
+    resource_map: &[u32],
+) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..attrs.len()).collect();
+    indices.sort_by_key(|&i| {
+        let rid = attribute_resource_id(&attrs[i], pool, resource_map);
+        // Tuple key: 0 = "has resource_id" group (sorted ascending by
+        // rid), 1 = "no resource_id" group (kept in original order via
+        // the secondary index `i`).
+        if rid == 0 {
+            (1u32, 0u32, i)
+        } else {
+            (0u32, rid, i)
+        }
+    });
+    indices
 }
 
 fn write_start_element(
     buf: &mut Vec<u8>,
     element: &ManifestElement,
     pool: &StringPoolBuilder,
+    resource_map: &[u32],
 ) -> BinaryXmlResult<()> {
     let chunk_start = begin_chunk(buf, RES_XML_START_ELEMENT_TYPE, 16);
     write_u32(buf, 0);
@@ -1105,8 +1155,9 @@ fn write_start_element(
     write_u16(buf, 0); // idIndex
     write_u16(buf, 0); // classIndex
     write_u16(buf, 0); // styleIndex
-    for attr in &element.attributes {
-        write_attribute(buf, attr, pool)?;
+    let order = sorted_attribute_indices(&element.attributes, pool, resource_map);
+    for &i in &order {
+        write_attribute(buf, &element.attributes[i], pool)?;
     }
     finalize_chunk(buf, chunk_start);
     Ok(())
@@ -1712,7 +1763,7 @@ impl AndroidManifest {
         for decl in &namespaces {
             write_namespace_chunk(&mut body, &pool_builder, decl, true)?;
         }
-        write_element_recursive(&self.root, &mut body, &pool_builder)?;
+        write_element_recursive(&self.root, &mut body, &pool_builder, &self.resource_map)?;
         for decl in namespaces.iter().rev() {
             write_namespace_chunk(&mut body, &pool_builder, decl, false)?;
         }
