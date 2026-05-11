@@ -232,6 +232,56 @@ impl ApkFile {
     pub fn remove_entry(&mut self, name: &str) -> bool {
         self.entries.remove(name).is_some()
     }
+
+    /// Replace the APK's DEX entries (`classes.dex`, `classes2.dex`, ...) with
+    /// the supplied byte payloads in order. Existing `classesN.dex` entries that
+    /// aren't overwritten by this call are removed, so the APK ends up with
+    /// exactly `dex_files.len()` DEX entries.
+    ///
+    /// Pass the output of [`crate::dex::builder::build_multi_dex_bytes`] directly.
+    pub fn set_dex_files(&mut self, dex_files: Vec<Vec<u8>>) -> ApkZipResult<()> {
+        // Drop any pre-existing classes*.dex entries so we don't leave stragglers.
+        let existing: Vec<String> = self
+            .entries
+            .keys()
+            .filter(|name| is_top_level_dex_name(name))
+            .cloned()
+            .collect();
+        for name in existing {
+            self.entries.remove(&name);
+        }
+
+        for (i, bytes) in dex_files.into_iter().enumerate() {
+            let name = if i == 0 {
+                "classes.dex".to_string()
+            } else {
+                format!("classes{}.dex", i + 1)
+            };
+            self.replace_entry(name, bytes)?;
+        }
+        Ok(())
+    }
+}
+
+/// Returns true if `name` is one of Android's top-level multidex entries
+/// (`classes.dex`, `classes2.dex`, `classes3.dex`, ...). Nested paths like
+/// `res/raw/classes.dex` and unrelated files are excluded.
+///
+/// Useful when iterating an APK to find the DEX files that the runtime
+/// classloader will actually load.
+pub fn is_top_level_dex_name(name: &str) -> bool {
+    if name.contains('/') {
+        return false;
+    }
+    if name == "classes.dex" {
+        return true;
+    }
+    if let Some(stripped) = name.strip_prefix("classes") {
+        if let Some(num) = stripped.strip_suffix(".dex") {
+            return !num.is_empty() && num.chars().all(|c| c.is_ascii_digit());
+        }
+    }
+    false
 }
 
 /// Convenience wrapper: unpack an APK onto disk.

@@ -1,11 +1,11 @@
 use crate::dex::annotations::AnnotationItem;
 use crate::dex::dex_file::{
-    ClassDataItem, ClassDefItem, CodeItem, DBG_ADVANCE_LINE, DBG_ADVANCE_PC, DBG_END_LOCAL,
-    DBG_END_SEQUENCE, DBG_FIRST_SPECIAL, DBG_LINE_BASE, DBG_LINE_RANGE, DBG_RESTART_LOCAL,
-    DBG_SET_EPILOGUE_BEGIN, DBG_SET_FILE, DBG_SET_PROLOGUE_END, DBG_START_LOCAL,
-    DBG_START_LOCAL_EXTENDED, DEX_FILE_MAGIC, DebugInfo, DexString, ENDIAN_CONSTANT,
-    EncodedCatchHandler, EncodedField, EncodedMethod, EncodedTypeAddrPair, FieldItem, Header,
-    MethodHandle, MethodItem, NO_INDEX, PrototypeItem, TryItem, TypeList,
+    CallSiteId, ClassDataItem, ClassDefItem, CodeItem, DBG_ADVANCE_LINE, DBG_ADVANCE_PC,
+    DBG_END_LOCAL, DBG_END_SEQUENCE, DBG_FIRST_SPECIAL, DBG_LINE_BASE, DBG_LINE_RANGE,
+    DBG_RESTART_LOCAL, DBG_SET_EPILOGUE_BEGIN, DBG_SET_FILE, DBG_SET_PROLOGUE_END,
+    DBG_START_LOCAL, DBG_START_LOCAL_EXTENDED, DEX_FILE_MAGIC, DebugInfo, DexString,
+    ENDIAN_CONSTANT, EncodedCatchHandler, EncodedField, EncodedMethod, EncodedTypeAddrPair,
+    FieldItem, Header, MethodHandle, MethodItem, NO_INDEX, PrototypeItem, TryItem, TypeList,
 };
 use crate::dex::encoded_values::{
     AnnotationElement as DexAnnotationElement, EncodedAnnotation, EncodedValue, write_encoded_array,
@@ -39,6 +39,7 @@ const TYPE_PROTO_ID_ITEM: u16 = 0x0003;
 const TYPE_FIELD_ID_ITEM: u16 = 0x0004;
 const TYPE_METHOD_ID_ITEM: u16 = 0x0005;
 const TYPE_CLASS_DEF_ITEM: u16 = 0x0006;
+const TYPE_CALL_SITE_ID_ITEM: u16 = 0x0007;
 const TYPE_METHOD_HANDLE_ITEM: u16 = 0x0008;
 const TYPE_CLASS_DATA_ITEM: u16 = 0x2000;
 const TYPE_MAP_LIST: u16 = 0x1000;
@@ -78,6 +79,9 @@ pub struct DexIndexPools {
 
     pub method_handles: Vec<MethodHandle>,
     method_handle_index: HashMap<MethodHandleKey, u32>,
+
+    pub call_sites: Vec<CallSiteId>,
+    call_site_index: HashMap<CallSiteKey, u32>,
 
     annotation_elements: HashMap<String, HashMap<String, TypeSignature>>,
 }
@@ -128,10 +132,10 @@ impl<'a> AssemblerIndexResolver for PoolIndexResolver<'a> {
             .ok_or_else(|| DexError::new("missing proto index"))
     }
 
-    fn call_site_index(&self, _name: &str) -> Result<u32, DexError> {
-        Err(DexError::new(
-            "call-site instructions are not supported in assembler yet",
-        ))
+    fn call_site_index(&self, literal: &str) -> Result<u32, DexError> {
+        self.pools
+            .call_site_index_by_literal(literal)
+            .ok_or_else(|| DexError::new("missing call site index"))
     }
 
     fn method_handle_index(&self, _literal: &str) -> Result<u32, DexError> {
@@ -164,12 +168,169 @@ pub struct DexLayoutPlan {
     pub string_data_offsets: Vec<u32>,
     pub proto_parameter_offsets: Vec<Option<u32>>,
     pub method_handle_offset: Option<u32>,
+    pub call_site_ids_offset: Option<u32>,
 }
 
 /// Build a binary DEX file from the provided classes, returning the serialized bytes.
+///
+/// This function emits exactly one DEX. If the input requires more than 65,536
+/// type, field, method or prototype references, assembly will fail. Use
+/// [`build_multi_dex_bytes`] to automatically split across `classes.dex`,
+/// `classes2.dex`, ... when that limit would be exceeded.
 pub fn build_dex_file_bytes(classes: &[SmaliClass]) -> Result<Vec<u8>, DexError> {
     let plan = DexLayoutPlan::from_classes(classes)?;
     emit_dex_file(plan)
+}
+
+/// Hard 16-bit reference cap for DEX index pools (methods, fields, types, protos).
+/// Strings can technically exceed this via `const-string/jumbo`, but we still cap
+/// them here so produced files stay compatible with all toolchains.
+pub const DEX_REF_LIMIT: usize = 0xFFFF + 1;
+
+/// Build one or more DEX files, splitting on overflow. Returns the bytes of each
+/// DEX in the order they should be packaged (`classes.dex`, `classes2.dex`, ...).
+///
+/// Splitting strategy:
+/// - Group classes into "families" by inheritance (a class shares a family with
+///   its superclass and any interfaces it implements that are also in the input).
+/// - Pack families greedily: try the next family in the current DEX; if any
+///   reference pool would exceed [`DEX_REF_LIMIT`], finalise the current DEX and
+///   put the family in a new one.
+/// - Families are tried in topological order (super before sub) so dependencies
+///   line up across DEXes when possible.
+///
+/// Errors if a single family alone exceeds the per-DEX limit, since splitting
+/// such a family would break its inheritance chain across DEXes.
+pub fn build_multi_dex_bytes(classes: &[SmaliClass]) -> Result<Vec<Vec<u8>>, DexError> {
+    build_multi_dex_bytes_with_limit(classes, DEX_REF_LIMIT)
+}
+
+/// Same as [`build_multi_dex_bytes`] but lets the caller (typically a test)
+/// override the per-DEX reference limit.
+pub fn build_multi_dex_bytes_with_limit(
+    classes: &[SmaliClass],
+    limit: usize,
+) -> Result<Vec<Vec<u8>>, DexError> {
+    if classes.is_empty() {
+        return Ok(vec![build_dex_file_bytes(classes)?]);
+    }
+
+    // Topological sort followed by family grouping. Families coalesce a class
+    // with its superclass/interfaces (when those are also in the input) via a
+    // simple union-find.
+    let order = topo_sort_class_indices(classes);
+    let families = group_into_families(classes, &order);
+
+    let mut dexes: Vec<Vec<usize>> = Vec::new();
+    let mut current_pool: Option<DexPoolBuilder> = None;
+    let mut current_classes: Vec<usize> = Vec::new();
+
+    for family in &families {
+        // Try the family in a clone of the current pool; commit on success.
+        let trial = current_pool.clone().unwrap_or_default();
+        let mut probe = trial;
+        for &class_idx in family {
+            probe.ingest_class(&classes[class_idx]);
+        }
+        if pool_within_limits(&probe, limit) {
+            current_pool = Some(probe);
+            current_classes.extend(family.iter().copied());
+            continue;
+        }
+
+        // Doesn't fit. Flush the current DEX (if any) and try the family alone.
+        if !current_classes.is_empty() {
+            dexes.push(std::mem::take(&mut current_classes));
+        }
+        let mut fresh = DexPoolBuilder::default();
+        for &class_idx in family {
+            fresh.ingest_class(&classes[class_idx]);
+        }
+        if !pool_within_limits(&fresh, limit) {
+            return Err(DexError::new(&format!(
+                "class family rooted at '{}' exceeds the {limit} reference limit on its own; \
+                 splitting would break inheritance",
+                classes[family[0]].name.as_jni_type()
+            )));
+        }
+        current_pool = Some(fresh);
+        current_classes = family.clone();
+    }
+    if !current_classes.is_empty() {
+        dexes.push(current_classes);
+    }
+
+    // Materialise each DEX from its class subset.
+    let mut out = Vec::with_capacity(dexes.len());
+    for class_indices in dexes {
+        let subset: Vec<SmaliClass> = class_indices
+            .into_iter()
+            .map(|i| classes[i].clone())
+            .collect();
+        out.push(build_dex_file_bytes(&subset)?);
+    }
+    Ok(out)
+}
+
+fn pool_within_limits(pool: &DexPoolBuilder, limit: usize) -> bool {
+    pool.type_descriptors.len() <= limit
+        && pool.proto_keys.len() <= limit
+        && pool.field_keys.len() <= limit
+        && pool.method_key_set.len() <= limit
+        && pool.strings.0.len() <= limit
+}
+
+/// Group classes into inheritance-related families. Classes that share a
+/// superclass or implemented interface (when that target is also in the input)
+/// land in the same family. The returned families are in dependency order:
+/// a family that contains a superclass appears before families that depend on it.
+fn group_into_families(classes: &[SmaliClass], order: &[usize]) -> Vec<Vec<usize>> {
+    let n = classes.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    fn union(parent: &mut [usize], a: usize, b: usize) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra != rb {
+            parent[ra] = rb;
+        }
+    }
+
+    let mut idx_by_desc: HashMap<String, usize> = HashMap::with_capacity(n);
+    for (i, c) in classes.iter().enumerate() {
+        idx_by_desc.insert(c.name.as_jni_type(), i);
+    }
+    for (i, c) in classes.iter().enumerate() {
+        let super_desc = c.super_class.as_jni_type();
+        if let Some(&j) = idx_by_desc.get(&super_desc) {
+            union(&mut parent, i, j);
+        }
+        for iface in &c.implements {
+            let iface_desc = iface.as_jni_type();
+            if let Some(&j) = idx_by_desc.get(&iface_desc) {
+                union(&mut parent, i, j);
+            }
+        }
+    }
+
+    // Group classes by root, preserving the topo-sorted order within each family.
+    let mut by_root: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut family_first_seen: HashMap<usize, usize> = HashMap::new();
+    for (rank, &class_idx) in order.iter().enumerate() {
+        let root = find(&mut parent, class_idx);
+        by_root.entry(root).or_default().push(class_idx);
+        family_first_seen.entry(root).or_insert(rank);
+    }
+    let mut families: Vec<(usize, Vec<usize>)> = by_root.into_iter().collect();
+    families.sort_by_key(|(root, _)| family_first_seen[root]);
+    families.into_iter().map(|(_, members)| members).collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -239,6 +400,7 @@ struct PendingCodeAssignment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DataChunkKind {
     MethodHandleIds,
+    CallSiteIds,
     StringData,
     TypeList,
     EncodedArray,
@@ -254,6 +416,8 @@ enum DataChunkKind {
 #[derive(Debug, Clone)]
 enum DataChunkOwner {
     MethodHandleIds,
+    CallSiteIds,
+    CallSiteItem(#[allow(dead_code)] usize),
     StringData(usize),
     ProtoParameters(usize),
     ClassInterfaces(usize),
@@ -431,6 +595,22 @@ impl DexIndexPools {
 
     fn method_handle_index(&self, key: &MethodHandleKey) -> Option<u32> {
         self.method_handle_index.get(key).copied()
+    }
+
+    fn call_site_index_by_literal(&self, literal: &str) -> Option<u32> {
+        let descriptor = parse_call_site_descriptor(literal)?;
+        let bootstrap_proto = PrototypeKey::from_signature(&descriptor.bootstrap.proto);
+        let bootstrap_method = MethodKey::new(
+            descriptor.bootstrap.class_desc,
+            descriptor.bootstrap.name,
+            bootstrap_proto,
+        );
+        let key = CallSiteKey {
+            bootstrap_method,
+            method_name: descriptor.method_name,
+            method_proto: PrototypeKey::from_signature(&descriptor.method_proto),
+        };
+        self.call_site_index.get(&key).copied()
     }
 
     fn annotation_element_type(
@@ -633,16 +813,17 @@ impl DataSectionBuilder {
     fn chunk_priority(kind: DataChunkKind) -> u32 {
         match kind {
             DataChunkKind::MethodHandleIds => 0,
-            DataChunkKind::StringData => 1,
-            DataChunkKind::TypeList => 2,
-            DataChunkKind::EncodedArray => 3,
-            DataChunkKind::AnnotationItem => 4,
-            DataChunkKind::AnnotationSetRefList => 5,
-            DataChunkKind::AnnotationSet => 6,
-            DataChunkKind::AnnotationsDirectory => 7,
-            DataChunkKind::CodeItem => 8,
-            DataChunkKind::DebugInfo => 9,
-            DataChunkKind::ClassData => 10,
+            DataChunkKind::CallSiteIds => 1,
+            DataChunkKind::StringData => 2,
+            DataChunkKind::TypeList => 3,
+            DataChunkKind::EncodedArray => 4,
+            DataChunkKind::AnnotationItem => 5,
+            DataChunkKind::AnnotationSetRefList => 6,
+            DataChunkKind::AnnotationSet => 7,
+            DataChunkKind::AnnotationsDirectory => 8,
+            DataChunkKind::CodeItem => 9,
+            DataChunkKind::DebugInfo => 10,
+            DataChunkKind::ClassData => 11,
         }
     }
 
@@ -715,6 +896,46 @@ impl DataSectionBuilder {
             offset: 0,
             bytes,
             fixups: Vec::new(),
+        });
+    }
+
+    /// Emit each call site's encoded data as its own chunk, then a chunk for the
+    /// `call_site_id_item` array (one `u4` offset per call site) with fixups
+    /// pointing at each item.
+    fn add_call_sites(&mut self, call_sites: &[CallSiteId]) {
+        if call_sites.is_empty() {
+            return;
+        }
+        let mut item_chunk_indices = Vec::with_capacity(call_sites.len());
+        for (idx, cs) in call_sites.iter().enumerate() {
+            let mut bytes = Vec::new();
+            write_encoded_array(&cs.to_encoded_values(), &mut bytes);
+            let chunk_idx = self.push_chunk(DataChunk {
+                owner: DataChunkOwner::CallSiteItem(idx),
+                kind: DataChunkKind::EncodedArray,
+                align: 1,
+                offset: 0,
+                bytes,
+                fixups: Vec::new(),
+            });
+            item_chunk_indices.push(chunk_idx);
+        }
+        let id_bytes = vec![0u8; call_sites.len() * 4];
+        let fixups = item_chunk_indices
+            .into_iter()
+            .enumerate()
+            .map(|(i, target_chunk)| ChunkFixup {
+                position: i * 4,
+                target_chunk,
+            })
+            .collect();
+        self.chunks.push(DataChunk {
+            owner: DataChunkOwner::CallSiteIds,
+            kind: DataChunkKind::CallSiteIds,
+            align: 4,
+            offset: 0,
+            bytes: id_bytes,
+            fixups,
         });
     }
 
@@ -853,6 +1074,7 @@ impl DexLayoutPlan {
         let assembler = MethodAssembler::new(&resolver, DEFAULT_API_LEVEL, DEFAULT_ART_VERSION);
         let mut data_builder = DataSectionBuilder::new();
         data_builder.add_method_handle_ids(&pools.method_handles);
+        data_builder.add_call_sites(&pools.call_sites);
         data_builder.add_string_data(&ids.strings);
         data_builder.add_proto_parameter_lists(&ids.proto_ids);
         data_builder.add_class_interface_lists(&class_defs);
@@ -948,6 +1170,12 @@ impl DexLayoutPlan {
             .find(|chunk| chunk.kind == DataChunkKind::MethodHandleIds)
             .map(|chunk| data_base + chunk.offset);
 
+        let call_site_ids_offset = data_section
+            .chunks()
+            .iter()
+            .find(|chunk| chunk.kind == DataChunkKind::CallSiteIds)
+            .map(|chunk| data_base + chunk.offset);
+
         Ok(DexLayoutPlan {
             pools,
             ids,
@@ -957,6 +1185,7 @@ impl DexLayoutPlan {
             string_data_offsets,
             proto_parameter_offsets,
             method_handle_offset,
+            call_site_ids_offset,
         })
     }
 }
@@ -1101,6 +1330,16 @@ fn build_map_items(plan: &DexLayoutPlan, map_off: u32) -> Vec<MapItem> {
         rest.push(MapItem::new(
             TYPE_METHOD_HANDLE_ITEM,
             plan.pools.method_handles.len() as u32,
+            offset,
+        ));
+    }
+
+    if !plan.pools.call_sites.is_empty()
+        && let Some(offset) = plan.call_site_ids_offset
+    {
+        rest.push(MapItem::new(
+            TYPE_CALL_SITE_ID_ITEM,
+            plan.pools.call_sites.len() as u32,
             offset,
         ));
     }
@@ -1370,7 +1609,7 @@ fn write_class_defs(
     Ok(())
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct DexPoolBuilder {
     strings: StringCollector,
     type_descriptors: BTreeSet<String>,
@@ -1379,6 +1618,7 @@ struct DexPoolBuilder {
     method_keys: Vec<MethodKey>,
     method_key_set: BTreeSet<MethodKey>,
     method_handle_keys: BTreeSet<MethodHandleKey>,
+    call_site_keys: BTreeSet<CallSiteKey>,
     annotation_elements: HashMap<String, HashMap<String, TypeSignature>>,
     string_aliases: HashMap<String, String>,
 }
@@ -1547,6 +1787,34 @@ impl DexPoolBuilder {
             method_handle_index.insert(key, idx);
         }
 
+        let mut call_sites = Vec::with_capacity(self.call_site_keys.len());
+        let mut call_site_index = HashMap::with_capacity(self.call_site_keys.len());
+        for key in self.call_site_keys.into_iter() {
+            // The bootstrap method handle is implied by the smali literal as
+            // `invoke-static {bootstrap_method}`. Look it up via its synthesized key.
+            let handle_key = MethodHandleKey {
+                handle_type: 0x04,
+                target: MethodHandleTarget::Method(key.bootstrap_method.clone()),
+            };
+            let bootstrap_handle_idx = *method_handle_index.get(&handle_key).ok_or_else(|| {
+                DexError::new("missing method handle for call site bootstrap")
+            })?;
+            let method_name_idx = *string_index.get(&key.method_name).ok_or_else(|| {
+                DexError::new("missing string for call site method name")
+            })?;
+            let method_type_idx = *proto_index_map.get(&key.method_proto).ok_or_else(|| {
+                DexError::new("missing prototype for call site method type")
+            })?;
+            let idx = call_sites.len() as u32;
+            call_sites.push(CallSiteId {
+                bootstrap_method_handle_idx: bootstrap_handle_idx,
+                method_name_idx,
+                method_type_idx,
+                args: Vec::new(),
+            });
+            call_site_index.insert(key, idx);
+        }
+
         Ok(DexIndexPools {
             strings,
             string_index,
@@ -1560,6 +1828,8 @@ impl DexPoolBuilder {
             method_index: method_index_map,
             method_handles,
             method_handle_index,
+            call_sites,
+            call_site_index,
             annotation_elements: self.annotation_elements,
         })
     }
@@ -1911,7 +2181,26 @@ impl DexPoolBuilder {
             self.strings.insert(&descriptor.method_name);
             let proto_key = PrototypeKey::from_signature(&descriptor.method_proto);
             self.register_proto_components(&proto_key);
-            self.proto_keys.insert(proto_key);
+            self.proto_keys.insert(proto_key.clone());
+
+            // Smali's invoke-custom literal implies an invoke-static method handle
+            // for the bootstrap method.
+            let bootstrap_proto_key = PrototypeKey::from_signature(&descriptor.bootstrap.proto);
+            let bootstrap_method_key = MethodKey::new(
+                descriptor.bootstrap.class_desc.clone(),
+                descriptor.bootstrap.name.clone(),
+                bootstrap_proto_key,
+            );
+            self.register_method_handle(MethodHandleKey {
+                handle_type: 0x04, // invoke-static
+                target: MethodHandleTarget::Method(bootstrap_method_key.clone()),
+            });
+
+            self.call_site_keys.insert(CallSiteKey {
+                bootstrap_method: bootstrap_method_key,
+                method_name: descriptor.method_name,
+                method_proto: proto_key,
+            });
         }
     }
 
@@ -2133,7 +2422,7 @@ fn access_flags_from_modifiers(modifiers: &[Modifier]) -> u32 {
     flags
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct StringCollector(BTreeSet<String>);
 
 impl StringCollector {
@@ -2275,6 +2564,18 @@ enum MethodHandleTarget {
 struct MethodHandleKey {
     handle_type: u16,
     target: MethodHandleTarget,
+}
+
+/// Identifies a call site for deduplication during pool construction.
+///
+/// In the smali surface syntax the bootstrap method handle is implicit (always
+/// `invoke-static` of the named method), so we only need to remember the bootstrap
+/// method, the dynamic method name, and its prototype to uniquely identify the call site.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
+struct CallSiteKey {
+    bootstrap_method: MethodKey,
+    method_name: String,
+    method_proto: PrototypeKey,
 }
 
 fn shorty_char(sig: &TypeSignature) -> char {

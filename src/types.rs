@@ -262,7 +262,7 @@ impl TypeSignature {
 ///  let m = MethodSignature::from_jni("([I)V");
 ///  assert_eq!(m.result, TypeSignature::Void);
 /// ```
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MethodSignature {
     pub(crate) type_parameters: Option<Vec<TypeSignature>>,
     pub args: Vec<TypeSignature>,
@@ -450,7 +450,7 @@ pub(crate) fn parse_methodsignature(smali: &str) -> IResult<&str, MethodSignatur
 /// Simple enum to represent Java method, field and class modifiers
 ///
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Modifier {
     Public,
     Private,
@@ -598,7 +598,7 @@ impl Modifiers {
 
 /// Simple enum to represent annotation visibility: build, runtime, system.
 ///
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AnnotationVisibility {
     Build,
     Runtime,
@@ -617,7 +617,7 @@ impl AnnotationVisibility {
 
 /// Annotation values can be a Single value, Array, Enum or another Annotation
 ///
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AnnotationValue {
     Single(String),
     Array(Vec<String>),
@@ -644,7 +644,7 @@ impl FromStr for AnnotationVisibility {
 
 /// Name, value pair for annotation elements. There can be several of these per annotation.
 ///
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AnnotationElement {
     pub name: String,
     pub value: AnnotationValue,
@@ -652,7 +652,7 @@ pub struct AnnotationElement {
 
 /// Struct representing a Java annotation, these can occur at class level, method level, within a field or within another annotation.
 ///
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SmaliAnnotation {
     pub visibility: AnnotationVisibility,
     pub annotation_type: TypeSignature,
@@ -661,7 +661,7 @@ pub struct SmaliAnnotation {
 
 /// Struct representing a Java field
 ///
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SmaliField {
     /// Name of the field
     pub name: String,
@@ -829,7 +829,7 @@ impl fmt::Display for SparseSwitchDirective {
 
 /// An enum representing operations within a method, these can be a label, a line number or a dex operation as a String.
 ///
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum SmaliOp {
     Label(Label),
     Line(u32),
@@ -855,7 +855,7 @@ pub enum SmaliOp {
 }
 
 /// Struct representing a method parameter
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SmaliParam {
     /// Parameter name
     pub name: Option<String>,
@@ -867,7 +867,7 @@ pub struct SmaliParam {
 
 /// Struct representing a Java method
 ///
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SmaliMethod {
     /// Method name
     pub name: String,
@@ -906,7 +906,7 @@ impl fmt::Display for SmaliMethod {
 ///  let c = SmaliClass::read_from_file(Path::new("smali/com/cool/Class.smali")).expect("Uh oh, does the file exist?");
 ///  println!("Java class: {}", c.name.as_java_type());
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SmaliClass {
     /// The name of this class
     pub name: ObjectIdentifier,

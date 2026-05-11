@@ -5104,6 +5104,7 @@ fn format_instruction_line(
                     let (cl, nm, ds) = res.field_ref(idx);
                     format!("{}->{}:{}", cl, nm, ds)
                 }
+                ReferenceType::CallSite => res.call_site(idx),
                 _ => format!("ref@{}", idx),
             };
             let mut regs = Vec::new();
@@ -5181,6 +5182,7 @@ fn format_instruction_line(
                     let (cl, nm, ds) = res.field_ref(idx);
                     format!("{}->{}:{}", cl, nm, ds)
                 }
+                ReferenceType::CallSite => res.call_site(idx),
                 _ => format!("ref@{}", idx),
             };
             (format!("{} {}, {}", op.name, range, target), 3)

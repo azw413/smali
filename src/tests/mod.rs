@@ -2,6 +2,9 @@ mod dex_roundtrip;
 mod opcode_tests;
 mod dexdump_cases;
 mod dex_debug;
+mod multi_dex;
+mod annotations;
+mod kotlin_metadata;
 
 #[cfg(test)]
 mod parser_tests {

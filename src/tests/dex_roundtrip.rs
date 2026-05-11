@@ -925,3 +925,284 @@ fn fast_service_loader_catches_present() {
         "expected at least two ClassNotFoundException catches, found {class_not_found}"
     );
 }
+
+const INVOKE_CUSTOM_SMALI: &str = r#"
+.class public Lcom/example/CustomCalls;
+.super Ljava/lang/Object;
+
+.method public static concat(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+    .registers 2
+    invoke-custom {p0, p1}, "Lcom/example/Bootstrap;->bootstrap(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;::makeConcat(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
+    move-result-object v0
+    return-object v0
+.end method
+
+.method public static concatRange(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+    .registers 3
+    invoke-custom/range {p0 .. p2}, "Lcom/example/Bootstrap;->bootstrap(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;::makeConcat3(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
+    move-result-object v0
+    return-object v0
+.end method
+
+.method public static dynamic(Ljava/lang/invoke/MethodHandle;Ljava/lang/Object;)Ljava/lang/Object;
+    .registers 2
+    invoke-polymorphic {p0, p1}, Ljava/lang/invoke/MethodHandle;->invokeExact(Ljava/lang/Object;)Ljava/lang/Object;, (Ljava/lang/Object;)Ljava/lang/Object;
+    move-result-object v0
+    return-object v0
+.end method
+
+.method public static dynamicRange(Ljava/lang/invoke/MethodHandle;Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+    .registers 3
+    invoke-polymorphic/range {p0 .. p2}, Ljava/lang/invoke/MethodHandle;->invoke(Ljava/lang/Object;)Ljava/lang/Object;, (Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+    move-result-object v0
+    return-object v0
+.end method
+
+.method public static makeHandle()Ljava/lang/invoke/MethodHandle;
+    .registers 1
+    const-method-handle v0, "invoke-static {}, Lcom/example/Target;->doIt(Ljava/lang/String;)Ljava/lang/Object;"
+    return-object v0
+.end method
+"#;
+
+#[test]
+fn invoke_custom_polymorphic_handle_roundtrip() {
+    use crate::dex::builder::build_dex_file_bytes;
+    use crate::types::SmaliClass;
+
+    let class = SmaliClass::from_smali(INVOKE_CUSTOM_SMALI).expect("parse class");
+
+    // smali -> DEX bytes -> reparse
+    let bytes = build_dex_file_bytes(std::slice::from_ref(&class)).expect("assemble to DEX");
+    let reparsed = DexFile::from_bytes(&bytes).expect("reparse DEX from bytes");
+
+    // Map list must contain a call_site_id_item entry (count > 0).
+    assert!(
+        !reparsed.call_site_ids.is_empty(),
+        "expected call_site_ids to be present after roundtrip, got empty"
+    );
+    assert!(
+        !reparsed.method_handles.is_empty(),
+        "expected method_handles to be present after roundtrip"
+    );
+
+    let rebuilt_classes = reparsed.to_smali().expect("convert reparsed DEX to smali");
+    assert_eq!(rebuilt_classes.len(), 1);
+    let rebuilt = &rebuilt_classes[0];
+
+    fn collect_dex_ops(class: &SmaliClass) -> Vec<String> {
+        let mut out = Vec::new();
+        for m in &class.methods {
+            for op in &m.ops {
+                if let SmaliOp::Op(dex_op) = op {
+                    out.push(dex_op.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    let original_ops = collect_dex_ops(&class);
+    let rebuilt_ops = collect_dex_ops(rebuilt);
+
+    fn has_op(ops: &[String], prefix: &str) -> bool {
+        ops.iter().any(|o| o.starts_with(prefix))
+    }
+    for prefix in [
+        "invoke-custom ",
+        "invoke-custom/range ",
+        "invoke-polymorphic ",
+        "invoke-polymorphic/range ",
+        "const-method-handle ",
+    ] {
+        assert!(
+            has_op(&original_ops, prefix),
+            "original missing {prefix}: {original_ops:?}"
+        );
+        assert!(
+            has_op(&rebuilt_ops, prefix),
+            "rebuilt missing {prefix}: {rebuilt_ops:?}"
+        );
+    }
+
+    // Ensure each invoke-custom literal's bootstrap descriptor survived the roundtrip
+    // (the substring is the user-meaningful payload of the call_site_item).
+    for needle in ["makeConcat(", "makeConcat3(", "Lcom/example/Bootstrap;"] {
+        assert!(
+            rebuilt_ops.iter().any(|o| o.contains(needle)),
+            "expected '{needle}' to survive roundtrip in {rebuilt_ops:?}"
+        );
+    }
+
+    // Sanity: ensure the rebuilt dex has the same number of dex ops per method.
+    assert_eq!(
+        original_ops.len(),
+        rebuilt_ops.len(),
+        "dex op count differs after roundtrip"
+    );
+
+}
+
+// Helpers for the link_data / hiddenapi pass-through tests below: take a freshly
+// built DEX byte stream and append a synthetic section of `payload` bytes, updating
+// the relevant header fields and the map list to point at it. This lets us verify
+// the reader without needing a real-world fixture that exercises these features.
+fn append_section_and_update_map(
+    bytes: &[u8],
+    payload: &[u8],
+    map_type: u16,
+    map_size: u32,
+    update_link: bool,
+) -> Vec<u8> {
+    // Header field offsets per DEX spec.
+    const FILE_SIZE_OFF: usize = 0x20;
+    const LINK_SIZE_OFF: usize = 0x2c;
+    const LINK_OFF_OFF: usize = 0x30;
+    const MAP_OFF_OFF: usize = 0x34;
+
+    fn read_u4_le(b: &[u8], off: usize) -> u32 {
+        u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
+    }
+    fn write_u4_le(b: &mut [u8], off: usize, v: u32) {
+        b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+
+    let original_map_off = read_u4_le(bytes, MAP_OFF_OFF) as usize;
+    let map_size_count = read_u4_le(bytes, original_map_off);
+
+    // Layout: [original bytes up to old map] [appended payload, 4-aligned] [new map]
+    let mut out = bytes[..original_map_off].to_vec();
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+    let payload_off = out.len() as u32;
+    out.extend_from_slice(payload);
+    while out.len() % 4 != 0 {
+        out.push(0);
+    }
+
+    let new_map_off = out.len() as u32;
+    out.extend_from_slice(&(map_size_count + 1).to_le_bytes());
+    // Copy original map entries.
+    let original_map_entries_start = original_map_off + 4;
+    let original_map_entries_end = original_map_entries_start + (map_size_count as usize) * 12;
+    out.extend_from_slice(&bytes[original_map_entries_start..original_map_entries_end]);
+    // Append our new map item: u2 type, u2 unused, u4 size, u4 offset.
+    out.extend_from_slice(&map_type.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&map_size.to_le_bytes());
+    out.extend_from_slice(&payload_off.to_le_bytes());
+
+    // Patch header.
+    write_u4_le(&mut out, MAP_OFF_OFF, new_map_off);
+    let final_len = out.len() as u32;
+    write_u4_le(&mut out, FILE_SIZE_OFF, final_len);
+    if update_link {
+        write_u4_le(&mut out, LINK_OFF_OFF, payload_off);
+        write_u4_le(&mut out, LINK_SIZE_OFF, payload.len() as u32);
+    }
+    // Recompute SHA-1 (header bytes 32..) and Adler-32 (bytes 12..). Using the
+    // same crates the builder uses keeps the reader from rejecting the file.
+    let signature: [u8; 20] = {
+        use sha1::{Digest, Sha1};
+        let mut hasher = Sha1::new();
+        hasher.update(&out[32..]);
+        hasher.finalize().into()
+    };
+    out[12..32].copy_from_slice(&signature);
+    let checksum = adler::adler32_slice(&out[12..]);
+    write_u4_le(&mut out, 8, checksum);
+    out
+}
+
+#[test]
+fn link_data_round_trip_preserves_bytes() {
+    use crate::dex::DexFile;
+    use crate::dex::builder::build_dex_file_bytes;
+    use crate::types::SmaliClass;
+
+    let smali = r#"
+.class public Lcom/example/L;
+.super Ljava/lang/Object;
+
+.method public static noop()V
+    .registers 0
+    return-void
+.end method
+"#;
+    let class = SmaliClass::from_smali(smali).expect("parse");
+    let dex_bytes = build_dex_file_bytes(std::slice::from_ref(&class)).expect("build dex");
+
+    // Sanity: a freshly built DEX has no link_data.
+    let baseline = DexFile::from_bytes(&dex_bytes).expect("parse baseline");
+    assert!(
+        baseline.link_data.is_empty(),
+        "fresh build should have empty link_data"
+    );
+
+    // Inject 16 distinctive bytes as the link_data section.
+    let payload: Vec<u8> = (0u8..16).map(|i| 0xA0 ^ i).collect();
+    // link_data isn't tracked in the map list, but we still synthesize a map entry
+    // so that overall offsets stay consistent and we exercise the same patcher.
+    let patched = append_section_and_update_map(
+        &dex_bytes,
+        &payload,
+        TYPE_HEADER_ITEM_PLACEHOLDER, // any unused type code is fine; reader keys on header link_off
+        1,
+        true,
+    );
+
+    let parsed = DexFile::from_bytes(&patched).expect("parse patched dex");
+    assert_eq!(parsed.link_data, payload, "link_data must round-trip verbatim");
+    assert_eq!(parsed.header.link_size as usize, payload.len());
+    assert!(parsed.header.link_off > 0);
+}
+
+#[test]
+fn hiddenapi_class_data_round_trip_preserves_bytes() {
+    use crate::dex::DexFile;
+    use crate::dex::builder::build_dex_file_bytes;
+    use crate::types::SmaliClass;
+
+    let smali = r#"
+.class public Lcom/example/H;
+.super Ljava/lang/Object;
+
+.method public static noop()V
+    .registers 0
+    return-void
+.end method
+"#;
+    let class = SmaliClass::from_smali(smali).expect("parse");
+    let dex_bytes = build_dex_file_bytes(std::slice::from_ref(&class)).expect("build dex");
+
+    let baseline = DexFile::from_bytes(&dex_bytes).expect("parse baseline");
+    assert!(
+        baseline.hiddenapi_class_data.is_empty(),
+        "fresh build should have empty hiddenapi_class_data"
+    );
+
+    // Build a minimal hiddenapi_class_data_item: the first u4 is the section size
+    // (including itself), then per-class data. With one class, the simplest valid
+    // payload is `{ size, offset_for_class_0=0 }` meaning "no flags for any member".
+    // Total size = 4 (size field) + 4 (one offset) = 8 bytes.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&8u32.to_le_bytes());
+    payload.extend_from_slice(&0u32.to_le_bytes());
+    let patched = append_section_and_update_map(
+        &dex_bytes,
+        &payload,
+        TYPE_HIDDENAPI_CLASS_DATA_PLACEHOLDER,
+        1,
+        false,
+    );
+
+    let parsed = DexFile::from_bytes(&patched).expect("parse patched dex");
+    assert_eq!(
+        parsed.hiddenapi_class_data, payload,
+        "hiddenapi_class_data must round-trip verbatim"
+    );
+}
+
+const TYPE_HEADER_ITEM_PLACEHOLDER: u16 = 0x0000;
+const TYPE_HIDDENAPI_CLASS_DATA_PLACEHOLDER: u16 = 0xF000;

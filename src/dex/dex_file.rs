@@ -32,6 +32,7 @@ pub const NO_INDEX: usize = 0xffffffff;
 
 const TYPE_CALL_SITE_ID_ITEM: u16 = 0x0007;
 const TYPE_METHOD_HANDLE_ITEM: u16 = 0x0008;
+const TYPE_HIDDENAPI_CLASS_DATA_ITEM: u16 = 0xF000;
 
 /* Access flags */
 pub const ACC_PUBLIC: u32 = 0x1;
@@ -1033,9 +1034,69 @@ impl ClassDefItem {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct CallSiteId {
-    // The call_site_id_item struct
+    /// Index into `method_handles` for the bootstrap method handle.
+    pub bootstrap_method_handle_idx: u32,
+    /// Index into `strings` for the call site method name.
+    pub method_name_idx: u32,
+    /// Index into `prototypes` for the call site method type.
+    pub method_type_idx: u32,
+    /// Bootstrap arguments after the first three required entries.
+    pub args: Vec<EncodedValue>,
+}
+
+impl CallSiteId {
+    /// Read the encoded `call_site_item` (an `encoded_array_item`) located at `data_off`.
+    /// The first three encoded values are the bootstrap method handle, method name, and
+    /// method type; remaining entries are bootstrap arguments preserved verbatim.
+    pub fn read_at(bytes: &[u8], data_off: usize) -> Result<CallSiteId, DexError> {
+        let mut ix = data_off;
+        let values = read_encoded_array(bytes, &mut ix)?;
+        if values.len() < 3 {
+            return Err(DexError::new("call_site_item must have at least 3 entries"));
+        }
+        let bootstrap_method_handle_idx = match &values[0] {
+            EncodedValue::MethodHandle(idx) => *idx,
+            _ => {
+                return Err(DexError::new(
+                    "call_site_item entry 0 must be a method handle",
+                ));
+            }
+        };
+        let method_name_idx = match &values[1] {
+            EncodedValue::String(idx) => *idx,
+            _ => {
+                return Err(DexError::new("call_site_item entry 1 must be a string"));
+            }
+        };
+        let method_type_idx = match &values[2] {
+            EncodedValue::MethodType(idx) => *idx,
+            _ => {
+                return Err(DexError::new(
+                    "call_site_item entry 2 must be a method type",
+                ));
+            }
+        };
+        let args = values.into_iter().skip(3).collect();
+        Ok(CallSiteId {
+            bootstrap_method_handle_idx,
+            method_name_idx,
+            method_type_idx,
+            args,
+        })
+    }
+
+    /// Materialise this call site as the encoded values that make up its `call_site_item`,
+    /// in the order required by the DEX spec (handle, name, type, then bootstrap args).
+    pub fn to_encoded_values(&self) -> Vec<EncodedValue> {
+        let mut values = Vec::with_capacity(3 + self.args.len());
+        values.push(EncodedValue::MethodHandle(self.bootstrap_method_handle_idx));
+        values.push(EncodedValue::String(self.method_name_idx));
+        values.push(EncodedValue::MethodType(self.method_type_idx));
+        values.extend(self.args.iter().cloned());
+        values
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1097,6 +1158,9 @@ pub struct DexFile {
     pub method_handles: Vec<MethodHandle>,
     pub data: Vec<u8>,
     pub link_data: Vec<u8>,
+    /// Raw `hiddenapi_class_data_item` bytes (map type 0xF000), preserved verbatim
+    /// for round-trip fidelity. Empty when the file has no hidden API metadata.
+    pub hiddenapi_class_data: Vec<u8>,
 }
 
 impl DexFile {
@@ -1115,6 +1179,7 @@ impl DexFile {
             method_handles: vec![],
             data: bytes.to_vec(),
             link_data: vec![],
+            hiddenapi_class_data: vec![],
         };
 
         // Read the strings
@@ -1172,6 +1237,18 @@ impl DexFile {
             dex.class_defs.push(ClassDefItem::read(bytes, ix)?);
         }
 
+        // Capture link_data verbatim if present. Modern APK DEX files leave this
+        // empty, but statically-linked DEX images use it; preserving the bytes
+        // lets callers round-trip such files without corruption.
+        if dex.header.link_size > 0 {
+            let start = dex.header.link_off as usize;
+            let end = start.saturating_add(dex.header.link_size as usize);
+            if end > bytes.len() {
+                return Err(DexError::new("link_data extends past end of file"));
+            }
+            dex.link_data = bytes[start..end].to_vec();
+        }
+
         // Optional map list (for method handles / call sites in newer DEX versions)
         if dex.header.map_off != 0 {
             let map_items = DexFile::read_map_items(bytes, dex.header.map_off as usize)?;
@@ -1183,7 +1260,28 @@ impl DexFile {
                     }
                 }
                 if item.type_code == TYPE_CALL_SITE_ID_ITEM && item.size > 0 {
-                    dex.call_site_ids.resize(item.size as usize, CallSiteId {});
+                    let mut cs_ix = item.offset as usize;
+                    dex.call_site_ids.reserve(item.size as usize);
+                    for _ in 0..item.size {
+                        let data_off = read_u4(bytes, &mut cs_ix)? as usize;
+                        dex.call_site_ids
+                            .push(CallSiteId::read_at(bytes, data_off)?);
+                    }
+                }
+                if item.type_code == TYPE_HIDDENAPI_CLASS_DATA_ITEM && item.size > 0 {
+                    // The first u4 of the item is the total section size.
+                    let start = item.offset as usize;
+                    let mut size_ix = start;
+                    let total_size = read_u4(bytes, &mut size_ix)? as usize;
+                    let end = start.checked_add(total_size).ok_or_else(|| {
+                        DexError::new("hiddenapi_class_data_item size overflows")
+                    })?;
+                    if end > bytes.len() {
+                        return Err(DexError::new(
+                            "hiddenapi_class_data_item extends past end of file",
+                        ));
+                    }
+                    dex.hiddenapi_class_data = bytes[start..end].to_vec();
                 }
             }
         }
@@ -1640,6 +1738,39 @@ impl DexFile {
             annotation_type: ann_type,
             elements,
         })
+    }
+
+    fn proto_descriptor(&self, proto_idx: usize) -> Option<String> {
+        let proto = self.prototypes.get(proto_idx)?;
+        let mut desc = String::from("(");
+        for &t in &proto.parameters.0 {
+            desc.push_str(&self.type_desc(t).ok()?);
+        }
+        desc.push(')');
+        desc.push_str(&self.type_desc(proto.return_type_idx).ok()?);
+        Some(desc)
+    }
+
+    /// Format a call site as the smali literal expected by the assembler:
+    /// `"bootstrap_method_ref::method_name(proto)"`. Returns `None` if any referenced
+    /// index is invalid (callers fall back to a placeholder).
+    fn call_site_literal(&self, idx: u32) -> Option<String> {
+        let cs = self.call_site_ids.get(idx as usize)?;
+        let handle = self.method_handles.get(cs.bootstrap_method_handle_idx as usize)?;
+        // Bootstrap must be a method handle that targets a method, not a field.
+        if handle.handle_type <= 0x03 {
+            return None;
+        }
+        let bootstrap_method = self.methods.get(handle.field_or_method_id as usize)?;
+        let bootstrap_class = self.type_desc(bootstrap_method.class_idx).ok()?;
+        let bootstrap_name = self.get_string(bootstrap_method.name_idx).ok()?;
+        let bootstrap_proto = self.proto_descriptor(bootstrap_method.proto_idx)?;
+        let method_name = self.get_string(cs.method_name_idx as usize).ok()?;
+        let method_proto = self.proto_descriptor(cs.method_type_idx as usize)?;
+        Some(format!(
+            "{}->{}{}::{}{}",
+            bootstrap_class, bootstrap_name, bootstrap_proto, method_name, method_proto
+        ))
     }
 
     fn method_handle_literal(&self, idx: u32) -> Option<String> {
@@ -2232,9 +2363,14 @@ impl DexFile {
             _ => 33,  // default to recent
         };
 
-        // Heuristic quick/odex detection: look for known quick opcodes in low byte
+        // Heuristic quick/odex and modern-opcode detection: look at the low byte of
+        // every instruction's first code unit. Quick/ODEX bytes pin us to an old ART
+        // version; modern bytes (invoke-polymorphic/custom, const-method-handle/type)
+        // require a recent ART version where 0xfa..=0xff are reassigned.
         let mut has_quick = false;
-        'scan: for cdef in &self.class_defs {
+        let mut has_modern_invoke = false; // 0xfa, 0xfb, 0xfc, 0xfd
+        let mut has_const_method_handle = false; // 0xfe, 0xff
+        for cdef in &self.class_defs {
             if let Some(cd) = &cdef.class_data {
                 for m in cd.direct_methods.iter().chain(cd.virtual_methods.iter()) {
                     if let Some(code) = &m.code {
@@ -2244,7 +2380,9 @@ impl DexFile {
                                 0x60..=0x65   // iget/iput quick family
                                 | 0x90..=0x93 // invoke-virtual/super quick (+/range)
                                 | 0xEC..=0xEF // execute-inline, throw-verification-error (odexy)
-                                => { has_quick = true; break 'scan; }
+                                => has_quick = true,
+                                0xfa..=0xfd => has_modern_invoke = true,
+                                0xfe..=0xff => has_const_method_handle = true,
                                 _ => {}
                             }
                         }
@@ -2252,7 +2390,21 @@ impl DexFile {
                 }
             }
         }
-        let art_version = if has_quick { 1 } else { 0 };
+        // Method handles / call sites in the file are an even stronger signal that
+        // modern invoke instructions are valid (lambdas, string concat, etc.).
+        if !self.method_handles.is_empty() || !self.call_site_ids.is_empty() {
+            has_modern_invoke = true;
+        }
+
+        let art_version = if has_const_method_handle {
+            134
+        } else if has_modern_invoke {
+            111
+        } else if has_quick {
+            1
+        } else {
+            0
+        };
         (api, art_version)
     }
 
@@ -2462,7 +2614,11 @@ impl RefResolver for DexRefResolver<'_> {
         }
     }
     fn call_site(&self, idx: u32) -> String {
-        format!("callsite@{}", idx)
+        if let Some(literal) = self.dex.call_site_literal(idx) {
+            format!("\"{}\"", literal)
+        } else {
+            format!("callsite@{}", idx)
+        }
     }
     fn method_handle(&self, idx: u32) -> String {
         if let Some(literal) = self.dex.method_handle_literal(idx) {

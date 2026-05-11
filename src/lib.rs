@@ -7,6 +7,7 @@ use std::path::Path;
 
 pub mod android;
 pub mod dex;
+pub mod kotlin;
 pub mod smali_ops;
 mod smali_parse;
 mod smali_write;
