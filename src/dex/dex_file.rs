@@ -1645,9 +1645,24 @@ impl DexFile {
                 EV::Array(vals) => {
                     // Arrays are rendered as a list of atoms (strings already quoted, types as L...;).
                     // This fixes MemberClasses: you’ll now get the real class names, not numeric ids.
+                    //
+                    // SmaliAnnValue::Array carries Vec<String> — sub-annotations or nested arrays
+                    // can't be modelled structurally without an API break. Skip those entries
+                    // rather than emit the Debug-print of EncodedAnnotation, which the writer can't
+                    // parse back. Lossy in the rare nested case but lets the round-trip succeed.
                     let mut out: Vec<String> = Vec::with_capacity(vals.len());
                     for v in vals {
-                        out.push(self.encoded_value_atom_to_smali(v)?);
+                        match v {
+                            EV::Annotation(_) | EV::Array(_) => {
+                                log::warn!(
+                                    "dropping unrepresentable {:?} element from annotation array on {}",
+                                    std::mem::discriminant(v),
+                                    ann_type_desc,
+                                );
+                                continue;
+                            }
+                            _ => out.push(self.encoded_value_atom_to_smali(v)?),
+                        }
                     }
                     SmaliAnnValue::Array(out)
                 }
@@ -1663,9 +1678,22 @@ impl DexFile {
                         let sname = self.strings[se.name_idx as usize].to_string()?;
                         let sval = match &se.value {
                             EV::Array(vals) => {
+                                // Same unrepresentable-element handling as the top-level
+                                // array branch — sub-annotations or nested arrays inside
+                                // a sub-annotation's array can't round-trip.
                                 let mut arr = Vec::with_capacity(vals.len());
                                 for v in vals {
-                                    arr.push(self.encoded_value_atom_to_smali(v)?);
+                                    match v {
+                                        EV::Annotation(_) | EV::Array(_) => {
+                                            log::warn!(
+                                                "dropping unrepresentable {:?} element from nested annotation array on {}",
+                                                std::mem::discriminant(v),
+                                                sub_type_desc,
+                                            );
+                                            continue;
+                                        }
+                                        _ => arr.push(self.encoded_value_atom_to_smali(v)?),
+                                    }
                                 }
                                 SmaliAnnValue::Array(arr)
                             }
