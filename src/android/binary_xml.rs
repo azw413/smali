@@ -1376,6 +1376,36 @@ impl AndroidManifest {
         self.root.set_attribute(attr);
     }
 
+    /// Register a framework attribute (`android:name`, `android:value`, …)
+    /// so the AXML writer can emit it with the correct resource id even
+    /// when the source manifest didn't reference the attribute. Required
+    /// when a pass injects new elements (e.g. `<meta-data>`) using
+    /// attributes that aren't already present elsewhere in the document.
+    /// Android's package parser uses the attribute's resource_id to
+    /// match it to the framework styleable, so an attribute with rid=0
+    /// is treated as missing.
+    ///
+    /// `name` is the local attribute name (`value`, `name`, `enabled`,
+    /// …) without any namespace prefix. `resource_id` is the framework
+    /// attr id from `android.R.attr` (e.g. `0x01010024` for `value`).
+    /// Subsequent calls for the same name win.
+    pub fn register_framework_attribute(&mut self, name: &str, resource_id: u32) {
+        // The writer indexes `resource_map` by the attribute name's
+        // string-pool index. Make sure both pools have an entry for
+        // `name` and that resource_map[pool_index_of(name)] = rid.
+        let idx = match self.string_pool.iter().position(|s| s == name) {
+            Some(i) => i,
+            None => {
+                self.string_pool.push(name.to_string());
+                self.string_pool.len() - 1
+            }
+        };
+        if idx >= self.resource_map.len() {
+            self.resource_map.resize(idx + 1, 0);
+        }
+        self.resource_map[idx] = resource_id;
+    }
+
     /// Returns the `android:versionName` value.
     pub fn version_name(&self) -> Option<&str> {
         self.root
