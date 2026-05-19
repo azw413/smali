@@ -5535,6 +5535,34 @@ pub fn decode_with_ctx_with_labels(
         pc += size_cu.max(1);
     }
 
+    // Emit any labels whose offset lies at-or-past end-of-code (the
+    // most common case: `:try_end_<X>` pointing one code-unit past the
+    // last instruction of the method, generated when a try block
+    // extends to method end). Without this, the writer can't resolve
+    // such labels and aborts with "label :X referenced in try end not
+    // defined". The label is emitted at code-unit offset == code.len()
+    // so re-assembly resolves it to the same boundary it had at
+    // decode time.
+    let end_pc = code.len();
+    let mut trailing: Vec<(usize, String)> = labels
+        .iter()
+        .filter(|(off, _)| **off >= end_pc)
+        .map(|(off, name)| (*off, name.clone()))
+        .collect();
+    trailing.sort_by_key(|(off, _)| *off);
+    for (off, name) in trailing {
+        let mut labelline = String::new();
+        labelline.push_str(&name);
+        labelline.push('\n');
+        match parse_op(&labelline) {
+            Ok((_, op)) => {
+                output.push(op);
+                op_offsets.push(off as u32);
+            }
+            Err(e) => fail!("Error parsing trailing label: {}, {}", labelline, e),
+        }
+    }
+
     let mut label_offsets = HashMap::new();
     for (offset, name) in labels {
         label_offsets.entry(name.clone()).or_insert(offset as u32);
