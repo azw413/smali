@@ -32,8 +32,8 @@ const BIT7_MODE_MARKER: char = '\u{FFFF}';
 /// Detects which on-disk encoding the producer used by inspecting the leading
 /// marker char of the first non-empty string.
 pub fn decode_d1(strings: &[String]) -> Vec<u8> {
-    if let Some(first) = strings.first() {
-        if let Some(marker) = first.chars().next() {
+    if let Some(first) = strings.first()
+        && let Some(marker) = first.chars().next() {
             if marker == UTF8_MODE_MARKER {
                 let dropped = drop_marker(strings);
                 return strings_to_bytes(&dropped);
@@ -45,7 +45,6 @@ pub fn decode_d1(strings: &[String]) -> Vec<u8> {
                 return decode_7_to_8(&bytes);
             }
         }
-    }
     // No recognised marker — assume legacy 8-to-7 stream without marker.
     let mut bytes = combine_low_bytes(strings);
     add_modulo_byte(&mut bytes, 0x7f);

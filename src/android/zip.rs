@@ -276,11 +276,10 @@ pub fn is_top_level_dex_name(name: &str) -> bool {
     if name == "classes.dex" {
         return true;
     }
-    if let Some(stripped) = name.strip_prefix("classes") {
-        if let Some(num) = stripped.strip_suffix(".dex") {
+    if let Some(stripped) = name.strip_prefix("classes")
+        && let Some(num) = stripped.strip_suffix(".dex") {
             return !num.is_empty() && num.chars().all(|c| c.is_ascii_digit());
         }
-    }
     false
 }
 
