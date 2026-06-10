@@ -1306,7 +1306,11 @@ impl DexFile {
         let name_string = &self.strings[id];
         let name = match name_string {
             DexString::Decoded(s) => s.to_string(),
-            DexString::Raw(_, _) => return Err(DexError::new("Invalid string in class name.")),
+            // Some DEX strings (notably in obfuscated apps) contain unpaired
+            // surrogates which Rust's `String` cannot represent. Fall back to
+            // a lossy decode for display/disassembly; the raw bytes are kept
+            // in `DexString::Raw` so binary round-trip stays exact.
+            DexString::Raw(_, v) => decode_mutf8_lossy(v),
         };
 
         Ok(name)
@@ -2754,6 +2758,106 @@ impl Header {
     }
 }
 
+/// Decode a Dalvik MUTF-8 byte slice into a Rust `String`, tolerating shapes
+/// that strict CESU-8 rejects but that occur in the wild — most commonly
+/// unpaired surrogates (a 3-byte `0xED 0xA0..0xAF 0x80..0xBF` sequence not
+/// followed by a low surrogate). Java `String` accepts these because it is a
+/// sequence of UTF-16 code units; Rust `String` cannot, so the unpaired
+/// surrogate is replaced with U+FFFD. Malformed continuation bytes are also
+/// replaced with U+FFFD so the function always succeeds.
+pub(crate) fn decode_mutf8_lossy(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b0 = bytes[i];
+        if b0 == 0 {
+            // NUL terminator should not appear inside the payload (the reader
+            // strips it) but if it does, stop.
+            break;
+        }
+        if b0 < 0x80 {
+            out.push(b0 as char);
+            i += 1;
+            continue;
+        }
+        if (b0 & 0xE0) == 0xC0 {
+            // 2-byte: 110xxxxx 10xxxxxx
+            if i + 1 < bytes.len() && (bytes[i + 1] & 0xC0) == 0x80 {
+                let cp = (((b0 & 0x1F) as u32) << 6) | (bytes[i + 1] & 0x3F) as u32;
+                if let Some(c) = char::from_u32(cp) {
+                    out.push(c);
+                } else {
+                    out.push('\u{FFFD}');
+                }
+                i += 2;
+                continue;
+            }
+            out.push('\u{FFFD}');
+            i += 1;
+            continue;
+        }
+        if (b0 & 0xF0) == 0xE0 {
+            // 3-byte: 1110xxxx 10xxxxxx 10xxxxxx
+            if i + 2 < bytes.len()
+                && (bytes[i + 1] & 0xC0) == 0x80
+                && (bytes[i + 2] & 0xC0) == 0x80
+            {
+                let cp = (((b0 & 0x0F) as u32) << 12)
+                    | (((bytes[i + 1] & 0x3F) as u32) << 6)
+                    | (bytes[i + 2] & 0x3F) as u32;
+                // High surrogate?
+                if (0xD800..=0xDBFF).contains(&cp) {
+                    // Look for a paired low surrogate encoded as another 3-byte sequence.
+                    if i + 5 < bytes.len()
+                        && bytes[i + 3] == 0xED
+                        && (bytes[i + 4] & 0xF0) == 0xB0
+                        && (bytes[i + 5] & 0xC0) == 0x80
+                    {
+                        let low = 0xD000u32
+                            | (((bytes[i + 4] & 0x3F) as u32) << 6)
+                            | (bytes[i + 5] & 0x3F) as u32;
+                        if (0xDC00..=0xDFFF).contains(&low) {
+                            let combined =
+                                0x10000 + (((cp - 0xD800) << 10) | (low - 0xDC00));
+                            if let Some(c) = char::from_u32(combined) {
+                                out.push(c);
+                                i += 6;
+                                continue;
+                            }
+                        }
+                    }
+                    // Unpaired high surrogate — preserve as replacement char.
+                    out.push('\u{FFFD}');
+                    i += 3;
+                    continue;
+                }
+                if (0xDC00..=0xDFFF).contains(&cp) {
+                    // Stray low surrogate.
+                    out.push('\u{FFFD}');
+                    i += 3;
+                    continue;
+                }
+                if let Some(c) = char::from_u32(cp) {
+                    out.push(c);
+                } else {
+                    out.push('\u{FFFD}');
+                }
+                i += 3;
+                continue;
+            }
+            out.push('\u{FFFD}');
+            i += 1;
+            continue;
+        }
+        // 4-byte UTF-8 forms are not legal in MUTF-8 (supplementary chars must
+        // be encoded as surrogate pairs); if one shows up, replace and skip
+        // one byte.
+        out.push('\u{FFFD}');
+        i += 1;
+    }
+    out
+}
+
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum DexString {
     Decoded(String),
@@ -2768,7 +2872,7 @@ impl DexString {
     pub fn to_string(&self) -> Result<String, DexError> {
         match &self {
             DexString::Decoded(s) => Ok(s.to_string()),
-            DexString::Raw(_, _) => Err(DexError::new("DexString failed conversion")),
+            DexString::Raw(_, v) => Ok(decode_mutf8_lossy(v)),
         }
     }
 
@@ -2821,6 +2925,46 @@ impl DexString {
 mod tests {
     use super::*;
     use std::fs::read;
+
+    #[test]
+    fn mutf8_lossy_handles_lone_high_surrogate() {
+        // MUTF-8 NUL (c0 80) + ASCII + a 3-byte high-surrogate (ed a0 80)
+        // not followed by a low surrogate, then U+FEFF (ef bb bf).
+        let bytes = b"\xc0\x80A\xed\xa0\x80\xef\xbb\xbf";
+        let s = decode_mutf8_lossy(bytes);
+        let chars: Vec<char> = s.chars().collect();
+        assert_eq!(chars[0], '\u{0000}');
+        assert_eq!(chars[1], 'A');
+        assert_eq!(chars[2], '\u{FFFD}'); // unpaired high surrogate
+        assert_eq!(chars[3], '\u{FEFF}');
+        assert_eq!(chars.len(), 4);
+    }
+
+    #[test]
+    fn mutf8_lossy_handles_paired_surrogates() {
+        // U+1F600 (😀) as surrogate pair: D83D DE00
+        // CESU-8: ed a0 bd  ed b8 80
+        let bytes = b"\xed\xa0\xbd\xed\xb8\x80";
+        assert_eq!(decode_mutf8_lossy(bytes), "\u{1F600}");
+    }
+
+    #[test]
+    fn dex_string_raw_can_be_displayed() {
+        // The exact byte pattern from a real obfuscated APK's classes3.dex
+        // string@422 — used to abort to_smali() with "Invalid string in class
+        // name."
+        let bytes: Vec<u8> = vec![
+            0xc0, 0x80, 0x7f, 0xc2, 0xad, 0xd8, 0x80, 0xd8, 0x9c, 0xdb, 0x9d, 0xdc, 0x8f,
+            0xe0, 0xa3, 0xa2, 0xe1, 0x9a, 0x80, 0xe1, 0xa0, 0x8e, 0xe2, 0x80, 0x80, 0xe2,
+            0x80, 0xa8, 0xe2, 0x81, 0x9f, 0xe2, 0x81, 0xa6, 0xe3, 0x80, 0x80, 0xed, 0xa0,
+            0x80, 0xef, 0xbb, 0xbf, 0xef, 0xbf, 0xb9,
+        ];
+        let raw = DexString::Raw(18, bytes);
+        // Used to return Err("DexString failed conversion"); now succeeds.
+        let s = raw.to_string().expect("Raw strings should decode lossily");
+        // Should contain a U+FFFD where the lone surrogate was.
+        assert!(s.contains('\u{FFFD}'));
+    }
 
     #[test]
     fn test_header_from_bytes() {
