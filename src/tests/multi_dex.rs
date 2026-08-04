@@ -106,6 +106,105 @@ fn family_that_overflows_alone_errors_cleanly() {
     );
 }
 
+/// A class carrying enough distinct refs that a few hundred of them grow the
+/// reference pool appreciably. Used by the splitter-cost tests below.
+fn make_wide_class(name: &str, super_class: &str) -> SmaliClass {
+    let mut s = format!(".class public L{name};\n.super L{super_class};\n\n");
+    for m in 0..8 {
+        s.push_str(&format!(
+            ".method public m{m}_{seed}(I)I\n    .registers 2\n    return p0\n.end method\n\n",
+            seed = name.replace('/', "_")
+        ));
+    }
+    for f in 0..8 {
+        s.push_str(&format!(
+            ".field public f{f}_{seed}:I\n",
+            seed = name.replace('/', "_")
+        ));
+    }
+    SmaliClass::from_smali(&s).expect("parse generated wide class")
+}
+
+#[test]
+fn repeated_overflow_does_not_leak_refs_between_dexes() {
+    // The splitter probes each family against the live pool and, when the family
+    // doesn't fit, throws that pool away and restarts from the family alone.
+    // This exercises that flush path many times over: with a tight limit and
+    // independent (non-inheriting) classes, nearly every family forces a flush.
+    // If speculative insertions from a rejected family survived into the next
+    // DEX's pool, classes would go missing or be duplicated across the split.
+    let classes: Vec<SmaliClass> = (0..40)
+        .map(|i| make_simple_class(&format!("com/example/F{i}"), "java/lang/Object"))
+        .collect();
+    let dexes = build_multi_dex_bytes_with_limit(&classes, 6).expect("build multi-dex");
+    assert!(
+        dexes.len() >= 4,
+        "tight limit should force repeated flushes, got {} dex(es)",
+        dexes.len()
+    );
+
+    let mut seen: Vec<String> = Vec::new();
+    for (i, bytes) in dexes.iter().enumerate() {
+        let parsed =
+            DexFile::from_bytes(bytes).unwrap_or_else(|e| panic!("dex #{i} failed to parse: {e}"));
+        seen.extend(
+            parsed
+                .to_smali()
+                .unwrap_or_else(|e| panic!("dex #{i} failed to decode: {e}"))
+                .iter()
+                .map(|c| c.name.as_jni_type()),
+        );
+    }
+    seen.sort();
+    let mut expected: Vec<String> = (0..40).map(|i| format!("Lcom/example/F{i};")).collect();
+    expected.sort();
+    assert_eq!(
+        seen, expected,
+        "every input class must appear exactly once across the split"
+    );
+}
+
+#[test]
+fn splitter_cost_stays_linear_in_class_count() {
+    // Regression guard for the probe loop in `build_multi_dex_bytes_with_limit`.
+    // It used to clone the whole accumulated `DexPoolBuilder` once per family to
+    // test the family speculatively, which is O(families x pool) — on a real
+    // 7.7k-class app that was 61s of pure clone/free traffic, ~97% of the total
+    // build time. Ingesting into the live pool instead made it 1.8s.
+    //
+    // `DexPoolBuilder` is deliberately not `Clone`, so the exact original
+    // mistake is now a compile error. This test additionally bounds the cost
+    // behaviourally, to catch an equivalent O(pool)-per-family regression
+    // introduced some other way.
+    //
+    // The class count is chosen so the two complexity classes are far apart.
+    // Measured in a debug build (how `cargo test` runs), splitting this many
+    // independent families takes ~0.7s linear versus ~21s quadratic, so the 10s
+    // bound sits ~14x above the former and ~2x below the latter. That flags a
+    // complexity regression while tolerating a CI box several times slower than
+    // a dev machine. Do not lower CLASSES without re-checking that separation:
+    // at 600 classes the quadratic version finished in 1.4s and slipped through.
+    const CLASSES: usize = 2_400;
+    let classes: Vec<SmaliClass> = (0..CLASSES)
+        .map(|i| make_wide_class(&format!("com/example/wide/W{i}"), "java/lang/Object"))
+        .collect();
+
+    let start = std::time::Instant::now();
+    let dexes = build_multi_dex_bytes(&classes).expect("build multi-dex");
+    let elapsed = start.elapsed();
+
+    assert_eq!(dexes.len(), 1, "{CLASSES} small classes should fit one DEX");
+    let parsed = DexFile::from_bytes(&dexes[0]).expect("parse dex");
+    assert_eq!(parsed.class_defs.len(), CLASSES);
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "splitting {CLASSES} independent families took {elapsed:?}, expected well under a \
+         second; this suggests the probe loop is again doing work proportional to the pool \
+         size per family"
+    );
+}
+
 #[test]
 fn empty_input_produces_one_empty_dex() {
     let dexes = build_multi_dex_bytes(&[]).expect("empty input ok");

@@ -226,14 +226,16 @@ pub fn build_multi_dex_bytes_with_limit(
     let mut current_classes: Vec<usize> = Vec::new();
 
     for family in &families {
-        // Try the family in a clone of the current pool; commit on success.
-        let trial = current_pool.clone().unwrap_or_default();
-        let mut probe = trial;
+        // Ingest straight into the running pool rather than into a copy of it.
+        // On the success path the pool keeps the family; on the failure path it
+        // is replaced wholesale below, so the speculative insertions are never
+        // observed. Copying first would cost O(pool) per family, and the pool
+        // grows to DEX_REF_LIMIT entries.
+        let probe = current_pool.get_or_insert_with(DexPoolBuilder::default);
         for &class_idx in family {
             probe.ingest_class(&classes[class_idx]);
         }
-        if pool_within_limits(&probe, limit) {
-            current_pool = Some(probe);
+        if pool_within_limits(probe, limit) {
             current_classes.extend(family.iter().copied());
             continue;
         }
@@ -1609,7 +1611,11 @@ fn write_class_defs(
     Ok(())
 }
 
-#[derive(Default, Clone)]
+// Deliberately not `Clone`: the multi-DEX splitter probes families against a
+// live pool that grows to DEX_REF_LIMIT entries, so copying it per family is
+// quadratic in the size of the app. Keeping the type un-clonable makes that
+// mistake a compile error rather than a silent 30x slowdown.
+#[derive(Default)]
 struct DexPoolBuilder {
     strings: StringCollector,
     type_descriptors: BTreeSet<String>,
