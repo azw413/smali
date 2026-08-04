@@ -20,6 +20,9 @@ const STRING_FLAG_UTF8: u32 = 0x0000_0100;
 /// The standard Android namespace URI used for system attributes
 /// (`android:name`, `android:value`, `android:enabled`, etc.). Stable
 /// across every Android version since 1.0.
+/// `android.R.attr.versionName`.
+pub const ANDROID_ATTR_VERSION_NAME: u32 = 0x0101021c;
+
 pub const ANDROID_NAMESPACE_URI: &str = "http://schemas.android.com/apk/res/android";
 
 const TYPE_NULL: u8 = 0x00;
@@ -665,6 +668,25 @@ pub struct ManifestAttribute {
     pub stored_type: Option<u8>,
     pub stored_data: Option<u32>,
     pub raw_value: Option<String>,
+    /// Framework attribute id (`android.R.attr.*`).
+    ///
+    /// An AAB carries this per attribute, so it survives a protobuf round trip
+    /// directly. Inside an APK the same information lives in the shared
+    /// resource-map chunk, which is only populated for attributes the source
+    /// document already declared — see
+    /// [`AndroidManifest::register_framework_attribute`] for adding new ones.
+    pub resource_id: Option<u32>,
+    /// Verbatim `XmlAttribute.source` submessage from an AAB manifest.
+    ///
+    /// Source positions are not modelled by this DOM, but re-emitting them
+    /// unchanged is what makes a bundle manifest round trip byte-for-byte.
+    /// Always `None` for APK manifests.
+    pub proto_source: Option<Vec<u8>>,
+    /// Verbatim `XmlAttribute.compiled_item` submessage from an AAB manifest.
+    ///
+    /// Preserved so an unmodified attribute re-encodes exactly. When [`Self::value`]
+    /// is changed, clear this so the encoder rebuilds it from the new value.
+    pub proto_compiled_item: Option<Vec<u8>>,
     pub name: String,
     pub value: ManifestValue,
 }
@@ -677,6 +699,9 @@ impl ManifestAttribute {
             namespace_uri: None,
             stored_type: None,
             stored_data: None,
+            resource_id: None,
+            proto_source: None,
+            proto_compiled_item: None,
             raw_value: None,
             name: name.into(),
             value: value.into(),
@@ -694,6 +719,9 @@ impl ManifestAttribute {
             namespace_uri: None,
             stored_type: None,
             stored_data: None,
+            resource_id: None,
+            proto_source: None,
+            proto_compiled_item: None,
             raw_value: None,
             name: name.into(),
             value: value.into(),
@@ -712,6 +740,9 @@ impl ManifestAttribute {
             namespace_uri: Some(uri.into()),
             stored_type: None,
             stored_data: None,
+            resource_id: None,
+            proto_source: None,
+            proto_compiled_item: None,
             raw_value: None,
             name: name.into(),
             value: value.into(),
@@ -738,6 +769,9 @@ pub struct ManifestElement {
     pub attributes: Vec<ManifestAttribute>,
     pub children: Vec<ManifestElement>,
     pub text: Option<String>,
+    /// Verbatim `XmlNode.source` submessage from an AAB manifest. See
+    /// [`ManifestAttribute::proto_source`]. Always `None` for APK manifests.
+    pub proto_source: Option<Vec<u8>>,
 }
 
 impl ManifestElement {
@@ -750,6 +784,7 @@ impl ManifestElement {
             attributes: Vec::new(),
             children: Vec::new(),
             text: None,
+            proto_source: None,
         }
     }
 
@@ -1034,6 +1069,9 @@ fn build_manifest_attribute(
             namespace_uri,
             stored_type: None,
             stored_data: None,
+            resource_id: None,
+            proto_source: None,
+            proto_compiled_item: None,
             raw_value: Some(attr.value.clone()),
             name: attr.local_name,
             value: parse_manifest_value(&attr.value),
@@ -1407,16 +1445,32 @@ impl AndroidManifest {
     }
 
     /// Returns the `android:versionName` value.
+    /// Read `android:versionName`.
+    ///
+    /// This attribute lives in the `android` namespace; querying it without the
+    /// prefix never matches a real manifest.
     pub fn version_name(&self) -> Option<&str> {
         self.root
-            .attribute_value("versionName")
+            .attribute_value("android:versionName")
             .and_then(|value| value.as_str())
     }
 
     /// Sets `android:versionName` on the root manifest element.
+    /// Set `android:versionName`, replacing any existing value.
+    ///
+    /// The attribute is written into the `android` namespace with its framework
+    /// resource id, so Android and bundletool both see it. Writing it without
+    /// the namespace produces an attribute the platform silently ignores.
     pub fn set_version_name(&mut self, version: impl Into<String>) {
-        let attr = ManifestAttribute::new("versionName", version.into());
+        let mut attr = ManifestAttribute::with_namespace_and_uri(
+            "android",
+            ANDROID_NAMESPACE_URI,
+            "versionName",
+            ManifestValue::String(version.into()),
+        );
+        attr.resource_id = Some(ANDROID_ATTR_VERSION_NAME);
         self.root.set_attribute(attr);
+        self.register_framework_attribute("versionName", ANDROID_ATTR_VERSION_NAME);
     }
 
     /// Returns the `<application>` node if present.
@@ -1688,12 +1742,23 @@ impl AndroidManifest {
                         let attr_namespace =
                             resolve_prefix(&namespaces, attr_namespace_uri.as_deref());
                         let value = decode_value(pool, raw_value_idx, data_type, data)?;
+                        // The resource-map chunk is indexed by the attribute
+                        // name's string-pool slot. Capturing it here lets an
+                        // APK manifest be re-emitted as an AAB, where each
+                        // attribute carries its own id.
+                        let resource_id = resource_map
+                            .get(attr_name_idx as usize)
+                            .copied()
+                            .filter(|id| *id != 0);
                         attributes.push(ManifestAttribute {
                             namespace_prefix: attr_namespace,
                             namespace_uri: attr_namespace_uri,
                             stored_type: Some(data_type),
                             stored_data: Some(data),
                             raw_value: pool.get(raw_value_idx).map(|s| s.to_string()),
+                            resource_id,
+                            proto_source: None,
+                            proto_compiled_item: None,
                             name: attr_name,
                             value,
                         });

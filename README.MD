@@ -87,6 +87,57 @@ fn patch_dex_entry(apk: &mut ApkFile, entry_name: &str) -> Result<bool, Box<dyn 
 
 Take a look at the full examples for a better idea and also an example of how to update the Android manifest file.
 
+## App Bundles (AAB)
+
+An `.aab` is a zip, so `ApkFile` opens and writes one unchanged. What differs is
+the encoding of the manifest — protobuf (`aapt.pb.XmlNode`) rather than binary
+XML — and the entry layout, where everything sits under a module directory such
+as `base/`.
+
+`smali::android::aab` decodes a bundle manifest into the **same**
+`AndroidManifest` DOM used for APKs, so manifest-editing code is shared between
+the two container formats:
+
+```rust
+use smali::android::aab;
+use smali::android::zip::ApkFile;
+
+let mut bundle = ApkFile::from_file("app.aab")?;
+let raw = &bundle.entry(aab::MANIFEST_PATH).unwrap().data;
+
+let mut manifest = aab::decode_manifest(raw)?;
+manifest.set_version_name("2.0");
+
+bundle.replace_entry(aab::MANIFEST_PATH, aab::encode_manifest(&manifest)?)?;
+bundle.write_to_file("out.aab")?;
+```
+
+`detect_format` tells the two containers apart from their entry names, and
+`to_apk_path` / `to_bundle_path` translate between the layouts, so a tool can
+match user-supplied paths in the familiar APK shape (`lib/arm64-v8a/libx.so`)
+regardless of which container it opened.
+
+Two bundletool compatibility details are handled for you:
+
+- **No directory entries.** bundletool rejects an `.aab` containing directory zip
+  entries, which the zip writer emits by default. Archives detected as bundles
+  disable them automatically; `ApkFile::set_directory_entries` overrides this
+  when you build an archive from scratch.
+- **Non-empty targeted directories.** If you add or remove native libraries or
+  asset directories, regenerate `base/native.pb` and `base/assets.pb` with
+  `encode_native_pb` / `encode_assets_pb` (fed by `native_abis_from_entries` /
+  `asset_dirs_from_entries`) — bundletool rejects targeting that points at a
+  directory which no longer exists.
+
+Manifest encoding preserves source positions and compiled values verbatim, so an
+unmodified manifest re-encodes byte-for-byte. Insignificant whitespace text
+nodes between elements are dropped, which is semantically equivalent but means
+a manifest containing them re-encodes slightly smaller.
+
+`base/resources.pb` is passed through as opaque bytes — the `ResourceTable`
+schema is much larger than the manifest's and repackaging does not require
+decoding it.
+
 ## Error handling
 
 Every parser in this crate is meant to be safe to point at a file you did not

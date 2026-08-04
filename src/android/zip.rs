@@ -84,6 +84,12 @@ impl ApkEntry {
 /// platforms.
 pub struct ApkFile {
     entries: BTreeMap<String, ApkEntry>,
+    /// Whether to synthesise a zip entry for each directory prefix on write.
+    ///
+    /// APK tooling tolerates these; `bundletool` rejects them outright with
+    /// "The bundle zip file contains directory zip entry '...' which is not
+    /// allowed", so archives detected as App Bundles default to `false`.
+    directory_entries: bool,
 }
 
 impl Default for ApkFile {
@@ -96,6 +102,7 @@ impl ApkFile {
     pub fn new() -> Self {
         ApkFile {
             entries: BTreeMap::new(),
+            directory_entries: true,
         }
     }
 
@@ -125,7 +132,14 @@ impl ApkFile {
                 .with_compression(compression);
             entries.insert(name, apk_entry);
         }
-        Ok(ApkFile { entries })
+        let directory_entries = !matches!(
+            crate::android::aab::detect_format(entries.keys().map(|k| k.as_str())),
+            crate::android::aab::BundleFormat::Aab
+        );
+        Ok(ApkFile {
+            entries,
+            directory_entries,
+        })
     }
 
     /// Snapshot a directory tree into an in-memory APK.
@@ -139,7 +153,14 @@ impl ApkFile {
         }
         let mut entries = BTreeMap::new();
         gather_directory_entries(dir, dir, &mut entries)?;
-        Ok(ApkFile { entries })
+        let directory_entries = !matches!(
+            crate::android::aab::detect_format(entries.keys().map(|k| k.as_str())),
+            crate::android::aab::BundleFormat::Aab
+        );
+        Ok(ApkFile {
+            entries,
+            directory_entries,
+        })
     }
 
     /// Serialize the in-memory APK back to disk as a ZIP/APK file.
@@ -162,11 +183,14 @@ impl ApkFile {
             central_records.push(record);
         }
 
-        // Directory records (deterministic order)
-        let directory_names = collect_directory_names(&file_names);
-        for dir in directory_names {
-            let record = write_directory_entry(&mut buffer, &dir)?;
-            central_records.push(record);
+        // Directory records (deterministic order). Suppressed for App Bundles:
+        // bundletool rejects any directory entry in an .aab.
+        if self.directory_entries {
+            let directory_names = collect_directory_names(&file_names);
+            for dir in directory_names {
+                let record = write_directory_entry(&mut buffer, &dir)?;
+                central_records.push(record);
+            }
         }
 
         let central_start = buffer.len() as u32;
@@ -205,6 +229,21 @@ impl ApkFile {
     }
 
     /// Iterate over entry names.
+    /// Control whether directory entries are written into the archive.
+    ///
+    /// Defaults to `true` for APKs and `false` for App Bundles, which is
+    /// detected on load — bundletool rejects an `.aab` containing any directory
+    /// entry. Set this explicitly when building an archive from scratch with
+    /// [`ApkFile::new`], since there are no entries to detect the format from.
+    pub fn set_directory_entries(&mut self, enabled: bool) {
+        self.directory_entries = enabled;
+    }
+
+    /// Whether directory entries will be emitted on write.
+    pub fn directory_entries(&self) -> bool {
+        self.directory_entries
+    }
+
     pub fn entry_names(&self) -> impl Iterator<Item = &str> {
         self.entries.keys().map(|s| s.as_str())
     }

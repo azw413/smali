@@ -5,6 +5,7 @@ mod dex_debug;
 mod multi_dex;
 mod annotations;
 mod kotlin_metadata;
+mod aab;
 mod robustness;
 
 #[cfg(test)]
