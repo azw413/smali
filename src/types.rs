@@ -45,10 +45,33 @@ impl fmt::Display for SmaliError {
     }
 }
 
-impl Error for SmaliError {
-    fn description(&self) -> &str {
-        &self.details
-    }
+impl Error for SmaliError {}
+
+/// Build a parse error that names the line and column where parsing stopped.
+///
+/// nom reports failures by handing back the unconsumed tail of the input, so
+/// the offset is the difference in lengths. Without this the caller only ever
+/// saw `ErrorKind::Fail` plus the entire remainder of the file inlined into the
+/// message, which is unusable on a real class.
+fn parse_error_at(full: &str, remaining: &str) -> SmaliError {
+    let offset = full.len().saturating_sub(remaining.len());
+    let consumed = &full[..offset.min(full.len())];
+    let line = consumed.bytes().filter(|b| *b == b'\n').count() + 1;
+    let column = consumed
+        .rfind('\n')
+        .map_or(offset, |nl| offset - nl - 1)
+        .saturating_add(1);
+    // A short excerpt is far more useful than the whole remaining file.
+    let excerpt: String = remaining
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(80)
+        .collect();
+    SmaliError::new(&format!(
+        "Class parse error at line {line}, column {column}: {excerpt:?}"
+    ))
 }
 
 /// Represents a Java object identifier
@@ -95,23 +118,34 @@ impl fmt::Display for ObjectIdentifier {
 }
 
 impl ObjectIdentifier {
+    /// Parse a JNI type descriptor (`Ljava/lang/Object;`) into an identifier.
+    ///
+    /// Returns an error for anything that isn't an object descriptor, including
+    /// primitives (`I`), arrays (`[I`) and unterminated names (`Lfoo`). Prefer
+    /// this over [`ObjectIdentifier::from_jni_type`] whenever the descriptor
+    /// comes from a file rather than from a literal in your own source.
+    pub fn try_from_jni_type(t: &str) -> Result<ObjectIdentifier, SmaliError> {
+        match parse_typesignature(t) {
+            Ok((_, TypeSignature::Object(o))) => Ok(o),
+            Ok(_) => Err(SmaliError::new(&format!(
+                "type descriptor '{t}' is not an object type"
+            ))),
+            Err(_) => Err(SmaliError::new(&format!(
+                "could not parse type descriptor '{t}'"
+            ))),
+        }
+    }
+
+    /// Infallible wrapper around [`ObjectIdentifier::try_from_jni_type`].
+    ///
+    /// # Panics
+    /// Panics if `t` is not a well-formed object descriptor. Use
+    /// [`ObjectIdentifier::try_from_jni_type`] for descriptors read from a
+    /// DEX or `.smali` file, which may be malformed.
     #[allow(dead_code)]
     pub fn from_jni_type(t: &str) -> ObjectIdentifier {
-        let ts = parse_typesignature(t).unwrap();
-        if let (_, TypeSignature::Object(o)) = ts {
-            o
-        } else {
-            ObjectIdentifier {
-                class_name: t
-                    .strip_prefix('L')
-                    .unwrap()
-                    .strip_suffix(';')
-                    .unwrap()
-                    .to_string(),
-                type_arguments: None,
-                suffix: None,
-            }
-        }
+        Self::try_from_jni_type(t)
+            .unwrap_or_else(|e| panic!("Could not parse ObjectIdentifier: {t}: {e}"))
     }
 
     #[allow(dead_code)]
@@ -196,10 +230,26 @@ impl fmt::Display for TypeSignature {
 }
 
 impl TypeSignature {
+    /// Parse a JNI type descriptor into a [`TypeSignature`].
+    ///
+    /// Prefer this over [`TypeSignature::from_jni`] whenever the descriptor
+    /// comes from a file rather than from a literal in your own source.
+    pub fn try_from_jni(s: &str) -> Result<TypeSignature, SmaliError> {
+        match parse_typesignature(s) {
+            Ok((_, ts)) => Ok(ts),
+            Err(_) => Err(SmaliError::new(&format!(
+                "could not parse type descriptor '{s}'"
+            ))),
+        }
+    }
+
+    /// Infallible wrapper around [`TypeSignature::try_from_jni`].
+    ///
+    /// # Panics
+    /// Panics if `s` is not a well-formed type descriptor.
     pub fn from_jni(s: &str) -> TypeSignature {
-        let (_, ts) =
-            parse_typesignature(s).unwrap_or_else(|_| panic!("Could not parse TypeSignature: {s}"));
-        ts
+        Self::try_from_jni(s)
+            .unwrap_or_else(|e| panic!("Could not parse TypeSignature: {s}: {e}"))
     }
 
     pub fn to_jni(&self) -> String {
@@ -271,9 +321,26 @@ pub struct MethodSignature {
 }
 
 impl MethodSignature {
+    /// Parse a JNI method descriptor (`(II)J`) into a [`MethodSignature`].
+    ///
+    /// Prefer this over [`MethodSignature::from_jni`] whenever the descriptor
+    /// comes from a file rather than from a literal in your own source.
+    pub fn try_from_jni(s: &str) -> Result<MethodSignature, SmaliError> {
+        match parse_methodsignature(s) {
+            Ok((_, m)) => Ok(m),
+            Err(_) => Err(SmaliError::new(&format!(
+                "could not parse method descriptor '{s}'"
+            ))),
+        }
+    }
+
+    /// Infallible wrapper around [`MethodSignature::try_from_jni`].
+    ///
+    /// # Panics
+    /// Panics if `s` is not a well-formed method descriptor.
     pub fn from_jni(s: &str) -> MethodSignature {
-        let (_, m) = parse_methodsignature(s).expect("Can't parse MethodSignature");
-        m
+        Self::try_from_jni(s)
+            .unwrap_or_else(|e| panic!("Could not parse MethodSignature: {s}: {e}"))
     }
 
     pub fn to_jni(&self) -> String {
@@ -966,12 +1033,10 @@ impl SmaliClass {
         let d = parse_class(s);
         match d {
             Ok((_, cl)) => Ok(cl),
-            Err(Failure(e)) => Err(SmaliError {
-                details: format!("Class parse error at: {:?}", e.to_string()),
-            }),
-            _ => Err(SmaliError {
-                details: "Unknown class parse error".to_string(),
-            }),
+            Err(Failure(e)) | Err(nom::Err::Error(e)) => Err(parse_error_at(s, e.input)),
+            Err(nom::Err::Incomplete(_)) => Err(SmaliError::new(
+                "Class parse error: unexpected end of input",
+            )),
         }
     }
 
@@ -989,12 +1054,16 @@ impl SmaliClass {
     pub fn read_from_file(path: &Path) -> Result<SmaliClass, SmaliError> {
         match fs::read_to_string(path) {
             Ok(s) => {
-                let mut c = SmaliClass::from_smali(&s)?;
+                // Attach the path to parse failures too: without it, walking a
+                // tree of thousands of classes reports neither file nor line.
+                let mut c = SmaliClass::from_smali(&s).map_err(|e| {
+                    SmaliError::new(&format!("{}: {}", path.to_string_lossy(), e.details))
+                })?;
                 c.file_path = Some(PathBuf::from(path));
                 Ok(c)
             }
             Err(e) => Err(SmaliError {
-                details: format!("Error loading file {}: {}", path.to_str().unwrap(), e),
+                details: format!("Error loading file {}: {}", path.to_string_lossy(), e),
             }),
         }
     }

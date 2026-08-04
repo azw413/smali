@@ -56,3 +56,11 @@ impl fmt::Display for DexError {
 }
 
 impl std::error::Error for DexError {}
+
+/// Lets the DEX layer propagate failures raised by the shared `types` layer
+/// (type/method descriptor parsing) without discarding their message.
+impl From<crate::types::SmaliError> for DexError {
+    fn from(e: crate::types::SmaliError) -> Self {
+        DexError::new(&e.details)
+    }
+}

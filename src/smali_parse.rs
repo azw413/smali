@@ -182,10 +182,9 @@ fn parse_enum(smali: &str) -> IResult<&str, AnnotationValue> {
     let (input, _) = tag("->").parse(input)?;
     let (input, field) = take_while(|x| x != ':' && x != '\n').parse(input)?;
     let (input, _) = take_until_eol(input)?;
-    Ok((
-        input,
-        AnnotationValue::Enum(ObjectIdentifier::from_jni_type(object), field.to_string()),
-    ))
+    let obj = ObjectIdentifier::try_from_jni_type(object)
+        .map_err(|_| nom::Err::Failure(Error::new(object, ErrorKind::Fail)))?;
+    Ok((input, AnnotationValue::Enum(obj, field.to_string())))
 }
 
 fn parse_annotation(smali: &str, subannotation: bool) -> IResult<&str, SmaliAnnotation> {
@@ -207,7 +206,8 @@ fn parse_annotation(smali: &str, subannotation: bool) -> IResult<&str, SmaliAnno
     let (input, type_sig) = take_until_eol(input)?;
     let mut annotation = SmaliAnnotation {
         visibility,
-        annotation_type: TypeSignature::from_jni(type_sig),
+        annotation_type: TypeSignature::try_from_jni(type_sig)
+            .map_err(|_| nom::Err::Failure(Error::new(type_sig, ErrorKind::Fail)))?,
         elements: vec![],
     };
 
@@ -250,7 +250,8 @@ fn parse_field(smali: &str) -> IResult<&str, SmaliField> {
     let mut field = SmaliField {
         name: name.to_string(),
         modifiers,
-        signature: TypeSignature::from_jni(type_sig.trim()),
+        signature: TypeSignature::try_from_jni(type_sig.trim())
+            .map_err(|_| nom::Err::Failure(Error::new(type_sig, ErrorKind::Fail)))?,
         annotations: vec![],
         initial_value: None,
     };
@@ -480,7 +481,10 @@ pub(crate) fn parse_op(smali: &str) -> IResult<&str, SmaliOp> {
     // Line
     if let IResult::Ok((o, _)) = ws(tag::<&str, &str, Error<&str>>(".line")).parse(smali) {
         let (o, n) = take_until_eol(o)?;
-        IResult::Ok((o, SmaliOp::Line(n.parse::<u32>().unwrap())))
+        let line = n.trim().parse::<u32>().map_err(|_| {
+            nom::Err::Failure(Error::new(n, ErrorKind::Fail))
+        })?;
+        IResult::Ok((o, SmaliOp::Line(line)))
     }
     // Label
     else if let IResult::Ok((o, _)) = ws(tag::<&str, &str, Error<&str>>(":")).parse(smali) {
@@ -625,7 +629,9 @@ pub fn parse_method(smali: &str) -> IResult<&str, SmaliMethod> {
         // .locals directive
         if let IResult::Ok((o, _)) = ws(tag::<&str, &str, Error<&str>>(".locals")).parse(input) {
             let (o, local_count) = take_until_eol(o)?;
-            method.locals = local_count.trim().parse::<u32>().unwrap();
+            method.locals = local_count.trim().parse::<u32>().map_err(|_| {
+                nom::Err::Failure(Error::new(local_count, ErrorKind::Fail))
+            })?;
             method.registers = None;
             input = o;
             found = true;
@@ -697,7 +703,9 @@ pub fn parse_method(smali: &str) -> IResult<&str, SmaliMethod> {
         // Other directives to skip (e.g., .registers)
         if let IResult::Ok((o, _)) = ws(tag::<&str, &str, Error<&str>>(".registers")).parse(input) {
             let (o, reg_count) = take_until_eol(o)?;
-            method.registers = Some(reg_count.trim().parse::<u32>().unwrap());
+            method.registers = Some(reg_count.trim().parse::<u32>().map_err(|_| {
+                nom::Err::Failure(Error::new(reg_count, ErrorKind::Fail))
+            })?);
             input = o;
             found = true;
         }
@@ -755,7 +763,8 @@ pub(crate) fn parse_class(smali: &str) -> IResult<&str, SmaliClass> {
         if let IResult::Ok((o, (m, c))) = parse_class_line(input) {
             // println!("class line: {:?} {}", m, c);
             dex.modifiers = m;
-            dex.name = ObjectIdentifier::from_jni_type(&c);
+            dex.name = ObjectIdentifier::try_from_jni_type(&c)
+                .map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Fail)))?;
             input = o;
             found = true;
         }
@@ -763,7 +772,8 @@ pub(crate) fn parse_class(smali: &str) -> IResult<&str, SmaliClass> {
         // Is it a super line
         if let IResult::Ok((o, c)) = parse_super_line(input) {
             // println!("super line: {}", c);
-            dex.super_class = ObjectIdentifier::from_jni_type(&c);
+            dex.super_class = ObjectIdentifier::try_from_jni_type(&c)
+                .map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Fail)))?;
             input = o;
             found = true;
         }
@@ -779,36 +789,52 @@ pub(crate) fn parse_class(smali: &str) -> IResult<&str, SmaliClass> {
         // Is it an implements line
         if let IResult::Ok((o, c)) = parse_implements_line(input) {
             // println!("implements line: {}", c);
-            dex.implements.push(ObjectIdentifier::from_jni_type(&c));
+            dex.implements.push(
+                ObjectIdentifier::try_from_jni_type(&c)
+                    .map_err(|_| nom::Err::Failure(Error::new(input, ErrorKind::Fail)))?,
+            );
             input = o;
             found = true;
         }
 
         // Is it an annotation line
         //let ann: IResult<&str, SmaliAnnotation>  = parse_annotation(input );
-        if let IResult::Ok((o, a)) = parse_annotation(input, false) {
-            // println!("annotation: {:?}", a);
-            dex.annotations.push(a);
-            input = o;
-            found = true;
+        // `Failure` means "this *is* an annotation, but it is malformed" — that
+        // carries a far more precise position than the class-level fallback
+        // below, so propagate it instead of swallowing it. A plain `Error` just
+        // means "not an annotation", so we fall through and try the next form.
+        match parse_annotation(input, false) {
+            IResult::Ok((o, a)) => {
+                dex.annotations.push(a);
+                input = o;
+                found = true;
+            }
+            IResult::Err(e @ Failure(_)) => return IResult::Err(e),
+            IResult::Err(_) => {}
         }
 
         // Is it a field line
         //let ann: IResult<&str, SmaliAnnotation>  = parse_annotation(input );
-        if let IResult::Ok((o, f)) = parse_field(input) {
-            // println!("field: {:?}", f);
-            dex.fields.push(f);
-            input = o;
-            found = true;
+        match parse_field(input) {
+            IResult::Ok((o, f)) => {
+                dex.fields.push(f);
+                input = o;
+                found = true;
+            }
+            IResult::Err(e @ Failure(_)) => return IResult::Err(e),
+            IResult::Err(_) => {}
         }
 
         // Is it a field line
         //let ann: IResult<&str, SmaliAnnotation>  = parse_annotation(input );
-        if let IResult::Ok((o, m)) = parse_method(input) {
-            // println!("method: {:?}", m);
-            dex.methods.push(m);
-            input = o;
-            found = true;
+        match parse_method(input) {
+            IResult::Ok((o, m)) => {
+                dex.methods.push(m);
+                input = o;
+                found = true;
+            }
+            IResult::Err(e @ Failure(_)) => return IResult::Err(e),
+            IResult::Err(_) => {}
         }
 
         if input.is_empty() {

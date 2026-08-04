@@ -1803,7 +1803,10 @@ fn parse_register(input: &str) -> IResult<&str, SmaliRegister> {
     // We accept either 'v' or 'p' followed by one or more digits.
     let (input, t) = alt((char('v'), char('p'))).parse(input)?;
     let (input, num_str) = digit1(input)?;
-    let num = num_str.parse::<u16>().unwrap();
+    // Register numbers are 16-bit; `v99999` in a hand-written file must not panic.
+    let num = num_str.parse::<u16>().map_err(|_| {
+        nom::Err::Failure(nom::error::Error::new(num_str, ErrorKind::Fail))
+    })?;
     Ok((
         input,
         match t {
@@ -2433,7 +2436,7 @@ macro_rules! range_method_case {
 pub fn parse_op(input: &str) -> IResult<&str, DexOp> {
     let (input, op) =
         take_while1(|c: char| c.is_alphanumeric() || c == '-' || c == '/').parse(input)?;
-    let r = match op {
+    match op {
         // Invoke operations
         "invoke-static" => invoke_case!(InvokeStatic, input),
         "execute-inline" => parse_execute_inline(input),
@@ -2743,15 +2746,15 @@ pub fn parse_op(input: &str) -> IResult<&str, DexOp> {
         "nop" => IResult::Ok((input, DexOp::Nop)),
         "return-void" => IResult::Ok((input, DexOp::ReturnVoid)),
 
-        _ => {
-            panic!("Unhandled operation {op} {input}")
-        }
-    };
-    match r {
-        Ok(_) => r,
-        Err(e) => {
-            panic!("Error parsing operation {op} {input}: {e}")
-        }
+        // An unrecognised mnemonic is a parse failure, not a crash: `.smali`
+        // input is untrusted, and the DEX decoder also routes through here when
+        // it renders an instruction it cannot round-trip. Operand-level
+        // failures likewise propagate as nom errors so the caller can report a
+        // position, rather than unwinding out of a library call.
+        _ => IResult::Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            ErrorKind::Fail,
+        ))),
     }
 }
 

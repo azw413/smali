@@ -45,12 +45,18 @@ pub(crate) fn read_u4(bytes: &[u8], ix: &mut usize) -> Result<u32, DexError> {
 }
 
 pub(crate) fn read_uleb128(bytes: &[u8], ix: &mut usize) -> Result<u32, DexError> {
+    if *ix >= bytes.len() {
+        fail!("Unexpected end of stream reading uleb128 at index {}", *ix);
+    }
     let (val, size) = decode_uleb128(&bytes[*ix..]);
     *ix += size;
     Ok(val)
 }
 
 pub(crate) fn read_uleb128p1(bytes: &[u8], ix: &mut usize) -> Result<i32, DexError> {
+    if *ix >= bytes.len() {
+        fail!("Unexpected end of stream reading uleb128p1 at index {}", *ix);
+    }
     let (val, size) = decode_uleb128p1(&bytes[*ix..]);
     *ix += size;
     Ok(val)

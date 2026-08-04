@@ -5,6 +5,7 @@ mod dex_debug;
 mod multi_dex;
 mod annotations;
 mod kotlin_metadata;
+mod robustness;
 
 #[cfg(test)]
 mod parser_tests {

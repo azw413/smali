@@ -340,7 +340,26 @@ impl EncodedValue {
     }
 }
 
+/// Reject a `value_arg`-derived byte count that cannot fit the target type.
+///
+/// `size` is `(header >> 5) + 1`, i.e. 1..=8, but each encoded-value type has a
+/// fixed width. A crafted header can therefore ask for more bytes than the type
+/// holds, which would shift past the type width — an overflow panic in debug
+/// builds and a silently wrong value in release.
+fn check_var_size(size: usize, max: usize, what: &str) -> Result<(), DexError> {
+    if size == 0 || size > max {
+        fail!(
+            "encoded {} has invalid size {} (expected 1..={})",
+            what,
+            size,
+            max
+        );
+    }
+    Ok(())
+}
+
 fn read_var_u16(bytes: &[u8], ix: &mut usize, size: usize) -> Result<u16, DexError> {
+    check_var_size(size, 2, "u16")?;
     let mut result = 0;
     for i in 0..size {
         let byte = read_u1(bytes, ix)?;
@@ -353,6 +372,7 @@ fn read_var_u16(bytes: &[u8], ix: &mut usize, size: usize) -> Result<u16, DexErr
 }
 
 fn read_var_u32(bytes: &[u8], ix: &mut usize, size: usize) -> Result<u32, DexError> {
+    check_var_size(size, 4, "u32")?;
     let mut result = 0;
     for i in 0..size {
         let byte = read_u1(bytes, ix)?;
@@ -363,6 +383,7 @@ fn read_var_u32(bytes: &[u8], ix: &mut usize, size: usize) -> Result<u32, DexErr
 }
 
 fn read_var_i32(bytes: &[u8], ix: &mut usize, size: usize) -> Result<i32, DexError> {
+    check_var_size(size, 4, "i32")?;
     let mut result = 0i32;
     for i in 0..size {
         let byte = read_u1(bytes, ix)?;
@@ -375,6 +396,7 @@ fn read_var_i32(bytes: &[u8], ix: &mut usize, size: usize) -> Result<i32, DexErr
 }
 
 fn read_var_i64(bytes: &[u8], ix: &mut usize, size: usize) -> Result<i64, DexError> {
+    check_var_size(size, 8, "i64")?;
     let mut result = 0i64;
     for i in 0..size {
         let byte = read_u1(bytes, ix)?;
@@ -387,6 +409,7 @@ fn read_var_i64(bytes: &[u8], ix: &mut usize, size: usize) -> Result<i64, DexErr
 }
 
 fn read_var_f32(bytes: &[u8], ix: &mut usize, size: usize) -> Result<f32, DexError> {
+    check_var_size(size, 4, "f32")?;
     let mut result = 0u32;
     for i in 0..size {
         let byte = read_u1(bytes, ix)?;
@@ -396,6 +419,7 @@ fn read_var_f32(bytes: &[u8], ix: &mut usize, size: usize) -> Result<f32, DexErr
 }
 
 fn read_var_f64(bytes: &[u8], ix: &mut usize, size: usize) -> Result<f64, DexError> {
+    check_var_size(size, 8, "f64")?;
     let mut result = 0u64;
     for i in 0..size {
         let byte = read_u1(bytes, ix)?;

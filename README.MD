@@ -87,6 +87,40 @@ fn patch_dex_entry(apk: &mut ApkFile, entry_name: &str) -> Result<bool, Box<dyn 
 
 Take a look at the full examples for a better idea and also an example of how to update the Android manifest file.
 
+## Error handling
+
+Every parser in this crate is meant to be safe to point at a file you did not
+create — an APK pulled off a device, an obfuscated DEX, a hand-edited `.smali`.
+As of 0.6.0, malformed input returns an `Err` rather than panicking:
+`DexFile::from_bytes`, `DexFile::to_smali` and `SmaliClass::from_smali` no
+longer unwind out of the library on truncated, corrupted or hostile input. This
+is covered by fuzz-style regression tests in `src/tests/robustness.rs`.
+
+Parse errors from `.smali` text now carry a position and a short excerpt instead
+of the entire remainder of the file:
+
+```text
+Class parse error at line 5, column 5: "frobnicate v0"
+```
+
+`SmaliClass::read_from_file` prefixes the path, so walking a tree of thousands
+of classes tells you which file failed as well as where.
+
+Type and method descriptors have fallible constructors. Use these whenever the
+descriptor comes from a file rather than a literal in your own source:
+
+```rust
+use smali::types::{MethodSignature, ObjectIdentifier, TypeSignature};
+
+let obj = ObjectIdentifier::try_from_jni_type("Ljava/lang/String;")?;
+let ty  = TypeSignature::try_from_jni("[I")?;
+let sig = MethodSignature::try_from_jni("(II)J")?;
+```
+
+The original `from_jni_type` / `from_jni` functions still exist and still return
+the value directly, but they panic on malformed input — they are only
+appropriate for descriptors you wrote yourself.
+
 ## Working with large APKs (multi-DEX)
 
 Modern Android apps frequently ship more than one DEX (`classes.dex`, `classes2.dex`, ...) because a single DEX can only address 65,536 distinct type / field / method / prototype references via its 16-bit instruction operands. When you load such an APK, modify enough classes, and write it back, the rebuilt set of classes may no longer fit in one DEX.

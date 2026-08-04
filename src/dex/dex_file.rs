@@ -1194,10 +1194,17 @@ impl DexFile {
         *ix = dex.header.type_ids_off as usize;
         for _ in 0..dex.header.type_ids_size {
             let type_id: TypeId = read_u4(bytes, ix)? as usize;
-            if let DexString::Decoded(_s) = &dex.strings[type_id] {
+            let Some(entry) = dex.strings.get(type_id) else {
+                fail!(
+                    "type_id {} out of range (string pool holds {})",
+                    type_id,
+                    dex.strings.len()
+                );
+            };
+            if let DexString::Decoded(_s) = entry {
                 dex.types.push(type_id);
             } else {
-                fail!("Invalid type description: {:?}", &dex.strings[type_id]);
+                fail!("Invalid type description: {:?}", entry);
             }
         }
 
@@ -1303,7 +1310,12 @@ impl DexFile {
     }
 
     fn get_string(&self, id: StringId) -> Result<String, DexError> {
-        let name_string = &self.strings[id];
+        let name_string = self.strings.get(id).ok_or_else(|| {
+            DexError::new(&format!(
+                "string index {id} out of range (pool holds {})",
+                self.strings.len()
+            ))
+        })?;
         let name = match name_string {
             DexString::Decoded(s) => s.to_string(),
             // Some DEX strings (notably in obfuscated apps) contain unpaired
@@ -1316,14 +1328,64 @@ impl DexFile {
         Ok(name)
     }
 
+    /// Bounds-checked accessor for the `method_id` table.
+    fn method_item(&self, idx: usize) -> Result<&MethodItem, DexError> {
+        self.methods.get(idx).ok_or_else(|| {
+            DexError::new(&format!(
+                "method index {idx} out of range (table holds {})",
+                self.methods.len()
+            ))
+        })
+    }
+
+    /// Bounds-checked accessor for the `proto_id` table.
+    fn proto_item(&self, idx: usize) -> Result<&PrototypeItem, DexError> {
+        self.prototypes.get(idx).ok_or_else(|| {
+            DexError::new(&format!(
+                "prototype index {idx} out of range (table holds {})",
+                self.prototypes.len()
+            ))
+        })
+    }
+
+    /// Bounds-checked accessor for the `field_id` table.
+    fn field_item(&self, idx: usize) -> Result<&FieldItem, DexError> {
+        self.fields.get(idx).ok_or_else(|| {
+            DexError::new(&format!(
+                "field index {idx} out of range (table holds {})",
+                self.fields.len()
+            ))
+        })
+    }
+
+    /// Resolve a `type_id` to its string-pool slot, bounds-checking the type table.
+    fn type_string_id(&self, id: TypeId) -> Result<StringId, DexError> {
+        self.types.get(id).copied().ok_or_else(|| {
+            DexError::new(&format!(
+                "type index {id} out of range (type table holds {})",
+                self.types.len()
+            ))
+        })
+    }
+
     fn get_type(&self, id: TypeId) -> Result<ObjectIdentifier, DexError> {
-        let type_str = self.get_string(self.types[id])?;
-        Ok(ObjectIdentifier::from_jni_type(&type_str))
+        let type_str = self.get_string(self.type_string_id(id)?)?;
+        ObjectIdentifier::try_from_jni_type(&type_str)
+            .map_err(|e| DexError::with_context(e.into(), format!("type index {id}")))
     }
 
     // Helper: get type descriptor string from type_idx
     fn type_desc(&self, type_idx: TypeId) -> Result<String, DexError> {
-        self.strings[self.types[type_idx]].to_string()
+        let sid = self.type_string_id(type_idx)?;
+        self.strings
+            .get(sid)
+            .ok_or_else(|| {
+                DexError::new(&format!(
+                    "string index {sid} out of range (pool holds {})",
+                    self.strings.len()
+                ))
+            })?
+            .to_string()
     }
 
     fn map_debug_register(
@@ -1591,7 +1653,7 @@ impl DexFile {
                     let class_desc = self.type_desc(mi.class_idx)?;
                     let name = self.get_string(mi.name_idx)?;
                     let proto = if mi.proto_idx < self.prototypes.len() {
-                        let proto = &self.prototypes[mi.proto_idx];
+                        let proto = self.proto_item(mi.proto_idx)?;
                         let mut desc = String::from("(");
                         for &t in &proto.parameters.0 {
                             desc.push_str(&self.type_desc(t)?);
@@ -1639,11 +1701,11 @@ impl DexFile {
 
         let vis = Self::convert_visibility(item.visibility);
         let ann_type_desc = self.type_desc(item.annotation.type_idx as usize)?;
-        let ann_type = TypeSignature::from_jni(&ann_type_desc);
+        let ann_type = TypeSignature::try_from_jni(&ann_type_desc)?;
 
         let mut elements: Vec<SmaliAnnElement> = Vec::with_capacity(item.annotation.elements.len());
         for e in &item.annotation.elements {
-            let name = self.strings[e.name_idx as usize].to_string()?;
+            let name = self.get_string(e.name_idx as usize)?;
 
             let value_av = match &e.value {
                 EV::Array(vals) => {
@@ -1675,11 +1737,11 @@ impl DexFile {
                     // Nested annotation in a value: convert with a default visibility.
                     // (Visibility of nested annotation values isn’t printed; using Runtime is safe.)
                     let sub_type_desc = self.type_desc(sub.type_idx as usize)?;
-                    let sub_type = TypeSignature::from_jni(&sub_type_desc);
+                    let sub_type = TypeSignature::try_from_jni(&sub_type_desc)?;
                     let mut sub_elems: Vec<SmaliAnnElement> =
                         Vec::with_capacity(sub.elements.len());
                     for se in &sub.elements {
-                        let sname = self.strings[se.name_idx as usize].to_string()?;
+                        let sname = self.get_string(se.name_idx as usize)?;
                         let sval = match &se.value {
                             EV::Array(vals) => {
                                 // Same unrepresentable-element handling as the top-level
@@ -1893,7 +1955,7 @@ impl DexFile {
             if let Some(class_data) = &c.class_data {
                 // Static fields
                 for (i, f) in class_data.static_fields.iter().enumerate() {
-                    let dex_field = &self.fields[f.field_idx];
+                    let dex_field = self.field_item(f.field_idx)?;
 
                     let mut field_annotations = vec![];
                     if let Some(dir) = &c.annotations {
@@ -1929,9 +1991,9 @@ impl DexFile {
                             });
                             modifiers
                         },
-                        signature: TypeSignature::from_jni(
-                            &self.get_string(self.types[dex_field.type_idx])?,
-                        ),
+                        signature: TypeSignature::try_from_jni(
+                            &self.get_string(self.type_string_id(dex_field.type_idx)?)?,
+                        )?,
                         initial_value: if let Some(s) = &c.static_values {
                             if i < s.len() {
                                 match s[i] {
@@ -1957,7 +2019,7 @@ impl DexFile {
 
                 // Instance fields
                 for f in &class_data.instance_fields {
-                    let dex_field = &self.fields[f.field_idx];
+                    let dex_field = self.field_item(f.field_idx)?;
 
                     let mut field_annotations = vec![];
                     if let Some(dir) = &c.annotations {
@@ -1993,9 +2055,9 @@ impl DexFile {
                             });
                             modifiers
                         },
-                        signature: TypeSignature::from_jni(
-                            &self.get_string(self.types[dex_field.type_idx])?,
-                        ),
+                        signature: TypeSignature::try_from_jni(
+                            &self.get_string(self.type_string_id(dex_field.type_idx)?)?,
+                        )?,
                         initial_value: None,
                         annotations: field_annotations,
                     });
@@ -2051,19 +2113,19 @@ impl DexFile {
             }
 
             for m in all_methods {
-                let mi = &self.methods[m.method_idx];
+                let mi = self.method_item(m.method_idx)?;
                 let name = self.get_string(mi.name_idx)?;
-                let proto = &self.prototypes[mi.proto_idx];
+                let proto = self.proto_item(mi.proto_idx)?;
 
                 // Build JNI method signature string
                 let mut sig = String::new();
                 sig.push('(');
                 for &t in &proto.parameters.0 {
-                    sig.push_str(&self.get_string(self.types[t])?);
+                    sig.push_str(&self.get_string(self.type_string_id(t)?)?);
                 }
                 sig.push(')');
-                sig.push_str(&self.get_string(self.types[proto.return_type_idx])?);
-                let signature = MethodSignature::from_jni(&sig);
+                sig.push_str(&self.get_string(self.type_string_id(proto.return_type_idx)?)?);
+                let signature = MethodSignature::try_from_jni(&sig)?;
 
                 let is_static = (m.access_flags & ACC_STATIC) != 0;
                 let mut params: Vec<SmaliParam> = Vec::with_capacity(proto.parameters.0.len());
@@ -2101,7 +2163,7 @@ impl DexFile {
                         bc.push((u >> 8) as u8);
                     }
                     // Decode and propagate errors with method/class context
-                    let class_desc = self.get_string(self.types[mi.class_idx])?;
+                    let class_desc = self.get_string(self.type_string_id(mi.class_idx)?)?;
 
                     let resolver = DexRefResolver { dex: self };
                     let regmap = RegMapper {
