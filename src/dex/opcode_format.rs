@@ -266,11 +266,11 @@ pub mod assemble {
                     SmaliOp::Catch(_) => {}
                     SmaliOp::Op(dex_op) => {
                         let inst = self.lower_dex_op(dex_op, class_desc, method, &state.layout)?;
-                        state.push_instruction(inst, true);
+                        state.push_instruction(inst);
                     }
                     SmaliOp::ArrayData(array) => state.push_array_data(array)?,
-                    SmaliOp::PackedSwitch(dir) => state.push_packed_switch(dir)?,
-                    SmaliOp::SparseSwitch(dir) => state.push_sparse_switch(dir)?,
+                    SmaliOp::PackedSwitch(dir) => state.push_packed_switch(dir),
+                    SmaliOp::SparseSwitch(dir) => state.push_sparse_switch(dir),
                 }
             }
 
@@ -354,14 +354,44 @@ pub mod assemble {
         }
     }
 
+    /// Where a method body's instructions land once laid out.
+    ///
+    /// Produced from scratch by [`MethodAssemblyState::compute_layout`] on every
+    /// attempt in `finish`, so nothing here can go stale when a branch is widened.
+    struct MethodLayout {
+        /// `pad_before[i]` is set when instruction `i` is a payload that needs a
+        /// `nop` in front of it to reach a 4-byte boundary.
+        pad_before: Vec<bool>,
+        /// Label name to the code-unit offset it resolves to.
+        labels: HashMap<String, usize>,
+        /// Total size of the method body in code units.
+        total_cu: usize,
+    }
+
+    /// A `.line` directive, anchored to the instruction it precedes.
+    ///
+    /// Offsets are not known until layout, and layout re-runs whenever a branch is
+    /// widened, so the instruction index is the only stable anchor.
+    struct PendingLineEvent {
+        index: usize,
+        line: u32,
+    }
+
+    /// A debug directive, anchored to the instruction it precedes. See
+    /// [`PendingLineEvent`].
+    struct PendingDebugEvent {
+        index: usize,
+        directive: DebugDirective,
+    }
+
     struct MethodAssemblyState {
         layout: MethodRegisterLayout,
         instructions: Vec<LoweredInstruction>,
-        labels: HashMap<String, usize>,
-        current_offset_cu: usize,
-        pending_labels: Vec<String>,
-        line_events: Vec<LineEvent>,
-        debug_events: Vec<DebugDirectiveEvent>,
+        /// Label name to the index in `instructions` of the instruction it marks;
+        /// `instructions.len()` for a label at the very end of the method.
+        label_indices: HashMap<String, usize>,
+        line_events: Vec<PendingLineEvent>,
+        debug_events: Vec<PendingDebugEvent>,
         max_out_regs: u16,
     }
 
@@ -370,9 +400,7 @@ pub mod assemble {
             MethodAssemblyState {
                 layout,
                 instructions: Vec::new(),
-                labels: HashMap::new(),
-                current_offset_cu: 0,
-                pending_labels: Vec::new(),
+                label_indices: HashMap::new(),
                 line_events: Vec::new(),
                 debug_events: Vec::new(),
                 max_out_regs: 0,
@@ -380,23 +408,24 @@ pub mod assemble {
         }
 
         fn record_line(&mut self, line: u32) {
-            self.line_events.push(LineEvent {
-                offset_cu: self.current_offset_cu as u32,
+            self.line_events.push(PendingLineEvent {
+                index: self.instructions.len(),
                 line,
             });
         }
 
         fn record_debug(&mut self, directive: DebugDirective) {
-            self.debug_events.push(DebugDirectiveEvent {
-                offset_cu: self.current_offset_cu as u32,
+            self.debug_events.push(PendingDebugEvent {
+                index: self.instructions.len(),
                 directive,
             });
         }
 
         fn define_label(&mut self, label: &Label) -> Result<(), DexError> {
             let name = canonical_label_name(&label.0);
-            if let Some(existing) = self.labels.get(&name) {
-                if *existing == self.current_offset_cu {
+            let index = self.instructions.len();
+            if let Some(existing) = self.label_indices.get(&name) {
+                if *existing == index {
                     return Ok(());
                 }
                 return Err(DexError::new(&format!(
@@ -404,25 +433,13 @@ pub mod assemble {
                     name
                 )));
             }
-            self.labels.insert(name.clone(), self.current_offset_cu);
-            self.pending_labels.push(name);
+            self.label_indices.insert(name, index);
             Ok(())
         }
 
-        fn push_instruction(&mut self, mut inst: LoweredInstruction, consume_labels: bool) {
-            inst.offset_cu = self.current_offset_cu;
-            self.current_offset_cu += inst.size_cu();
+        fn push_instruction(&mut self, inst: LoweredInstruction) {
             self.note_outs_from_kind(&inst.kind);
             self.instructions.push(inst);
-            if consume_labels {
-                self.pending_labels.clear();
-            } else {
-                for name in &self.pending_labels {
-                    if let Some(entry) = self.labels.get_mut(name) {
-                        *entry = self.current_offset_cu;
-                    }
-                }
-            }
         }
 
         fn note_outs_from_kind(&mut self, kind: &LoweredKind) {
@@ -443,46 +460,68 @@ pub mod assemble {
         }
 
         fn push_array_data(&mut self, directive: &ArrayDataDirective) -> Result<(), DexError> {
-            self.ensure_payload_alignment(".array-data")?;
             let units = encode_array_data_units(directive)?;
-            let inst = LoweredInstruction::new_payload(LoweredKind::ArrayPayload { units });
-            self.push_instruction(inst, true);
+            self.push_instruction(LoweredInstruction::new_payload(LoweredKind::ArrayPayload {
+                units,
+            }));
             Ok(())
         }
 
-        fn push_packed_switch(
-            &mut self,
-            directive: &PackedSwitchDirective,
-        ) -> Result<(), DexError> {
-            self.ensure_payload_alignment(".packed-switch")?;
-            let inst = LoweredInstruction::new_payload(LoweredKind::PackedSwitchPayload {
-                directive: directive.clone(),
-            });
-            self.push_instruction(inst, true);
-            Ok(())
+        fn push_packed_switch(&mut self, directive: &PackedSwitchDirective) {
+            self.push_instruction(LoweredInstruction::new_payload(
+                LoweredKind::PackedSwitchPayload {
+                    directive: directive.clone(),
+                },
+            ));
         }
 
-        fn push_sparse_switch(
-            &mut self,
-            directive: &SparseSwitchDirective,
-        ) -> Result<(), DexError> {
-            self.ensure_payload_alignment(".sparse-switch")?;
-            let inst = LoweredInstruction::new_payload(LoweredKind::SparseSwitchPayload {
-                directive: directive.clone(),
-            });
-            self.push_instruction(inst, true);
-            Ok(())
+        fn push_sparse_switch(&mut self, directive: &SparseSwitchDirective) {
+            self.push_instruction(LoweredInstruction::new_payload(
+                LoweredKind::SparseSwitchPayload {
+                    directive: directive.clone(),
+                },
+            ));
         }
 
-        fn ensure_payload_alignment(&mut self, directive_name: &str) -> Result<(), DexError> {
-            if !self.current_offset_cu.is_multiple_of(2) {
-                let opcode = opcode_by_name("nop").ok_or_else(|| {
-                    DexError::new(&format!("opcode nop not present for {}", directive_name))
-                })?;
-                let inst = LoweredInstruction::new(opcode, LoweredKind::Format10x);
-                self.push_instruction(inst, false);
+        /// Assign an offset to every instruction, deciding along the way where
+        /// padding `nop`s are needed to keep payloads 4-byte aligned.
+        ///
+        /// This is recomputed from scratch on every attempt in [`Self::finish`]
+        /// rather than maintained incrementally, because widening a branch shifts
+        /// everything after it — and both promotions (`goto` -> `goto/16` and
+        /// `goto/16` -> `goto/32`) grow by a single code unit, so they flip the
+        /// parity of every later offset. An alignment decision taken before a
+        /// promotion can therefore be wrong in either direction: the padding `nop`
+        /// a payload needs may be missing, or one it no longer needs may be left
+        /// in place.
+        fn compute_layout(&mut self) -> MethodLayout {
+            let mut pad_before = vec![false; self.instructions.len()];
+            let mut offset = 0usize;
+            for (idx, inst) in self.instructions.iter_mut().enumerate() {
+                if inst.needs_alignment() && !offset.is_multiple_of(2) {
+                    pad_before[idx] = true;
+                    offset += 1;
+                }
+                inst.offset_cu = offset;
+                offset += inst.size_cu();
             }
-            Ok(())
+            let total_cu = offset;
+            let labels = self
+                .label_indices
+                .iter()
+                .map(|(name, idx)| {
+                    let target = self
+                        .instructions
+                        .get(*idx)
+                        .map_or(total_cu, |inst| inst.offset_cu);
+                    (name.clone(), target)
+                })
+                .collect();
+            MethodLayout {
+                pad_before,
+                labels,
+                total_cu,
+            }
         }
 
         fn finish(
@@ -490,15 +529,31 @@ pub mod assemble {
             api_level: i32,
             art_version: i32,
         ) -> Result<MethodAssemblyResult, DexError> {
+            // Format10x is a bare opcode with no operands, so the padding `nop`'s
+            // encoding is just its opcode value. Resolve it once: which payloads
+            // need padding changes between attempts, but the opcode does not.
+            let pad_unit = opcode_by_name("nop")
+                .and_then(|op| op.get_opcode_value(api_level, art_version))
+                .ok_or_else(|| {
+                    DexError::new(&format!(
+                        "opcode nop not available for api {} art {} to align payloads",
+                        api_level, art_version
+                    ))
+                })?;
+
             loop {
-                let payload_bases = self.compute_payload_bases()?;
-                let mut code = Vec::with_capacity(self.current_offset_cu);
+                let layout = self.compute_layout();
+                let payload_bases = self.compute_payload_bases(&layout.labels)?;
+                let mut code = Vec::with_capacity(layout.total_cu);
                 let mut branch_overflow: Option<usize> = None;
                 for (idx, inst) in self.instructions.iter().enumerate() {
+                    if layout.pad_before[idx] {
+                        code.push(pad_unit);
+                    }
                     match inst.encode(
                         api_level,
                         art_version,
-                        &self.labels,
+                        &layout.labels,
                         &payload_bases,
                         &mut code,
                     ) {
@@ -516,10 +571,33 @@ pub mod assemble {
                     continue;
                 }
 
-                let label_offsets = self
+                // Resolve the directives anchored to instruction indices now that
+                // this attempt's offsets are the ones actually emitted.
+                let offset_of = |index: usize| -> u32 {
+                    self.instructions
+                        .get(index)
+                        .map_or(layout.total_cu, |inst| inst.offset_cu) as u32
+                };
+                let line_events = self
+                    .line_events
+                    .iter()
+                    .map(|event| LineEvent {
+                        offset_cu: offset_of(event.index),
+                        line: event.line,
+                    })
+                    .collect();
+                let debug_events = self
+                    .debug_events
+                    .iter()
+                    .map(|event| DebugDirectiveEvent {
+                        offset_cu: offset_of(event.index),
+                        directive: event.directive.clone(),
+                    })
+                    .collect();
+                let label_offsets = layout
                     .labels
-                    .into_iter()
-                    .map(|(name, offset)| (name, offset as u32))
+                    .iter()
+                    .map(|(name, offset)| (name.clone(), *offset as u32))
                     .collect();
 
                 return Ok(MethodAssemblyResult {
@@ -529,17 +607,20 @@ pub mod assemble {
                     tries_size: 0,
                     encoded_code_units: code,
                     label_offsets,
-                    line_events: self.line_events,
-                    debug_events: self.debug_events,
+                    line_events,
+                    debug_events,
                 });
             }
         }
 
-        fn compute_payload_bases(&self) -> Result<HashMap<usize, usize>, DexError> {
+        fn compute_payload_bases(
+            &self,
+            labels: &HashMap<String, usize>,
+        ) -> Result<HashMap<usize, usize>, DexError> {
             let mut bases = HashMap::new();
             for inst in &self.instructions {
                 if let LoweredKind::Format31t { label, .. } = &inst.kind {
-                    let payload_offset = self.labels.get(label).ok_or_else(|| {
+                    let payload_offset = labels.get(label).ok_or_else(|| {
                         DexError::new(&format!(
                             "label :{} referenced by {} not defined",
                             label, inst.opcode.name
@@ -551,35 +632,20 @@ pub mod assemble {
             Ok(bases)
         }
 
+        /// Widen the branch at `index` to its next encoding. The offsets it
+        /// invalidates are not patched here; the next [`Self::compute_layout`]
+        /// derives them all afresh.
         fn promote_branch(&mut self, index: usize) -> Result<(), DexError> {
             let inst = self.instructions.get_mut(index).ok_or_else(|| {
                 DexError::new("branch overflow reported for out-of-range instruction index")
             })?;
-            let (old_size, delta) = inst.widen_branch()?;
-            if delta == 0 {
+            let (old_size, new_size) = inst.widen_branch()?;
+            if new_size == old_size {
                 return Err(DexError::new(
                     "branch offset does not fit even in widest encoding",
                 ));
             }
-            self.adjust_offsets(index, old_size, delta);
             Ok(())
-        }
-
-        fn adjust_offsets(&mut self, index: usize, old_size: usize, new_size: usize) {
-            if new_size == old_size {
-                return;
-            }
-            let delta = new_size - old_size;
-            let changed_offset = self.instructions[index].offset_cu;
-            for inst in self.instructions.iter_mut().skip(index + 1) {
-                inst.offset_cu += delta;
-            }
-            for value in self.labels.values_mut() {
-                if *value > changed_offset {
-                    *value += delta;
-                }
-            }
-            self.current_offset_cu += delta;
         }
     }
 
@@ -609,6 +675,18 @@ pub mod assemble {
 
         fn set_opcode(&mut self, opcode: &'static Opcode) {
             self.opcode = opcode;
+        }
+
+        /// Switch and array payloads must start on a 4-byte boundary, which for a
+        /// stream of 2-byte code units means an even offset. ART rejects a class
+        /// with `unaligned switch table` otherwise.
+        fn needs_alignment(&self) -> bool {
+            matches!(
+                self.kind,
+                LoweredKind::ArrayPayload { .. }
+                    | LoweredKind::PackedSwitchPayload { .. }
+                    | LoweredKind::SparseSwitchPayload { .. }
+            )
         }
 
         fn size_cu(&self) -> usize {

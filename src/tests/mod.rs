@@ -3,6 +3,7 @@ mod opcode_tests;
 mod dexdump_cases;
 mod dex_debug;
 mod multi_dex;
+mod switch_alignment;
 mod annotations;
 mod kotlin_metadata;
 mod aab;
