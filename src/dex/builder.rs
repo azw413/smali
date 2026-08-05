@@ -1680,18 +1680,27 @@ impl DexPoolBuilder {
             }
         }
 
-        let mut types = Vec::with_capacity(self.type_descriptors.len());
-        let mut type_index = HashMap::with_capacity(self.type_descriptors.len());
+        // `type_ids` is ordered by `string_idx`, not by descriptor text. Those
+        // coincide for ASCII descriptors, but a class or type renamed to
+        // something outside the BMP does not have to agree with the pool's
+        // UTF-16 ordering, so take the order from the indices themselves.
+        let mut type_entries = Vec::with_capacity(self.type_descriptors.len());
         for desc in self.type_descriptors.into_iter() {
             let string_idx = *string_index.get(&desc).ok_or_else(|| {
                 DexError::new(&format!("missing string for type descriptor {desc}"))
             })?;
-            let idx = types.len() as u32;
+            type_entries.push((desc, string_idx));
+        }
+        type_entries.sort_by_key(|(_, string_idx)| *string_idx);
+
+        let mut types = Vec::with_capacity(type_entries.len());
+        let mut type_index = HashMap::with_capacity(type_entries.len());
+        for (idx, (desc, string_idx)) in type_entries.into_iter().enumerate() {
             types.push(TypeEntry {
                 descriptor: desc.clone(),
                 string_idx,
             });
-            type_index.insert(desc, idx);
+            type_index.insert(desc, idx as u32);
         }
 
         let mut proto_entries = Vec::with_capacity(self.proto_keys.len());
@@ -1724,8 +1733,11 @@ impl DexPoolBuilder {
             proto_index_map.insert(key, idx as u32);
         }
 
-        let mut fields = Vec::with_capacity(self.field_keys.len());
-        let mut field_index_map = HashMap::with_capacity(self.field_keys.len());
+        // Like `method_ids` below, `field_ids` is ordered by the resolved
+        // indices rather than by the descriptors and names behind them: a field
+        // named outside the BMP would otherwise be placed by scalar order while
+        // its `name_idx` came from the UTF-16-ordered pool.
+        let mut keyed_fields = Vec::with_capacity(self.field_keys.len());
         for key in self.field_keys.into_iter() {
             let class_idx = *type_index
                 .get(key.class_descriptor())
@@ -1736,6 +1748,15 @@ impl DexPoolBuilder {
             let name_idx = *string_index
                 .get(key.name())
                 .ok_or_else(|| DexError::new("missing string for field name"))?;
+            keyed_fields.push((key, class_idx, name_idx, type_idx));
+        }
+        keyed_fields.sort_by_key(|(_, class_idx, name_idx, type_idx)| {
+            (*class_idx, *name_idx, *type_idx)
+        });
+
+        let mut fields = Vec::with_capacity(keyed_fields.len());
+        let mut field_index_map = HashMap::with_capacity(keyed_fields.len());
+        for (key, class_idx, name_idx, type_idx) in keyed_fields {
             let idx = fields.len() as u32;
             fields.push(FieldEntry {
                 class_idx,
@@ -2428,21 +2449,66 @@ fn access_flags_from_modifiers(modifiers: &[Modifier]) -> u32 {
     flags
 }
 
+/// Order two pool strings the way `string_ids` must be sorted.
+///
+/// The spec says "sorted by string contents, using UTF-16 code point values",
+/// which reads like Unicode scalar order — what Rust's `str: Ord` gives — but
+/// ART's `DexFileVerifier` compares UTF-16 *code units*. The two agree across
+/// the whole BMP and disagree in exactly one place: a supplementary character
+/// (>= U+10000) is encoded as a surrogate pair starting in `0xD800..=0xDBFF`,
+/// which is *below* the BMP range `0xE000..=0xFFFF` even though its scalar
+/// value is far above it. So any string starting in the private-use area or
+/// beyond sorts on the wrong side of any string starting with a supplementary
+/// character, and ART rejects the entire file:
+///
+/// ```text
+/// Failure to verify dex file: Out-of-order string_ids: '<a>' then '<b>'
+/// ```
+///
+/// `Iterator::cmp` supplies the shorter-is-less tie-break DEX also wants.
+fn cmp_dex_strings(a: &str, b: &str) -> Ordering {
+    a.encode_utf16().cmp(b.encode_utf16())
+}
+
+/// A pool string that sorts the way DEX requires. See [`cmp_dex_strings`].
+///
+/// A newtype rather than a comparator passed to `sort_by`, so that the pool
+/// cannot be assembled in scalar order by accident: every ordered container it
+/// passes through is keyed on this type.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct PoolString(String);
+
+impl Ord for PoolString {
+    fn cmp(&self, other: &Self) -> Ordering {
+        cmp_dex_strings(&self.0, &other.0)
+    }
+}
+
+impl PartialOrd for PoolString {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// No `Borrow<str>`: that trait requires the borrowed and owned orderings to
+// agree, and the whole point of this type is that they do not. Looking a
+// `&str` up in a `BTreeSet<PoolString>` would walk a UTF-16-ordered tree using
+// scalar order and miss entries near the divergence.
+
 #[derive(Default, Clone)]
-struct StringCollector(BTreeSet<String>);
+struct StringCollector(BTreeSet<PoolString>);
 
 impl StringCollector {
     fn insert<S: AsRef<str>>(&mut self, value: S) {
-        let val = value.as_ref();
-        self.0.insert(val.to_string());
+        self.0.insert(PoolString(value.as_ref().to_string()));
     }
 
     fn into_vec(self) -> (Vec<String>, HashMap<String, u32>) {
         let mut map = HashMap::new();
         let mut vec = Vec::with_capacity(self.0.len());
         for (idx, value) in self.0.into_iter().enumerate() {
-            map.insert(value.clone(), idx as u32);
-            vec.push(value);
+            map.insert(value.0.clone(), idx as u32);
+            vec.push(value.0);
         }
         (vec, map)
     }

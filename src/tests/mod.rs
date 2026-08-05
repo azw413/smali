@@ -4,6 +4,7 @@ mod dexdump_cases;
 mod dex_debug;
 mod multi_dex;
 mod switch_alignment;
+mod string_id_order;
 mod annotations;
 mod kotlin_metadata;
 mod aab;
