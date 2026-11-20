@@ -2,7 +2,7 @@ use crate::types::{parse_methodsignature, parse_typesignature};
 use nom::Parser;
 use nom::bytes::complete::escaped;
 use nom::character::complete::{none_of, one_of};
-use nom::combinator::map;
+use nom::combinator::{map, opt};
 use nom::multi::separated_list0;
 use nom::sequence::pair;
 use nom::{
@@ -122,17 +122,64 @@ impl fmt::Display for SmaliRegister {
     }
 }
 
-/// A symbolic range of registers as written in smali, e.g. "{v0 .. v6}"
+/// A symbolic range of registers as written in smali, e.g. "{v0 .. v6}".
+///
+/// A range may be empty. The `/range` instruction formats carry the register
+/// count in a single byte, so a count of zero is well-formed, and both the DEX
+/// disassembler here and baksmali write it as `{}`. The usual source is
+/// `invoke-custom/range {}, <call site>`: a bootstrap method that takes no
+/// arguments beyond the lookup, name and type the VM supplies itself.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RegisterRange {
-    pub start: SmaliRegister,
-    pub end: SmaliRegister,
+pub enum RegisterRange {
+    /// A range covering no registers at all, written `{}`.
+    Empty,
+    /// An inclusive span of registers, written `{v0 .. v6}`.
+    Span {
+        start: SmaliRegister,
+        end: SmaliRegister,
+    },
+}
+
+impl RegisterRange {
+    /// An inclusive range running from `start` to `end`.
+    pub fn new(start: SmaliRegister, end: SmaliRegister) -> Self {
+        RegisterRange::Span { start, end }
+    }
+
+    /// The empty range, written `{}`.
+    pub fn empty() -> Self {
+        RegisterRange::Empty
+    }
+
+    /// True when this range covers no registers.
+    pub fn is_empty(&self) -> bool {
+        matches!(self, RegisterRange::Empty)
+    }
+
+    /// The first register of the range, or `None` when it is empty.
+    pub fn start(&self) -> Option<&SmaliRegister> {
+        match self {
+            RegisterRange::Empty => None,
+            RegisterRange::Span { start, .. } => Some(start),
+        }
+    }
+
+    /// The last register of the range, or `None` when it is empty.
+    pub fn end(&self) -> Option<&SmaliRegister> {
+        match self {
+            RegisterRange::Empty => None,
+            RegisterRange::Span { end, .. } => Some(end),
+        }
+    }
 }
 
 impl fmt::Display for RegisterRange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Print in smali style: "{v0 .. v6}"
-        write!(f, "{{ {} .. {} }}", self.start, self.end)
+        // Print in smali style: "{v0 .. v6}", or "{}" when the range is empty.
+        match self {
+            RegisterRange::Empty => write!(f, "{{}}"),
+            RegisterRange::Span { start, end } => write!(f, "{{ {start} .. {end} }}"),
+        }
     }
 }
 
@@ -2048,14 +2095,23 @@ fn parse_execute_inline_range(input: &str) -> IResult<&str, DexOp> {
 }
 
 /// Parses a register range enclosed in braces, e.g. "{v0 .. v6}".
-/// Returns a tuple (first_reg, last_reg)
+///
+/// The empty range "{}" is accepted too: the `/range` formats encode the
+/// register count in a byte, so zero registers is legal, and that is what the
+/// disassembler emits for such an instruction.
 fn parse_register_range(input: &str) -> IResult<&str, RegisterRange> {
     let (input, _) = delimited(space0, char('{'), space0).parse(input)?;
+    // "{}" - a zero-register range. Checked before parse_register so the
+    // closing brace is not mistaken for a malformed register name.
+    let (input, empty) = opt(delimited(space0, char('}'), space0)).parse(input)?;
+    if empty.is_some() {
+        return Ok((input, RegisterRange::Empty));
+    }
     let (input, start) = parse_register(input)?;
     let (input, _) = delimited(space0, tag(".."), space0).parse(input)?;
     let (input, end) = parse_register(input)?;
     let (input, _) = delimited(space0, char('}'), space0).parse(input)?;
-    Ok((input, RegisterRange { start, end }))
+    Ok((input, RegisterRange::new(start, end)))
 }
 
 fn parse_proto_descriptor(input: &str) -> IResult<&str, String> {
@@ -2941,6 +2997,27 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_register_range() {
+        // A /range instruction with zero registers is written "{}".
+        let input = "invoke-custom/range {}, \"Lcom/example/B;->b(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;::a()Ljava/lang/Object;\"";
+        let (rest, instr) = parse_op(input).unwrap();
+        assert!(rest.is_empty());
+        match &instr {
+            DexOp::InvokeCustomRange { range, .. } => {
+                assert_eq!(range, &RegisterRange::Empty);
+                assert!(range.is_empty());
+                assert_eq!(range.start(), None);
+            }
+            other => panic!("expected InvokeCustomRange, got {other:?}"),
+        }
+        // and it must render back to "{}" so the text round-trips.
+        assert!(
+            instr.to_string().starts_with("invoke-custom/range {},"),
+            "did not render as an empty range: {instr}"
+        );
+    }
+
+    #[test]
     fn test_filled_new_array_range() {
         let input = "filled-new-array/range {v0 .. v2}, [I";
         let (rest, instr) = parse_op(input).unwrap();
@@ -2948,10 +3025,7 @@ mod tests {
         assert_eq!(
             instr,
             DexOp::FilledNewArrayRange {
-                registers: RegisterRange {
-                    start: v(0),
-                    end: v(2)
-                },
+                registers: RegisterRange::new(v(0), v(2)),
                 class: "[I".to_string()
             }
         );

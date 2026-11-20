@@ -3393,8 +3393,14 @@ pub mod assemble {
             range: &RegisterRange,
             layout: &MethodRegisterLayout,
         ) -> Result<(u16, u16), DexError> {
-            let start = resolve_register(layout, &range.start)?;
-            let end = resolve_register(layout, &range.end)?;
+            let (start, end) = match range {
+                // A zero-register range. The CCCC field is unused when the
+                // count is zero, so emit a first register of 0.
+                RegisterRange::Empty => return Ok((0, 0)),
+                RegisterRange::Span { start, end } => (start, end),
+            };
+            let start = resolve_register(layout, start)?;
+            let end = resolve_register(layout, end)?;
             if end < start {
                 return Err(DexError::new(&format!(
                     "{} range end precedes start",

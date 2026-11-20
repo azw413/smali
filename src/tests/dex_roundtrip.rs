@@ -1043,6 +1043,98 @@ fn invoke_custom_polymorphic_handle_roundtrip() {
 
 }
 
+const EMPTY_RANGE_SMALI: &str = r#"
+.class public Lcom/example/EmptyRange;
+.super Ljava/lang/Object;
+
+.method public static noArgs()Ljava/lang/Object;
+    .registers 1
+    invoke-custom/range {}, "Lcom/example/Bootstrap;->bootstrap(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;::noArgs()Ljava/lang/Object;"
+    move-result-object v0
+    return-object v0
+.end method
+
+.method public static emptyArray()[I
+    .registers 1
+    filled-new-array/range {}, [I
+    move-result-object v0
+    return-object v0
+.end method
+"#;
+
+/// A `/range` instruction may cover zero registers: the count lives in a single
+/// byte of the 3rc encoding, and the disassembler writes a count of zero as
+/// `{}`. Reparsing that text used to fail with a nom `Char` error because the
+/// register-range parser demanded `{ reg .. reg }`.
+#[test]
+fn invoke_custom_empty_range_roundtrip() {
+    use crate::dex::builder::build_dex_file_bytes;
+    use crate::types::SmaliClass;
+
+    let class = SmaliClass::from_smali(EMPTY_RANGE_SMALI).expect("parse class");
+
+    // The empty range must survive parsing intact.
+    let parsed_ops: Vec<String> = class
+        .methods
+        .iter()
+        .flat_map(|m| &m.ops)
+        .filter_map(|op| match op {
+            SmaliOp::Op(dex_op) => Some(dex_op.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        parsed_ops.iter().any(|o| o.starts_with("invoke-custom/range {}")),
+        "parsed ops lost the empty range: {parsed_ops:?}"
+    );
+
+    // smali -> DEX bytes -> reparse. to_smali() is the step that previously
+    // failed: it disassembles 3rc to "{}" and feeds that back to the parser.
+    let bytes = build_dex_file_bytes(std::slice::from_ref(&class)).expect("assemble to DEX");
+    let reparsed = DexFile::from_bytes(&bytes).expect("reparse DEX from bytes");
+    let rebuilt_classes = reparsed.to_smali().expect("convert reparsed DEX to smali");
+    assert_eq!(rebuilt_classes.len(), 1);
+
+    let rebuilt_ops: Vec<String> = rebuilt_classes[0]
+        .methods
+        .iter()
+        .flat_map(|m| &m.ops)
+        .filter_map(|op| match op {
+            SmaliOp::Op(dex_op) => Some(dex_op.to_string()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        parsed_ops.len(),
+        rebuilt_ops.len(),
+        "dex op count differs after roundtrip: {parsed_ops:?} vs {rebuilt_ops:?}"
+    );
+    let invoke = rebuilt_ops
+        .iter()
+        .find(|o| o.starts_with("invoke-custom/range"))
+        .unwrap_or_else(|| panic!("rebuilt missing invoke-custom/range: {rebuilt_ops:?}"));
+    assert!(
+        invoke.starts_with("invoke-custom/range {},"),
+        "expected an empty register range, got {invoke}"
+    );
+    assert!(
+        invoke.contains("::noArgs()Ljava/lang/Object;"),
+        "call site did not survive the roundtrip: {invoke}"
+    );
+
+    // The same 3rc encoding, reached through a type reference rather than a
+    // call site: filled-new-array/range with no registers builds an empty array.
+    let filled = rebuilt_ops
+        .iter()
+        .find(|o| o.starts_with("filled-new-array/range"))
+        .unwrap_or_else(|| panic!("rebuilt missing filled-new-array/range: {rebuilt_ops:?}"));
+    assert_eq!(
+        filled, "filled-new-array/range {}, [I",
+        "empty filled-new-array/range did not survive the roundtrip"
+    );
+}
+
 // Helpers for the link_data / hiddenapi pass-through tests below: take a freshly
 // built DEX byte stream and append a synthetic section of `payload` bytes, updating
 // the relevant header fields and the map list to point at it. This lets us verify

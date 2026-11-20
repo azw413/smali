@@ -87,6 +87,26 @@ fn patch_dex_entry(apk: &mut ApkFile, entry_name: &str) -> Result<bool, Box<dyn 
 
 Take a look at the full examples for a better idea and also an example of how to update the Android manifest file.
 
+## Upgrading to 0.7
+
+`RegisterRange` is now an enum rather than a struct. A `/range` instruction may
+legally cover zero registers — the count lives in a single byte of the encoding,
+and baksmali writes a count of zero as `{}` — and the old struct had no way to
+say so. Instructions such as `invoke-custom/range {}` came out of the
+disassembler correctly but failed to parse back in.
+
+```rust
+// 0.6
+RegisterRange { start: v(0), end: v(2) }
+
+// 0.7
+RegisterRange::new(v(0), v(2))   // same thing; or RegisterRange::Span { start, end }
+RegisterRange::empty()           // the new "{}" case
+```
+
+`start()` and `end()` are now methods returning `Option<&SmaliRegister>`, and
+`is_empty()` distinguishes the two cases.
+
 ## App Bundles (AAB)
 
 An `.aab` is a zip, so `ApkFile` opens and writes one unchanged. What differs is
